@@ -1,0 +1,26 @@
+name: stockbotTOM
+
+on:
+  schedule:
+    - cron: "0 23 * * *"  # 8:00 JST
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run bot
+      env:
+        LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+      run: python main.py
