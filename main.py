@@ -137,7 +137,12 @@ def enrich_technicals(df: pd.DataFrame) -> pd.DataFrame:
     df["ma75"] = df["close"].rolling(75).mean()
     df = add_rsi(df, period=14)
     df = add_atr(df, period=14)
-    df["turnover"] = df["close"] * df["Volume"].astype(float)
+    vol = df["Volume"]
+if isinstance(vol, pd.DataFrame):
+    vol = vol.iloc[:,0]
+
+df["turnover"] = df["close"].astype(float) * vol.astype(float)
+
     return df
 
 def fetch_history(ticker: str) -> pd.DataFrame | None:
