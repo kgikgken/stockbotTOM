@@ -51,8 +51,10 @@ RISK_SECTORS = [
 # ユーティリティ
 # ==========================================
 
+
 def jst_now() -> datetime:
     return datetime.now(timezone(timedelta(hours=9)))
+
 
 def safe_float(x, default=np.nan) -> float:
     if isinstance(x, pd.Series):
@@ -62,6 +64,7 @@ def safe_float(x, default=np.nan) -> float:
     except Exception:
         return float(default)
 
+
 def load_universe() -> pd.DataFrame:
     df = pd.read_csv(UNIVERSE_CSV_PATH)
     df = df.dropna(subset=["ticker", "name", "sector"])
@@ -70,6 +73,7 @@ def load_universe() -> pd.DataFrame:
     df["sector"] = df["sector"].astype(str)
     return df
 
+
 def load_earnings() -> pd.DataFrame:
     if not os.path.exists(EARNINGS_CSV_PATH):
         print("WARN: earnings_jpx.csv が見つからないため、決算フィルターは無効（全通し）")
@@ -77,15 +81,20 @@ def load_earnings() -> pd.DataFrame:
     df = pd.read_csv(EARNINGS_CSV_PATH)
     df["ticker"] = df["ticker"].astype(str)
     if "earnings_date" in df.columns:
-        df["earnings_date"] = pd.to_datetime(df["earnings_date"], errors="coerce").dt.date
+        df["earnings_date"] = pd.to_datetime(
+            df["earnings_date"], errors="coerce"
+        ).dt.date
     else:
         df["earnings_date"] = pd.NaT
     return df
 
+
 def load_credit() -> pd.DataFrame:
     if not os.path.exists(CREDIT_CSV_PATH):
         print("WARN: credit_jpx.csv が見つからないため、信用残フィルターは無効（全通し）")
-        return pd.DataFrame(columns=["ticker", "margin_ratio", "margin_buy", "margin_sell"])
+        return pd.DataFrame(
+            columns=["ticker", "margin_ratio", "margin_buy", "margin_sell"]
+        )
     df = pd.read_csv(CREDIT_CSV_PATH)
     df["ticker"] = df["ticker"].astype(str)
     for col in ["margin_ratio", "margin_buy", "margin_sell"]:
@@ -95,6 +104,7 @@ def load_credit() -> pd.DataFrame:
             df[col] = np.nan
     return df
 
+
 UNIVERSE = load_universe()
 EARNINGS_DF = load_earnings()
 CREDIT_DF = load_credit()
@@ -102,6 +112,7 @@ CREDIT_DF = load_credit()
 # ==========================================
 # テクニカル指標
 # ==========================================
+
 
 def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     delta = df["close"].diff()
@@ -112,6 +123,7 @@ def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     rs = avg_gain / avg_loss
     df["rsi"] = 100 - (100 / (1 + rs))
     return df
+
 
 def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     high = df["High"].astype(float)
@@ -128,6 +140,7 @@ def add_atr(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     df["atr"] = tr.rolling(period).mean()
     return df
 
+
 def enrich_technicals(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["close"] = df["Close"].astype(float)
@@ -137,16 +150,15 @@ def enrich_technicals(df: pd.DataFrame) -> pd.DataFrame:
     df["ma75"] = df["close"].rolling(75).mean()
     df = add_rsi(df, period=14)
     df = add_atr(df, period=14)
+
+    # Volume が DataFrame になっても落ちないように防御
     vol = df["Volume"]
-if isinstance(vol, pd.DataFrame):
-   vol = df["Volume"]
-if isinstance(vol, pd.DataFrame):
-    vol = vol.iloc[:,0]
-
-df["turnover"] = df["close"].astype(float) * vol.astype(float)
-
+    if isinstance(vol, pd.DataFrame):
+        vol = vol.iloc[:, 0]
+    df["turnover"] = df["close"] * vol.astype(float)
 
     return df
+
 
 def fetch_history(ticker: str) -> pd.DataFrame | None:
     try:
@@ -159,17 +171,21 @@ def fetch_history(ticker: str) -> pd.DataFrame | None:
         )
     except Exception:
         return None
+
     if df is None or df.empty:
         return None
+
     df = df.tail(120)
     if len(df) < MIN_HISTORY_DAYS:
         return None
+
     df = enrich_technicals(df)
     return df
 
 # ==========================================
 # ハードフィルター
 # ==========================================
+
 
 def passes_liquidity(df: pd.DataFrame) -> bool:
     recent = df.tail(20)
@@ -178,10 +194,12 @@ def passes_liquidity(df: pd.DataFrame) -> bool:
         return False
     return avg_turnover >= MIN_AVG_TURNOVER
 
+
 def passes_volatility(df: pd.DataFrame) -> bool:
     recent = df.tail(60).copy()
     if recent["atr"].isna().all():
         return False
+
     last = recent.iloc[-1]
     atr = safe_float(last["atr"])
     close = safe_float(last["close"])
@@ -197,6 +215,7 @@ def passes_volatility(df: pd.DataFrame) -> bool:
         return False
 
     return True
+
 
 def passes_trend(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
@@ -215,11 +234,9 @@ def passes_trend(df: pd.DataFrame) -> bool:
 
     return True
 
+
 def passes_event_risk(ticker: str, df: pd.DataFrame) -> bool:
-    """
-    決算日 ±3営業日を除外。
-    earnings_jpx.csv にない銘柄はスルー。
-    """
+    """決算日 ±3営業日を除外。CSVにない銘柄はスルー。"""
     if EARNINGS_DF.empty:
         return True
 
@@ -231,19 +248,17 @@ def passes_event_risk(ticker: str, df: pd.DataFrame) -> bool:
     if pd.isna(earnings_date):
         return True
 
-    # df の最終日（直近営業日）
     last_date = df.index[-1].date()
     diff = (earnings_date - last_date).days
-    # 決算 ±3日 は除外
     if -3 <= diff <= 3:
         return False
 
     return True
 
+
 def passes_credit_risk(ticker: str, df: pd.DataFrame) -> bool:
     """
     信用倍率・信用買残の重さから危険銘柄を除外
-    条件：
       - 信用倍率 <= 5
       - 信用買残 / 直近1週間出来高 <= 20
     """
@@ -273,14 +288,11 @@ def passes_credit_risk(ticker: str, df: pd.DataFrame) -> bool:
 # 出来高サイクル & 異常判定
 # ==========================================
 
+
 def analyze_volume_state(df: pd.DataFrame) -> dict:
     vol = df["Volume"].astype(float)
     if len(vol) < 30:
-        return {
-            "ok": False,
-            "soldout": False,
-            "spike": False,
-        }
+        return {"ok": False, "soldout": False, "spike": False}
 
     v20 = safe_float(vol.tail(20).mean())
     v10 = safe_float(vol.tail(10).mean())
@@ -304,6 +316,7 @@ def analyze_volume_state(df: pd.DataFrame) -> dict:
 # 押し目判定 & Entry Edge
 # ==========================================
 
+
 def is_deep_pullback(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     close = safe_float(last["close"])
@@ -322,6 +335,7 @@ def is_deep_pullback(df: pd.DataFrame) -> bool:
 
     return True
 
+
 def analyze_candle(df: pd.DataFrame) -> dict:
     last = df.iloc[-1]
     o = safe_float(last["Open"])
@@ -338,9 +352,8 @@ def analyze_candle(df: pd.DataFrame) -> dict:
         if (lower_shadow / range_ > 0.35) and (lower_shadow > body):
             long_lower = True
 
-    return {
-        "long_lower": long_lower
-    }
+    return {"long_lower": long_lower}
+
 
 def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple[int, list[str]]:
     last = df.iloc[-1]
@@ -349,7 +362,7 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple
     rsi = safe_float(last["rsi"])
 
     score = 0
-    reasons = []
+    reasons: list[str] = []
 
     if passes_trend(df):
         score += 20
@@ -396,6 +409,7 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple
 # マクロ・地合い・テーマスコア
 # ==========================================
 
+
 def fetch_last_and_change(ticker: str, period: str = "5d") -> tuple[float, float]:
     try:
         df = yf.download(
@@ -420,8 +434,9 @@ def fetch_last_and_change(ticker: str, period: str = "5d") -> tuple[float, float
     chg = (last / prev - 1.0) * 100.0
     return last, chg
 
+
 def calc_market_summary() -> dict:
-    lines = []
+    lines: list[str] = []
     score = 50
 
     dia_last, dia_chg = fetch_last_and_change("DIA")
@@ -484,7 +499,7 @@ def calc_market_summary() -> dict:
             f"- ドル円 {usdjpy_last:.1f}円（{usdjpy_chg:+.2f}％）、外需/輸出に{'追い風' if usdjpy_chg > 0 else '逆風気味'}"
         )
 
-    asia_eu = []
+    asia_eu: list[str] = []
     if np.isfinite(vkg_chg):
         asia_eu.append(f"欧州 {vkg_chg:+.1f}％")
     if np.isfinite(mchi_chg):
@@ -517,6 +532,7 @@ def calc_market_summary() -> dict:
         "regime": regime,
     }
 
+
 def calc_theme_score(sector: str, market: dict) -> int:
     base = 50
     regime = market["regime"]
@@ -534,6 +550,7 @@ def calc_theme_score(sector: str, market: dict) -> int:
 
     base = int(max(0, min(100, base)))
     return base
+
 
 def calc_market_fit(sector: str, market: dict) -> int:
     regime = market["regime"]
@@ -555,6 +572,7 @@ def calc_market_fit(sector: str, market: dict) -> int:
         if sector in RISK_SECTORS:
             return 60
         return 55
+
 
 def decide_risk_regime_action(market: dict) -> dict:
     regime = market["regime"]
@@ -585,18 +603,20 @@ def decide_risk_regime_action(market: dict) -> dict:
 # 銘柄スクリーニング
 # ==========================================
 
+
 def classify_core_watch(entry_edge: int, hard_pass: bool) -> str | None:
     if not hard_pass:
         return None
-
     if entry_edge >= 75:
         return "core"
     if entry_edge >= 60:
         return "watch"
     return None
 
+
 def calc_final_rank(entry_edge: int, theme_score: int, market_fit: int) -> float:
     return entry_edge * 0.55 + theme_score * 0.30 + market_fit * 0.15
+
 
 def calc_take_profit(df: pd.DataFrame) -> int:
     last = safe_float(df["close"].iloc[-1])
@@ -609,12 +629,13 @@ def calc_take_profit(df: pd.DataFrame) -> int:
     tp = recent_high * 0.6 + ma10 * 0.4
     return int(tp)
 
+
 def calc_stop_loss(df: pd.DataFrame) -> int:
     last = safe_float(df["close"].iloc[-1])
     ma25 = safe_float(df["ma25"].iloc[-1])
     recent_low = safe_float(df["close"].tail(5).min())
 
-    candidates = []
+    candidates: list[float] = []
     if np.isfinite(recent_low):
         candidates.append(recent_low)
     if np.isfinite(ma25):
@@ -627,9 +648,10 @@ def calc_stop_loss(df: pd.DataFrame) -> int:
 
     return int(min(candidates))
 
+
 def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
-    core_rows = []
-    watch_rows = []
+    core_rows: list[dict] = []
+    watch_rows: list[dict] = []
 
     for _, row in UNIVERSE.iterrows():
         ticker = row["ticker"]
@@ -658,7 +680,6 @@ def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
         entry_edge, reasons_edge = calc_entry_edge(df, volume_state, candle)
 
         hard_pass = True
-
         class_type = classify_core_watch(entry_edge, hard_pass)
         if class_type is None:
             continue
@@ -683,7 +704,7 @@ def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
         tp = calc_take_profit(df)
         sl = calc_stop_loss(df)
 
-        reasons = []
+        reasons: list[str] = []
         if is_deep_pullback(df):
             reasons.append("深めの押し目（RSI & 25MA）")
         reasons.extend(reasons_edge)
@@ -722,6 +743,7 @@ def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
 # ==========================================
 # メッセージ組み立て
 # ==========================================
+
 
 def build_message() -> str:
     today = jst_now().strftime("%Y-%m-%d")
@@ -816,6 +838,7 @@ def build_message() -> str:
 # LINE 送信
 # ==========================================
 
+
 def send_line(message: str) -> None:
     token = os.getenv("LINE_TOKEN")
     if not token:
@@ -842,10 +865,12 @@ def send_line(message: str) -> None:
 # メイン
 # ==========================================
 
-def main():
+
+def main() -> None:
     msg = build_message()
     print(msg)
     send_line(msg)
+
 
 if __name__ == "__main__":
     main()
