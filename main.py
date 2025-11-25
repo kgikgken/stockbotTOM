@@ -139,9 +139,12 @@ def enrich_technicals(df: pd.DataFrame) -> pd.DataFrame:
     df = add_atr(df, period=14)
     vol = df["Volume"]
 if isinstance(vol, pd.DataFrame):
+   vol = df["Volume"]
+if isinstance(vol, pd.DataFrame):
     vol = vol.iloc[:,0]
 
 df["turnover"] = df["close"].astype(float) * vol.astype(float)
+
 
     return df
 
