@@ -355,6 +355,34 @@ def analyze_candle(df: pd.DataFrame) -> dict:
     return {"long_lower": long_lower}
 
 
+def calc_trend_strength(df: pd.DataFrame) -> int:
+    """トレンドの角度・発散度をスコア化（最大20点）"""
+    if len(df) < 2:
+        return 0
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    ma25 = safe_float(last["ma25"])
+    ma25_prev = safe_float(prev["ma25"])
+    ma75 = safe_float(last["ma75"])
+
+    if not all(np.isfinite(v) for v in [ma25, ma25_prev, ma75]):
+        return 0
+
+    slope = (ma25 - ma25_prev) / ma25_prev  # 1日あたりの傾き
+    spread = (ma25 - ma75) / ma75           # 25MAと75MAの発散度合い
+
+    score = 0
+    if slope > 0:
+        score += min(10, slope * 2000)   # 0.5%/日 ≒ +10点上限
+    if spread > 0:
+        score += min(10, spread * 50)    # 20%発散 ≒ +10点上限
+
+    score = int(max(0, min(20, score)))
+    return score
+
+
 def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple[int, list[str]]:
     last = df.iloc[-1]
     close = safe_float(last["close"])
@@ -364,10 +392,19 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple
     score = 0
     reasons: list[str] = []
 
+    # ベースのトレンド判定
     if passes_trend(df):
         score += 20
         reasons.append("上昇トレンド継続（10MA≥25MA≥75MA）")
 
+    # トレンド強度スコア
+    trend_strength = calc_trend_strength(df)
+    if trend_strength > 0:
+        score += trend_strength
+        reasons.append(f"トレンド強度 +{trend_strength}点")
+
+    # 25MA からの距離
+    dist = np.inf
     if np.isfinite(close) and np.isfinite(ma25) and ma25 > 0:
         dist = abs(close - ma25) / ma25
         if dist <= 0.005:
@@ -380,6 +417,7 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple
             score += 5
             reasons.append("25MA圏内")
 
+    # RSI
     if np.isfinite(rsi):
         if RSI_MIN <= rsi <= 32:
             score += 25
@@ -388,6 +426,13 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple
             score += 15
             reasons.append("RSI押し目ゾーン")
 
+    # 黄金ゾーン（RSI×25MA）のボーナス
+    if np.isfinite(rsi) and np.isfinite(ma25) and ma25 > 0 and np.isfinite(dist):
+        if 0 <= dist <= 0.005 and 27 <= rsi <= 33:
+            score += 10
+            reasons.append("黄金ゾーン（RSI×25MA）")
+
+    # 出来高サイクル
     if volume_state["ok"]:
         score += 20
         reasons.append("出来高 減→増 の反転傾向")
@@ -398,6 +443,7 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict) -> tuple
         score -= 20
         reasons.append("出来高スパイク（ニュース系リスク）")
 
+    # ローソク足
     if candle["long_lower"]:
         score += 10
         reasons.append("下ヒゲ反転気味")
@@ -607,15 +653,25 @@ def decide_risk_regime_action(market: dict) -> dict:
 def classify_core_watch(entry_edge: int, hard_pass: bool) -> str | None:
     if not hard_pass:
         return None
-    if entry_edge >= 75:
+    # 最強版：Coreの基準をやや緩和（72点以上）
+    if entry_edge >= 72:
         return "core"
     if entry_edge >= 60:
         return "watch"
     return None
 
 
-def calc_final_rank(entry_edge: int, theme_score: int, market_fit: int) -> float:
-    return entry_edge * 0.55 + theme_score * 0.30 + market_fit * 0.15
+def calc_final_rank(entry_edge: int, theme_score: int, market_fit: int, market: dict) -> float:
+    """地合いに応じてウェイトを動的に変更"""
+    regime = market["regime"]
+    if regime == "risk_on":
+        w_e, w_t, w_m = 0.65, 0.20, 0.15
+    elif regime == "risk_off":
+        w_e, w_t, w_m = 0.50, 0.25, 0.25
+    else:
+        w_e, w_t, w_m = 0.55, 0.25, 0.20
+
+    return entry_edge * w_e + theme_score * w_t + market_fit * w_m
 
 
 def calc_take_profit(df: pd.DataFrame) -> int:
@@ -647,6 +703,24 @@ def calc_stop_loss(df: pd.DataFrame) -> int:
         return int(last) if np.isfinite(last) else 0
 
     return int(min(candidates))
+
+
+def calc_entry_price(df: pd.DataFrame) -> int:
+    """
+    推奨IN価格（entry_price）
+    25MAを軸に、5・10MAをブレンド
+    """
+    last = df.iloc[-1]
+    ma5 = safe_float(last["ma5"])
+    ma10 = safe_float(last["ma10"])
+    ma25 = safe_float(last["ma25"])
+
+    vals = [v for v in [ma5, ma10, ma25] if np.isfinite(v)]
+    if not vals:
+        return 0
+
+    entry = ma5 * 0.2 + ma10 * 0.2 + ma25 * 0.6
+    return int(entry)
 
 
 def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
@@ -686,7 +760,7 @@ def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
 
         theme_score = calc_theme_score(sector, market)
         market_fit = calc_market_fit(sector, market)
-        final_rank = calc_final_rank(entry_edge, theme_score, market_fit)
+        final_rank = calc_final_rank(entry_edge, theme_score, market_fit, market)
 
         last = df.iloc[-1]
         price = safe_float(last["close"])
@@ -703,6 +777,7 @@ def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
 
         tp = calc_take_profit(df)
         sl = calc_stop_loss(df)
+        entry_price = calc_entry_price(df)
 
         reasons: list[str] = []
         if is_deep_pullback(df):
@@ -727,6 +802,7 @@ def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
             "buy_high": buy_high,
             "tp": tp,
             "sl": sl,
+            "entry_price": entry_price,
             "reasons": " / ".join(sorted(set(reasons))),
         }
 
@@ -787,6 +863,7 @@ def build_message() -> str:
         for i, r in enumerate(core, 1):
             lines.append(f"{i}. {r['ticker']}（{r['name']} / {r['sector']}）")
             lines.append(f"   Entry Edge: {r['entry_edge']} / 100")
+            lines.append(f"   IN目安: {r['entry_price']}円")
             lines.append(
                 f"   買いゾーン: {r['buy_low']}〜{r['buy_high']}円（現在 {r['price']}円）"
             )
@@ -808,6 +885,7 @@ def build_message() -> str:
             lines.append(
                 f"   Entry Edge: {r['entry_edge']} / テーマ: {r['theme_score']} / MarketFit: {r['market_fit']}"
             )
+            lines.append(f"   IN目安: {r['entry_price']}円")
             lines.append(
                 "   状況: 押し目仕上がり途中の候補。板・寄り付きの動き次第で本命化を検討。"
             )
