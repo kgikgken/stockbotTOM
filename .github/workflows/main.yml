@@ -2,7 +2,12 @@ name: stockbotTOM
 
 on:
   schedule:
-    - cron: "0 23 * * *"  # 8:00 JST
+    - # 例: .github/workflows/daily.yml
+on:
+  schedule:
+    - cron: "27 23 * * *"  # JST 8:27
+    - cron: "30 23 * * *"  # JST 8:30 バックアップ
+
   workflow_dispatch:
 
 jobs:
