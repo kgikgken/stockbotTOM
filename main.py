@@ -1,3 +1,4 @@
+
 import os
 import requests
 import yfinance as yf
@@ -536,8 +537,8 @@ def calc_market_summary() -> dict:
     _, iwm_chg = fetch_last_and_change("IWM")
     _, soxx_chg = fetch_last_and_change("SOXX")
 
-    vix_last, _ = fetch_last_and_change("^VIX")
-    tnx_last, _ = fetch_last_and_change("^TNX")
+    _, vix_last = fetch_last_and_change("^VIX")
+    _, tnx_last = fetch_last_and_change("^TNX")
 
     us_moves = [dia_chg, qqq_chg, iwm_chg, soxx_chg]
     us_valid = [x for x in us_moves if np.isfinite(x)]
@@ -688,19 +689,33 @@ def calc_market_fit(sector: str, market: dict) -> int:
         return 60
 
 
-def calc_final_rank(entry_edge: int, theme_score: int, market_fit: int, market: dict) -> float:
+def calc_final_rank(
+    entry_edge: int,
+    theme_score: int,
+    market_fit: int,
+    news_score: int,
+    market: dict,
+) -> float:
+    """
+    entry_edge / テーマ / 地合い適合 / ニュース を統合した最終スコア。
+    ニュースは最大±10点ぶん程度の影響に抑える。
+    """
     regime = market["regime"]
     if regime == "risk_on":
-        w_e, w_t, w_m = 0.65, 0.20, 0.15
+        w_e, w_t, w_m, w_n = 0.60, 0.20, 0.15, 0.05
     elif regime == "risk_off":
-        w_e, w_t, w_m = 0.50, 0.25, 0.25
+        w_e, w_t, w_m, w_n = 0.50, 0.25, 0.20, 0.05
     else:
-        w_e, w_t, w_m = 0.55, 0.25, 0.20
-    return entry_edge * w_e + theme_score * w_t + market_fit * w_m
+        w_e, w_t, w_m, w_n = 0.55, 0.25, 0.15, 0.05
+
+    # ニューススコアは -10〜+10 にクリップ
+    ns = max(-10, min(10, news_score))
+    final = entry_edge * w_e + theme_score * w_t + market_fit * w_m + ns * (w_n * 10)
+    return float(final)
 
 
 # ==========================================
-# 売買レベル（中期）
+# 売買レベル（中期＋短期）
 # ==========================================
 
 def calc_take_profit(df: pd.DataFrame) -> int:
@@ -766,6 +781,94 @@ def calc_shortterm_tp(df: pd.DataFrame) -> int:
 
     tp_short = recent_high * 0.5 + ma10 * 0.5
     return int(tp_short)
+
+
+def calc_risk_reward(entry: int, tp: int, sl: int) -> float:
+    """
+    単純なRR比（利幅 / 損幅）。0以下の場合は0扱い。
+    """
+    try:
+        entry_f = float(entry)
+        tp_f = float(tp)
+        sl_f = float(sl)
+    except Exception:
+        return 0.0
+
+    risk = max(0.0, entry_f - sl_f)
+    reward = max(0.0, tp_f - entry_f)
+    if risk <= 0 or reward <= 0:
+        return 0.0
+    return float(reward / risk)
+
+
+# ==========================================
+# ニューススコア
+# ==========================================
+
+def fetch_news_score(ticker: str) -> tuple[int, str]:
+    """
+    yfinanceのnewsをラフにスコアリング。
+    直近3日以内のタイトル/サマリーから好材料/悪材料っぽいワードをカウント。
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        news_list = getattr(tk, "news", None)
+    except Exception:
+        return 0, ""
+
+    if not news_list:
+        return 0, ""
+
+    now = datetime.utcnow()
+    cutoff_ts = (now - timedelta(days=3)).timestamp()
+
+    positive_keywords = [
+        "上方修正", "増益", "最高益", "過去最高", "好決算",
+        "自社株買い", "自社株取得", "増配", "株式分割",
+        "受注", "大型受注", "契約", "提携", "協業",
+        "投資判断引き上げ", "レーティング引き上げ",
+    ]
+    negative_keywords = [
+        "下方修正", "減益", "赤字", "通期予想下方",
+        "公募増資", "第三者割当増資", "売出", "希薄化",
+        "不正", "粉飾", "調査開始",
+        "投資判断引き下げ", "レーティング引き下げ",
+    ]
+
+    score = 0
+
+    for item in news_list:
+        try:
+            ts = item.get("providerPublishTime") or item.get("published_at")
+        except Exception:
+            ts = None
+
+        if isinstance(ts, (int, float)):
+            if ts < cutoff_ts:
+                continue
+
+        title = str(item.get("title", ""))
+        summary = str(item.get("summary", ""))
+        text = title + " " + summary
+
+        for kw in positive_keywords:
+            if kw in text:
+                score += 2
+        for kw in negative_keywords:
+            if kw in text:
+                score -= 3
+
+    # -10〜+10 にクリップ
+    score = max(-10, min(10, score))
+
+    if score >= 4:
+        flag = "好材料ニュース"
+    elif score <= -4:
+        flag = "悪材料ニュース"
+    else:
+        flag = ""
+
+    return int(score), flag
 
 
 # ==========================================
@@ -864,17 +967,18 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
         if not passes_credit_risk(ticker, df):
             continue
 
+        volume_state = analyze_volume_state(df)
+        candle = analyze_candle(df)
+        news_score, news_flag = fetch_news_score(ticker)
+
         # ---------- 中期（Core / Watch） ----------
         if passes_trend(df) and is_deep_pullback(df, ticker):
-            volume_state = analyze_volume_state(df)
-            candle = analyze_candle(df)
             entry_edge, reasons_edge = calc_entry_edge(df, volume_state, candle, ticker)
 
             class_type = classify_core_watch(entry_edge)
             if class_type is not None:
                 theme_score = calc_theme_score(sector, market)
                 market_fit = calc_market_fit(sector, market)
-                final_rank = calc_final_rank(entry_edge, theme_score, market_fit, market)
 
                 last = df.iloc[-1]
                 price = safe_float(last["close"])
@@ -892,13 +996,23 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
                 tp = calc_take_profit(df)
                 sl = calc_stop_loss(df)
                 entry_price = calc_entry_price(df)
+                rr = calc_risk_reward(entry_price, tp, sl)
+
+                # RRが悪すぎるものは軽く減点
+                rr_adj_edge = entry_edge
+                if rr < 0.8:
+                    rr_adj_edge = max(0, entry_edge - 10)
+                elif rr >= 1.5:
+                    rr_adj_edge = min(100, entry_edge + 5)
+
+                final_rank = calc_final_rank(rr_adj_edge, theme_score, market_fit, news_score, market)
 
                 rec = {
                     "ticker": ticker,
                     "name": name,
                     "sector": sector,
                     "class": class_type,
-                    "entry_edge": entry_edge,
+                    "entry_edge": rr_adj_edge,
                     "theme_score": theme_score,
                     "market_fit": market_fit,
                     "final_rank": final_rank,
@@ -908,6 +1022,9 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
                     "tp": tp,
                     "sl": sl,
                     "entry_price": entry_price,
+                    "rr": rr,
+                    "news_score": news_score,
+                    "news_flag": news_flag,
                     "reasons": " / ".join(reasons_edge),
                 }
 
@@ -918,21 +1035,38 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
 
         # ---------- 短期（ShortTerm） ----------
         patterns = detect_shortterm_patterns(df)
-        if patterns:
+        st_patterns = list(patterns)
+
+        # ニュース＋出来高スパイクの特例パターン（地合いがリスクオン寄りのときだけ）
+        if (
+            not st_patterns and
+            news_score >= 4 and
+            (volume_state["weak_spike"] or volume_state["strong_spike"]) and
+            market["regime"] == "risk_on"
+        ):
+            st_patterns.append("ニュース＋出来高")
+
+        if st_patterns:
             last = df.iloc[-1]
             price = safe_float(last["close"])
             ma5 = safe_float(last.get("ma5", np.nan))
             ma10 = safe_float(last.get("ma10", np.nan))
             atr = safe_float(last.get("atr", np.nan))
 
-            # シンプルなスコア付け（下ヒゲのほうを重く）
+            # シンプルなスコア付け
             score = 0
-            if "下ヒゲ反発" in patterns:
+            if "下ヒゲ反発" in st_patterns:
                 score += 60
-            if "RSIオーバーシュート" in patterns:
+            if "RSIオーバーシュート" in st_patterns:
                 score += 40
+            if "ニュース＋出来高" in st_patterns:
+                score += 30
             if passes_trend(df):
                 score += 10
+            if news_score >= 4:
+                score += 10
+            if news_score <= -4:
+                score -= 20
 
             # 1〜3日イメージの値幅（MA5/MA10付近＋ATRの1/3）
             if np.isfinite(price) and np.isfinite(ma5) and np.isfinite(ma10) and np.isfinite(atr):
@@ -954,11 +1088,13 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
                     "name": name,
                     "sector": sector,
                     "price": int(price) if np.isfinite(price) else 0,
-                    "patterns": " / ".join(patterns),
+                    "patterns": " / ".join(sorted(set(st_patterns))),
                     "score": score,
                     "range_low": range_low,
                     "range_high": range_high,
                     "tp_short": tp_short,
+                    "news_score": news_score,
+                    "news_flag": news_flag,
                 }
             )
 
@@ -1020,62 +1156,62 @@ def build_x_templates(
     lines.append(f"今日の地合い：{market['score']}点 / {market['label']}")
     lines.append("")
 
-    def core_line(r: dict) -> str:
+    def core_block(r: dict) -> list[str]:
         t = r["ticker"].replace(".T", "")
         name = r["name"]
         edge = r["entry_edge"]
         price = r["price"]
         tp = r["tp"]
-        return (
-            f"{t} {name}\n"
-            f"Edge {edge} / 現{price}円 / TP{tp}円\n"
-            f"気づけるやつだけ見ればいい。"
-        )
+        return [
+            f"{t} {name}",
+            f"Edge {edge} / 現{price}円 / TP{tp}円",
+            "気づけるやつだけ見ればいい。",
+        ]
 
-    def watch_line(r: dict) -> str:
+    def watch_block(r: dict) -> list[str]:
         t = r["ticker"].replace(".T", "")
         name = r["name"]
         edge = r["entry_edge"]
         price = r["price"]
-        return (
-            f"{t} {name}\n"
-            f"Edge {edge} / 現{price}円\n"
-            f"理解できるやつだけ来い。"
-        )
+        return [
+            f"{t} {name}",
+            f"Edge {edge} / 現{price}円",
+            "理解できるやつだけ来い。",
+        ]
 
-    def short_line(r: dict) -> str:
+    def short_block(r: dict) -> list[str]:
         t = r["ticker"].replace(".T", "")
         name = r["name"]
         price = r["price"]
         tp_short = r.get("tp_short", 0)
-        return (
-            f"{t} {name}\n"
-            f"短期リバ（1〜3日） / 現{price}円 / TP{tp_short}円\n"
-            f"判断できるやつだけ残ればいい。"
-        )
+        return [
+            f"{t} {name}",
+            f"短期リバ（1〜3日） / 現{price}円 / TP{tp_short}円",
+            "判断できるやつだけ残ればいい。",
+        ]
 
     if core:
         lines.append("[Core]")
         for r in core:
-            lines.append(core_line(r))
+            lines.extend(core_block(r))
             lines.append("")
 
     if watch:
         lines.append("[Watch]")
         for r in watch:
-            lines.append(watch_line(r))
+            lines.extend(watch_block(r))
             lines.append("")
 
     if short_rows:
         lines.append("[ShortTerm]")
         for r in short_rows:
-            lines.append(short_line(r))
+            lines.extend(short_block(r))
             lines.append("")
 
     if not core and not watch and not short_rows:
         lines.append("今日は条件を満たす銘柄なし。静観メモ。")
 
-    return "\n".join(lines).strip()
+    return "\n".join(lines).rstrip()
 
 
 # ==========================================
@@ -1126,8 +1262,12 @@ def build_line_messages() -> list[str]:
                 f"   IN目安: {r['entry_price']}円 / 現値: {r['price']}円"
             )
             msg2_lines.append(
-                f"   TP目安: {r['tp']}円 / SL目安: {r['sl']}円"
+                f"   TP目安: {r['tp']}円 / SL目安: {r['sl']}円 / RR: {r['rr']:.2f}"
             )
+            if r.get("news_flag"):
+                msg2_lines.append(
+                    f"   News: {r['news_flag']}（score {r['news_score']}）"
+                )
             msg2_lines.append("")
     else:
         msg2_lines.append("本命条件を満たす銘柄なし。今日は無理に攻めない選択もあり。")
@@ -1142,6 +1282,10 @@ def build_line_messages() -> list[str]:
             msg3_lines.append(
                 f"   Edge {r['entry_edge']} / IN目安: {r['entry_price']}円 / 現値: {r['price']}円"
             )
+            if r.get("news_flag"):
+                msg3_lines.append(
+                    f"   News: {r['news_flag']}（score {r['news_score']}）"
+                )
             msg3_lines.append("")
     else:
         msg3_lines.append("現時点で条件を満たす注目押し目候補は少ない。")
@@ -1157,6 +1301,10 @@ def build_line_messages() -> list[str]:
             msg4_lines.append(
                 f"   短期イメージ: {r['range_low']}〜{r['range_high']}円 / TP: {r['tp_short']}円 / 現値: {r['price']}円"
             )
+            if r.get("news_flag"):
+                msg4_lines.append(
+                    f"   News: {r['news_flag']}（score {r['news_score']}）"
+                )
             msg4_lines.append("")
     else:
         msg4_lines.append("現在、条件を満たす短期パターン候補はなし。")
@@ -1166,16 +1314,6 @@ def build_line_messages() -> list[str]:
     x_text = build_x_templates(core, watch, short_rows, market)
     msg5_lines = [x_text, "", "Only the edge. Nothing else."]
     msg5 = "\n".join(msg5_lines).rstrip()
-
-    # ついでにファイルにも書き出しておく（GitHub ActionsのArtifacts用）
-    try:
-        with open("line_message.txt", "w", encoding="utf-8") as f:
-            f.write("\n\n-----\n\n".join([msg1, msg2, msg3, msg4, msg5]))
-        with open("x_posts.txt", "w", encoding="utf-8") as f:
-            f.write(x_text)
-        # screening_result.csv は必要なら別途実装（現状はLINE用に特化）
-    except Exception:
-        pass
 
     return [msg1, msg2, msg3, msg4, msg5]
 
@@ -1217,6 +1355,20 @@ def send_line(messages: list[str]) -> None:
 
 def main() -> None:
     messages = build_line_messages()
+
+    # ローカル/Actionsデバッグ用: ファイルにも書き出し
+    try:
+        with open("line_message.txt", "w", encoding="utf-8") as f:
+            for i, m in enumerate(messages, 1):
+                f.write(f"===== MESSAGE {i} =====\n")
+                f.write(m)
+                f.write("\n\n")
+        # X用だけ別ファイル
+        with open("x_posts.txt", "w", encoding="utf-8") as f:
+            f.write(messages[4])
+    except Exception:
+        pass
+
     send_line(messages)
 
 
