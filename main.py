@@ -13,20 +13,20 @@ UNIVERSE_CSV_PATH = "universe_jpx.csv"
 EARNINGS_CSV_PATH = "earnings_jpx.csv"
 CREDIT_CSV_PATH = "credit_jpx.csv"
 
-HISTORY_PERIOD = "6mo"
+HISTORY_PERIOD = "4mo"   # 重くしすぎない程度に短縮
 MIN_HISTORY_DAYS = 60
 
-MIN_AVG_TURNOVER = 3e8  # 3億/日
+MIN_AVG_TURNOVER = 3e8   # 3億/日
 MAX_ATR_RATIO = 0.06
 MAX_ATR_MULTIPLE = 1.8
 
 RSI_MIN = 25
 RSI_MAX = 40
-MA_TOL_BASE = 0.01  # 通常銘柄の25MA許容 ±1%
+MA_TOL_BASE = 0.01       # 通常銘柄の25MA許容 ±1%
 
 VOLUME_SOLDOUT_RATIO = 0.4
-VOLUME_SPIKE_STRONG = 2.2   # 強スパイク除外ライン
-VOLUME_SPIKE_WEAK = 1.5     # 軽スパイク減点ライン
+VOLUME_SPIKE_STRONG = 2.2   # 強スパイク
+VOLUME_SPIKE_WEAK = 1.5     # 軽スパイク
 
 RISK_OFF_THRESHOLD = 40
 RISK_ON_THRESHOLD = 60
@@ -206,7 +206,7 @@ def fetch_history(ticker: str) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
 
-    df = df.tail(120)
+    df = df.tail(100)
     if len(df) < MIN_HISTORY_DAYS:
         return None
 
@@ -262,14 +262,13 @@ def passes_trend(df: pd.DataFrame) -> bool:
     if not all(np.isfinite(v) for v in [ma10, ma25, ma75, close, ma25_prev]):
         return False
 
-    # トレンド方向＋傾き
     if not (ma10 >= ma25 >= ma75):
         return False
     if close < ma75:
         return False
 
     slope = (ma25 - ma25_prev) / ma25_prev
-    if slope <= 0:  # 25MAが下向き〜横ばいならスルー
+    if slope <= 0:
         return False
 
     return True
@@ -383,7 +382,6 @@ def is_deep_pullback(df: pd.DataFrame, ticker: str) -> bool:
     if dist > tol:
         return False
 
-    # RSIはあくまで補助
     if not (RSI_MIN <= rsi <= RSI_MAX):
         return False
 
@@ -410,7 +408,7 @@ def analyze_candle(df: pd.DataFrame) -> dict:
 
 
 # ==========================================
-# エントリースコア
+# エントリースコア（中期用）
 # ==========================================
 
 def calc_trend_strength(df: pd.DataFrame) -> int:
@@ -432,9 +430,9 @@ def calc_trend_strength(df: pd.DataFrame) -> int:
 
     score = 0
     if slope > 0:
-        score += min(10, slope * 2000)   # 0.5%/日くらいで+10点
+        score += min(10, slope * 2000)
     if spread > 0:
-        score += min(10, spread * 50)    # 20%発散で+10点
+        score += min(10, spread * 50)
 
     score = int(max(0, min(20, score)))
     return score
@@ -449,7 +447,6 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict, ticker: 
     score = 0
     reasons: list[str] = []
 
-    # Tier1: トレンド関連
     if passes_trend(df):
         score += 20
         reasons.append("上昇トレンド継続")
@@ -473,7 +470,6 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict, ticker: 
             score += 5
             reasons.append("25MA圏内")
 
-    # Tier2: RSI（補助）
     if np.isfinite(rsi):
         if RSI_MIN <= rsi <= 32:
             score += 15
@@ -482,15 +478,12 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict, ticker: 
             score += 5
             reasons.append("RSI軽めの押し目")
 
-    # 出来高サイクル
     if volume_state["ok"]:
         score += 20
         reasons.append("出来高 減→増の反転")
     if volume_state["soldout"]:
         score += 5
         reasons.append("売り枯れ気味")
-
-    # スパイク（2段階）
     if volume_state["weak_spike"]:
         score -= 15
         reasons.append("出来高ややスパイク")
@@ -498,18 +491,16 @@ def calc_entry_edge(df: pd.DataFrame, volume_state: dict, candle: dict, ticker: 
         score -= 20
         reasons.append("出来高強スパイク")
 
-    # ローソク足
     if candle["long_lower"]:
         score += 10
         reasons.append("下ヒゲ反転気味")
 
-    # 正規化
     score = int(max(0, min(100, score)))
     return score, sorted(set(reasons))
 
 
 # ==========================================
-# マクロ・地合い（内部利用のみ）
+# マクロ・地合い（内部利用）
 # ==========================================
 
 def fetch_last_and_change(ticker: str, period: str = "5d") -> tuple[float, float]:
@@ -645,7 +636,6 @@ def fetch_topix17_moves() -> tuple[list[dict], str]:
     if not results:
         return [], "なし"
 
-    # プラスのみ抽出して降順ソート
     positives = [r for r in results if r["chg"] > 0]
     positives.sort(key=lambda x: x["chg"], reverse=True)
     top3 = positives[:3]
@@ -759,7 +749,67 @@ def calc_entry_price(df: pd.DataFrame) -> int:
 
 
 # ==========================================
-# スクリーニング
+# 短期パターン検出（ShortTerm）
+# ==========================================
+
+def detect_shortterm_patterns(df: pd.DataFrame) -> list[str]:
+    patterns: list[str] = []
+    if len(df) < 3:
+        return patterns
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    o = safe_float(last["Open"])
+    h = safe_float(last["High"])
+    l = safe_float(last["Low"])
+    c = safe_float(last["Close"])
+    prev_close = safe_float(prev["Close"])
+    vol = df["Volume"].astype(float)
+    v_last = safe_float(vol.iloc[-1])
+    v_prev = safe_float(vol.iloc[-2])
+    v20 = safe_float(vol.tail(20).mean())
+
+    ma5 = safe_float(last.get("ma5", np.nan))
+    ma10 = safe_float(last.get("ma10", np.nan))
+    ma75 = safe_float(last.get("ma75", np.nan))
+    rsi = safe_float(last.get("rsi", np.nan))
+
+    # パターン① 下ヒゲ反発
+    if all(np.isfinite(v) for v in [o, h, l, c, prev_close, v_last, v_prev, ma75]):
+        change = (c - prev_close) / prev_close
+        body = c - o
+        range_ = h - l
+        lower_shadow = (o if c >= o else c) - l
+        if (
+            change <= -0.03 and          # 実体で-3％以上
+            range_ > 0 and
+            lower_shadow / range_ >= 0.4 and
+            v_last >= v_prev * 2.0 and   # 出来高2倍以上
+            c >= ma75                    # 崩壊は除外
+        ):
+            patterns.append("下ヒゲ反発")
+
+    # パターン② RSIオーバーシュート＋MA5/10
+    if all(np.isfinite(v) for v in [ma5, ma10, ma75, c, rsi, v20]):
+
+        if rsi <= 30:
+            dist5 = abs(c - ma5) / ma5 if ma5 != 0 else np.inf
+            dist10 = abs(c - ma10) / ma10 if ma10 != 0 else np.inf
+            vol_ratio = v_last / v20 if v20 > 0 else 1.0
+
+            if (
+                passes_trend(df) and
+                (dist5 <= 0.015 or dist10 <= 0.015) and  # MA5/10近辺
+                0.85 <= vol_ratio <= 1.15               # 出来高は平常〜やや増
+            ):
+                patterns.append("RSIオーバーシュート")
+
+    return sorted(set(patterns))
+
+
+# ==========================================
+# スクリーニング（中期＋短期）
 # ==========================================
 
 def classify_core_watch(entry_edge: int) -> str | None:
@@ -770,9 +820,10 @@ def classify_core_watch(entry_edge: int) -> str | None:
     return None
 
 
-def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
+def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
     core_rows: list[dict] = []
     watch_rows: list[dict] = []
+    short_rows: list[dict] = []
 
     for _, row in UNIVERSE.iterrows():
         ticker = row["ticker"]
@@ -783,84 +834,162 @@ def screen_candidates(market: dict) -> tuple[list[dict], list[dict]]:
         if df is None:
             continue
 
+        # 共通のハードフィルタ（短期も中期も最低限は通す）
         if not passes_liquidity(df):
             continue
         if not passes_volatility(df):
-            continue
-        if not passes_trend(df):
-            continue
-        if not is_deep_pullback(df, ticker):
             continue
         if not passes_event_risk(ticker, df):
             continue
         if not passes_credit_risk(ticker, df):
             continue
 
-        volume_state = analyze_volume_state(df)
-        candle = analyze_candle(df)
-        entry_edge, reasons_edge = calc_entry_edge(df, volume_state, candle, ticker)
+        # ---------- 中期（Core / Watch） ----------
+        if passes_trend(df) and is_deep_pullback(df, ticker):
+            volume_state = analyze_volume_state(df)
+            candle = analyze_candle(df)
+            entry_edge, reasons_edge = calc_entry_edge(df, volume_state, candle, ticker)
 
-        class_type = classify_core_watch(entry_edge)
-        if class_type is None:
-            continue
+            class_type = classify_core_watch(entry_edge)
+            if class_type is not None:
+                theme_score = calc_theme_score(sector, market)
+                market_fit = calc_market_fit(sector, market)
+                final_rank = calc_final_rank(entry_edge, theme_score, market_fit, market)
 
-        theme_score = calc_theme_score(sector, market)
-        market_fit = calc_market_fit(sector, market)
-        final_rank = calc_final_rank(entry_edge, theme_score, market_fit, market)
+                last = df.iloc[-1]
+                price = safe_float(last["close"])
+                ma5 = safe_float(last["ma5"])
+                ma10 = safe_float(last["ma10"])
+                ma25 = safe_float(last["ma25"])
 
-        last = df.iloc[-1]
-        price = safe_float(last["close"])
-        ma5 = safe_float(last["ma5"])
-        ma10 = safe_float(last["ma10"])
-        ma25 = safe_float(last["ma25"])
+                lower_candidates = [v for v in [ma5, ma10, ma25] if np.isfinite(v)]
+                if lower_candidates:
+                    buy_low = int(min(lower_candidates))
+                    buy_high = int(max(lower_candidates))
+                else:
+                    buy_low = buy_high = int(price)
 
-        lower_candidates = [v for v in [ma5, ma10, ma25] if np.isfinite(v)]
-        if lower_candidates:
-            buy_low = int(min(lower_candidates))
-            buy_high = int(max(lower_candidates))
-        else:
-            buy_low = buy_high = int(price)
+                tp = calc_take_profit(df)
+                sl = calc_stop_loss(df)
+                entry_price = calc_entry_price(df)
 
-        tp = calc_take_profit(df)
-        sl = calc_stop_loss(df)
-        entry_price = calc_entry_price(df)
+                rec = {
+                    "ticker": ticker,
+                    "name": name,
+                    "sector": sector,
+                    "class": class_type,
+                    "entry_edge": entry_edge,
+                    "theme_score": theme_score,
+                    "market_fit": market_fit,
+                    "final_rank": final_rank,
+                    "price": int(price) if np.isfinite(price) else 0,
+                    "buy_low": buy_low,
+                    "buy_high": buy_high,
+                    "tp": tp,
+                    "sl": sl,
+                    "entry_price": entry_price,
+                    "reasons": " / ".join(reasons_edge),
+                }
 
-        rec = {
-            "ticker": ticker,
-            "name": name,
-            "sector": sector,
-            "class": class_type,
-            "entry_edge": entry_edge,
-            "theme_score": theme_score,
-            "market_fit": market_fit,
-            "final_rank": final_rank,
-            "price": int(price) if np.isfinite(price) else 0,
-            "buy_low": buy_low,
-            "buy_high": buy_high,
-            "tp": tp,
-            "sl": sl,
-            "entry_price": entry_price,
-            "reasons": " / ".join(reasons_edge),
-        }
+                if class_type == "core":
+                    core_rows.append(rec)
+                else:
+                    watch_rows.append(rec)
 
-        if class_type == "core":
-            core_rows.append(rec)
-        else:
-            watch_rows.append(rec)
+        # ---------- 短期（ShortTerm） ----------
+        patterns = detect_shortterm_patterns(df)
+        if patterns:
+            last = df.iloc[-1]
+            price = safe_float(last["close"])
+
+            # シンプルなスコア付け（下ヒゲのほうを重く）
+            score = 0
+            if "下ヒゲ反発" in patterns:
+                score += 60
+            if "RSIオーバーシュート" in patterns:
+                score += 40
+            if passes_trend(df):
+                score += 10
+
+            # 1〜3日イメージの値幅（参考レンジ）
+            if np.isfinite(price):
+                range_low = int(price * 1.01)
+                range_high = int(price * 1.03)
+            else:
+                range_low = range_high = 0
+
+            short_rows.append(
+                {
+                    "ticker": ticker,
+                    "name": name,
+                    "sector": sector,
+                    "price": int(price) if np.isfinite(price) else 0,
+                    "patterns": " / ".join(patterns),
+                    "score": score,
+                    "range_low": range_low,
+                    "range_high": range_high,
+                }
+            )
 
     core_rows = sorted(core_rows, key=lambda x: x["final_rank"], reverse=True)[:4]
     watch_rows = sorted(watch_rows, key=lambda x: x["final_rank"], reverse=True)[:5]
+    short_rows = sorted(short_rows, key=lambda x: x["score"], reverse=True)[:5]
 
-    return core_rows, watch_rows
+    return core_rows, watch_rows, short_rows
 
 
 # ==========================================
-# X投稿用（140字以内素材）
+# 相場3行まとめ
 # ==========================================
 
-def build_x_templates(core: list[dict], watch: list[dict], top_sector_name: str) -> str:
+def build_three_line_summary(
+    market: dict,
+    top_sector_name: str,
+    core: list[dict],
+    watch: list[dict],
+    short_rows: list[dict],
+) -> list[str]:
+    lines: list[str] = []
+
+    regime = market["regime"]
+    if regime == "risk_on":
+        lines.append("・地合いはやや強め。押し目狙いは前向きに検討。")
+    elif regime == "risk_off":
+        lines.append("・地合いは弱め。新規は慎重に、サイズ控えめ。")
+    else:
+        lines.append("・地合いは中立〜レンジ。無理なフルベットは不要。")
+
+    if top_sector_name != "なし":
+        lines.append(f"・セクターでは「{top_sector_name}」が相対的に優勢。")
+    else:
+        lines.append("・セクターは全面的に重く、方向感は出にくい。")
+
+    if core:
+        lines.append("・中期はCore中心、短期はShortTerm候補を必要に応じて確認。")
+    elif short_rows:
+        lines.append("・本命押し目は形成途中。短期リバウンド候補を中心にチェック。")
+    else:
+        lines.append("・条件が揃うまで待ち優位。ポジション調整と観察がメイン。")
+
+    return lines
+
+
+# ==========================================
+# X投稿用（素材）
+# ==========================================
+
+def build_x_templates(
+    core: list[dict],
+    watch: list[dict],
+    short_rows: list[dict],
+    top_sector_name: str,
+    market: dict,
+) -> str:
     lines: list[str] = []
     lines.append("【X投稿用メモ（stockbotTOM）】")
+
+    theme_word = top_sector_name if top_sector_name != "なし" else "地合いフラット"
+    lines.append(f"今日のテーマ：{theme_word} / {market['label']}")
 
     top_label = top_sector_name if top_sector_name != "なし" else "なし"
 
@@ -888,11 +1017,22 @@ def build_x_templates(core: list[dict], watch: list[dict], top_sector_name: str)
             f"理解できるやつだけ来い。"
         )
 
+    def short_line(r: dict) -> str:
+        t = r["ticker"].replace(".T", "")
+        name = r["name"]
+        price = r["price"]
+        return (
+            f"{t} {name}\n"
+            f"短期リバ（1〜3日） / 現{price}円\n"
+            f"今日のTOPセクター：{top_label}\n"
+            f"判断できるやつだけ残ればいい。"
+        )
+
     if core:
         lines.append("\n[Core]")
         for r in core:
             lines.append(core_line(r))
-            lines.append("")  # 間に空行
+            lines.append("")
 
     if watch:
         lines.append("[Watch]")
@@ -900,14 +1040,20 @@ def build_x_templates(core: list[dict], watch: list[dict], top_sector_name: str)
             lines.append(watch_line(r))
             lines.append("")
 
-    if not core and not watch:
+    if short_rows:
+        lines.append("[ShortTerm]")
+        for r in short_rows:
+            lines.append(short_line(r))
+            lines.append("")
+
+    if not core and not watch and not short_rows:
         lines.append("\n今日は条件を満たす銘柄なし。静観メモ。")
 
     return "\n".join(lines).strip()
 
 
 # ==========================================
-# LINE メッセージ組み立て（5分割）
+# LINE メッセージ組み立て（5通）
 # ==========================================
 
 def build_line_messages() -> list[str]:
@@ -915,10 +1061,10 @@ def build_line_messages() -> list[str]:
 
     market = calc_market_summary()
     risk_cfg = decide_risk_regime_action(market)
-    core, watch = screen_candidates(market)
+    core, watch, short_rows = screen_all(market)
     top3_sectors, top_sector_name = fetch_topix17_moves()
 
-    # ① 今日の結論
+    # ① 今日の結論＋TOP3＋相場3行
     msg1_lines: list[str] = []
     msg1_lines.append(f"📅 {today} stockbotTOM 日報")
     msg1_lines.append("")
@@ -935,16 +1081,18 @@ def build_line_messages() -> list[str]:
             msg1_lines.append(f"{i}位: {s['name']}（{s['chg']:+.1f}%）")
     else:
         msg1_lines.append("プラスのセクターなし（全面マイナス）")
-    msg1 = "\n".join(msg1_lines)
+    msg1_lines.append("")
+    msg1_lines.append("◆ 今日の相場3行まとめ")
+    three_lines = build_three_line_summary(market, top_sector_name, core, watch, short_rows)
+    msg1_lines.extend(three_lines)
+    msg1 = "\n".join(msg1_lines).rstrip()
 
-    # ② Core 一覧
+    # ② Core
     msg2_lines: list[str] = []
     msg2_lines.append("◆ Core（本命候補）")
     if core:
         for i, r in enumerate(core, 1):
-            msg2_lines.append(
-                f"{i}. {r['ticker']} {r['name']} / {r['sector']}"
-            )
+            msg2_lines.append(f"{i}. {r['ticker']} {r['name']} / {r['sector']}")
             msg2_lines.append(
                 f"   Edge {r['entry_edge']} / Theme {r['theme_score']} / Fit {r['market_fit']}"
             )
@@ -959,14 +1107,12 @@ def build_line_messages() -> list[str]:
         msg2_lines.append("本命条件を満たす銘柄なし。今日は無理に攻めない選択もあり。")
     msg2 = "\n".join(msg2_lines).rstrip()
 
-    # ③ Watch 一覧
+    # ③ Watch
     msg3_lines: list[str] = []
     msg3_lines.append("◆ Watch（注目候補）")
     if watch:
         for i, r in enumerate(watch, 1):
-            msg3_lines.append(
-                f"{i}. {r['ticker']} {r['name']} / {r['sector']}"
-            )
+            msg3_lines.append(f"{i}. {r['ticker']} {r['name']} / {r['sector']}")
             msg3_lines.append(
                 f"   Edge {r['entry_edge']} / IN目安: {r['entry_price']}円 / 現値: {r['price']}円"
             )
@@ -975,20 +1121,23 @@ def build_line_messages() -> list[str]:
         msg3_lines.append("現時点で条件を満たす注目押し目候補は少ない。")
     msg3 = "\n".join(msg3_lines).rstrip()
 
-    # ④ セクター詳細
+    # ④ ShortTerm
     msg4_lines: list[str] = []
-    msg4_lines.append("◆ セクター概況（TOPIX-17 ETFベース）")
-    if top3_sectors:
-        for s in top3_sectors:
+    msg4_lines.append("◆ ShortTerm（短期1〜3日候補）")
+    if short_rows:
+        for i, r in enumerate(short_rows, 1):
+            msg4_lines.append(f"{i}. {r['ticker']} {r['name']} / {r['sector']}")
+            msg4_lines.append(f"   パターン: {r['patterns']}")
             msg4_lines.append(
-                f"- {s['name']}: 前日比 {s['chg']:+.1f}%"
+                f"   短期イメージ: {r['range_low']}〜{r['range_high']}円 / 現値: {r['price']}円"
             )
+            msg4_lines.append("")
     else:
-        msg4_lines.append("- プラスのセクターなし。地合い自体はやや逆風気味。")
-    msg4 = "\n".join(msg4_lines)
+        msg4_lines.append("現在、条件を満たす短期パターン候補はなし。")
+    msg4 = "\n".join(msg4_lines).rstrip()
 
-    # ⑤ X投稿用テンプレ
-    x_text = build_x_templates(core, watch, top_sector_name)
+    # ⑤ X投稿用メモ
+    x_text = build_x_templates(core, watch, short_rows, top_sector_name, market)
     msg5_lines = [x_text, "", "Only the edge. Nothing else."]
     msg5 = "\n".join(msg5_lines).rstrip()
 
@@ -996,13 +1145,12 @@ def build_line_messages() -> list[str]:
 
 
 # ==========================================
-# LINE 送信（複数メッセージ）
+# LINE 送信
 # ==========================================
 
 def send_line(messages: list[str]) -> None:
     token = os.getenv("LINE_TOKEN")
     if not token:
-        # デバッグ用：コンソールに全部出す
         print("LINE_TOKEN 未設定のため標準出力へ出力します。")
         for i, m in enumerate(messages, 1):
             print(f"\n===== MESSAGE {i} =====")
