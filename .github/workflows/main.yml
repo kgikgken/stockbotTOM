@@ -1,22 +1,22 @@
-name: stockbotTOM-daily
+name: stockbot-scheduler
 
 on:
   schedule:
-    # メイン通知：8:30 JST（= 23:30 UTC）
-    - cron: "30 23 * * *"
-    # バックアップ通知：8:27 JST（= 23:27 UTC）
     - cron: "27 23 * * *"
-  push:
-    branches:
-      - main
+    - cron: "30 23 * * *"
+  workflow_dispatch:
 
 jobs:
-  run-analysis:
+  run-script:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
+
+        # LINE_TOKEN を secrets から環境変数へ
+      - name: Set LINE token
+        run: echo "LINE_TOKEN=${{ secrets.LINE_TOKEN }}" >> $GITHUB_ENV
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -29,7 +29,4 @@ jobs:
           pip install yfinance pandas numpy requests
 
       - name: Run main.py
-        env:
-          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
-        run: |
-          python main.py
+        run: python main.py
