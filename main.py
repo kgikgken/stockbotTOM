@@ -700,10 +700,14 @@ def calc_final_rank(entry_edge: int, theme_score: int, market_fit: int, market: 
 
 
 # ==========================================
-# 売買レベル
+# 売買レベル（中期）
 # ==========================================
 
 def calc_take_profit(df: pd.DataFrame) -> int:
+    """
+    中期スイング用TP
+    直近10日高値と10MAをブレンドしたシンプルかつ実戦的な目安。
+    """
     last = safe_float(df["close"].iloc[-1])
     recent_high = safe_float(df["close"].tail(10).max())
     ma10 = safe_float(df["ma10"].iloc[-1])
@@ -746,6 +750,22 @@ def calc_entry_price(df: pd.DataFrame) -> int:
 
     entry = ma5 * 0.2 + ma10 * 0.2 + ma25 * 0.6
     return int(entry)
+
+
+def calc_shortterm_tp(df: pd.DataFrame) -> int:
+    """
+    短期TP（1〜3日リバウンド想定）
+    TP_short = 直近5日高値×0.5 + 10MA×0.5
+    """
+    last = df.iloc[-1]
+    ma10 = safe_float(last.get("ma10", np.nan))
+    recent_high = safe_float(df["close"].tail(5).max())
+
+    if not np.isfinite(recent_high) or not np.isfinite(ma10):
+        return 0
+
+    tp_short = recent_high * 0.5 + ma10 * 0.5
+    return int(tp_short)
 
 
 # ==========================================
@@ -792,16 +812,16 @@ def detect_shortterm_patterns(df: pd.DataFrame) -> list[str]:
 
     # パターン② RSIオーバーシュート＋MA5/10
     if all(np.isfinite(v) for v in [ma5, ma10, ma75, c, rsi, v20]):
-
-        if rsi <= 30:
+        # 短期はやや広めに拾う（勝ちやすさと件数のバランス）
+        if rsi <= 34:
             dist5 = abs(c - ma5) / ma5 if ma5 != 0 else np.inf
             dist10 = abs(c - ma10) / ma10 if ma10 != 0 else np.inf
             vol_ratio = v_last / v20 if v20 > 0 else 1.0
 
             if (
                 passes_trend(df) and
-                (dist5 <= 0.015 or dist10 <= 0.015) and  # MA5/10近辺
-                0.85 <= vol_ratio <= 1.15               # 出来高は平常〜やや増
+                (dist5 <= 0.025 or dist10 <= 0.025) and  # MA5/10近辺（±2.5%）
+                0.85 <= vol_ratio <= 1.20                # 出来高は平常〜やや増
             ):
                 patterns.append("RSIオーバーシュート")
 
@@ -901,6 +921,9 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
         if patterns:
             last = df.iloc[-1]
             price = safe_float(last["close"])
+            ma5 = safe_float(last.get("ma5", np.nan))
+            ma10 = safe_float(last.get("ma10", np.nan))
+            atr = safe_float(last.get("atr", np.nan))
 
             # シンプルなスコア付け（下ヒゲのほうを重く）
             score = 0
@@ -911,12 +934,19 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
             if passes_trend(df):
                 score += 10
 
-            # 1〜3日イメージの値幅（参考レンジ）
-            if np.isfinite(price):
+            # 1〜3日イメージの値幅（MA5/MA10付近＋ATRの1/3）
+            if np.isfinite(price) and np.isfinite(ma5) and np.isfinite(ma10) and np.isfinite(atr):
+                base_low = min(ma5, ma10)
+                base_high = max(ma5, ma10)
+                range_low = int(base_low)
+                range_high = int(base_high + atr / 3.0)
+            elif np.isfinite(price):
                 range_low = int(price * 1.01)
                 range_high = int(price * 1.03)
             else:
                 range_low = range_high = 0
+
+            tp_short = calc_shortterm_tp(df)
 
             short_rows.append(
                 {
@@ -928,6 +958,7 @@ def screen_all(market: dict) -> tuple[list[dict], list[dict], list[dict]]:
                     "score": score,
                     "range_low": range_low,
                     "range_high": range_high,
+                    "tp_short": tp_short,
                 }
             )
 
@@ -998,10 +1029,14 @@ def build_x_templates(
         name = r["name"]
         edge = r["entry_edge"]
         price = r["price"]
+        tp = r["tp"]
         return (
-            f"{t} {name}\n"
-            f"Edge {edge} / 現{price}円\n"
-            f"今日のTOPセクター：{top_label}\n"
+            f"{t} {name}
+"
+            f"Edge {edge} / 現{price}円 / TP{tp}円
+"
+            f"今日のTOPセクター：{top_label}
+"
             f"気づけるやつだけ見ればいい。"
         )
 
@@ -1011,9 +1046,12 @@ def build_x_templates(
         edge = r["entry_edge"]
         price = r["price"]
         return (
-            f"{t} {name}\n"
-            f"Edge {edge} / 現{price}円\n"
-            f"今日のTOPセクター：{top_label}\n"
+            f"{t} {name}
+"
+            f"Edge {edge} / 現{price}円
+"
+            f"今日のTOPセクター：{top_label}
+"
             f"理解できるやつだけ来い。"
         )
 
@@ -1021,15 +1059,20 @@ def build_x_templates(
         t = r["ticker"].replace(".T", "")
         name = r["name"]
         price = r["price"]
+        tp_short = r.get("tp_short", 0)
         return (
-            f"{t} {name}\n"
-            f"短期リバ（1〜3日） / 現{price}円\n"
-            f"今日のTOPセクター：{top_label}\n"
+            f"{t} {name}
+"
+            f"短期リバ（1〜3日） / 現{price}円 / TP{tp_short}円
+"
+            f"今日のTOPセクター：{top_label}
+"
             f"判断できるやつだけ残ればいい。"
         )
 
     if core:
-        lines.append("\n[Core]")
+        lines.append("
+[Core]")
         for r in core:
             lines.append(core_line(r))
             lines.append("")
@@ -1047,9 +1090,11 @@ def build_x_templates(
             lines.append("")
 
     if not core and not watch and not short_rows:
-        lines.append("\n今日は条件を満たす銘柄なし。静観メモ。")
+        lines.append("
+今日は条件を満たす銘柄なし。静観メモ。")
 
-    return "\n".join(lines).strip()
+    return "
+".join(lines).strip()
 
 
 # ==========================================
@@ -1085,7 +1130,8 @@ def build_line_messages() -> list[str]:
     msg1_lines.append("◆ 今日の相場3行まとめ")
     three_lines = build_three_line_summary(market, top_sector_name, core, watch, short_rows)
     msg1_lines.extend(three_lines)
-    msg1 = "\n".join(msg1_lines).rstrip()
+    msg1 = "
+".join(msg1_lines).rstrip()
 
     # ② Core
     msg2_lines: list[str] = []
@@ -1105,7 +1151,8 @@ def build_line_messages() -> list[str]:
             msg2_lines.append("")
     else:
         msg2_lines.append("本命条件を満たす銘柄なし。今日は無理に攻めない選択もあり。")
-    msg2 = "\n".join(msg2_lines).rstrip()
+    msg2 = "
+".join(msg2_lines).rstrip()
 
     # ③ Watch
     msg3_lines: list[str] = []
@@ -1119,7 +1166,8 @@ def build_line_messages() -> list[str]:
             msg3_lines.append("")
     else:
         msg3_lines.append("現時点で条件を満たす注目押し目候補は少ない。")
-    msg3 = "\n".join(msg3_lines).rstrip()
+    msg3 = "
+".join(msg3_lines).rstrip()
 
     # ④ ShortTerm
     msg4_lines: list[str] = []
@@ -1129,17 +1177,19 @@ def build_line_messages() -> list[str]:
             msg4_lines.append(f"{i}. {r['ticker']} {r['name']} / {r['sector']}")
             msg4_lines.append(f"   パターン: {r['patterns']}")
             msg4_lines.append(
-                f"   短期イメージ: {r['range_low']}〜{r['range_high']}円 / 現値: {r['price']}円"
+                f"   短期イメージ: {r['range_low']}〜{r['range_high']}円 / TP: {r['tp_short']}円 / 現値: {r['price']}円"
             )
             msg4_lines.append("")
     else:
         msg4_lines.append("現在、条件を満たす短期パターン候補はなし。")
-    msg4 = "\n".join(msg4_lines).rstrip()
+    msg4 = "
+".join(msg4_lines).rstrip()
 
     # ⑤ X投稿用メモ
     x_text = build_x_templates(core, watch, short_rows, top_sector_name, market)
     msg5_lines = [x_text, "", "Only the edge. Nothing else."]
-    msg5 = "\n".join(msg5_lines).rstrip()
+    msg5 = "
+".join(msg5_lines).rstrip()
 
     return [msg1, msg2, msg3, msg4, msg5]
 
@@ -1153,7 +1203,8 @@ def send_line(messages: list[str]) -> None:
     if not token:
         print("LINE_TOKEN 未設定のため標準出力へ出力します。")
         for i, m in enumerate(messages, 1):
-            print(f"\n===== MESSAGE {i} =====")
+            print(f"
+===== MESSAGE {i} =====")
             print(m)
         return
 
