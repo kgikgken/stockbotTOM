@@ -1,3 +1,20 @@
+import pandas as pd
+import os
+
+def load_universe(path="universe_jpx.csv"):
+    """
+    ユニバースCSVを読み込む。
+    無い場合はテンプレtickersを返す。
+    """
+    if os.path.exists(path):
+        df = pd.read_csv(path)
+        if "ticker" in df.columns:
+            return df["ticker"].astype(str).tolist()
+
+    return [
+        "6920.T", "8035.T", "4502.T", "9984.T", "8316.T",
+        "7203.T", "6861.T", "4063.T", "7735.T", "9433.T"
+    ]
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
