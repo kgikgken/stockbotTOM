@@ -1,11 +1,10 @@
-
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
+import os
 import numpy as np
 import pandas as pd
-import os
 import yfinance as yf
 
 
@@ -170,16 +169,15 @@ def extract_metrics(df: pd.DataFrame) -> Dict[str, float] | None:
 
 
 # =====================================================
-# 地合い・セクター強度（強化版）
+# マクロ地合い・セクター強度
 # =====================================================
 
-# yfinance で使うインデックス / ETF
 _MARKET_TICKERS = {
     "NK": "^N225",      # 日経平均
     "TOPIX": "^TOPX",   # TOPIX
     "NDX": "^NDX",      # NASDAQ100
     "VIX": "^VIX",      # VIX
-    "USDJPY": "JPY=X",  # ドル円（Yahooは JPY=X）
+    "USDJPY": "JPY=X",  # ドル円
 }
 
 
@@ -201,7 +199,7 @@ def _safe_last_pct(ticker: str, period: str = "10d") -> float:
     return float(ret * 100.0)  # %
 
 
-def _safe_n_day_return(ticker: str, days: int = 5, period: str = "20d") -> float:
+def _safe_n_day_return(ticker: str, days: int = 5, period: str = "60d") -> float:
     """
     指定ティッカーの n 日リターン(%) を返す。
     足りなければ 0.0。
@@ -221,15 +219,11 @@ def _safe_n_day_return(ticker: str, days: int = 5, period: str = "20d") -> float
 
 def calc_market_score() -> int:
     """
-    地合いスコア（0〜100）を算出する本物ロジック。
-    ざっくりイメージ：
+    地合いスコア（0〜100）を算出。
     - 日本株（N225 / TOPIX）の強さ
     - 米ハイテク（NDX）の雰囲気
     - VIX（恐怖指数、低いほど良い）
     - ドル円（急変はマイナス）
-
-    ★ポイント：
-    「今日は攻めてOKか？」をざっくり点数化。
     """
     # 日本株：日経・TOPIXの 1日 & 5日リターン
     nk_1 = _safe_last_pct(_MARKET_TICKERS["NK"])
@@ -254,9 +248,7 @@ def calc_market_score() -> int:
     jp_today = (nk_1 + tp_1) / 2.0
     jp_5d = (nk_5 + tp_5) / 2.0
 
-    # 1日 +1% で +10点、-1% で -10点くらいのノリ
     score += max(-15.0, min(15.0, jp_today * 10.0))
-    # 5日 +3% で +10点、-3% で -10点
     score += max(-10.0, min(10.0, jp_5d * (10.0 / 3.0)))
 
     # 米ハイテク（NDX）：リスクオンかどうか
@@ -276,15 +268,14 @@ def calc_market_score() -> int:
     return int(round(score))
 
 
-# 簡易セクター→インデックス/ETF対応表（必要に応じてメンテ）
+# セクター → インデックス/ETF 対応（必要に応じてユーザー側で調整）
 _SECTOR_TICKER_MAP: Dict[str, str] = {
-    # 例：ユーザーの universe_jpx.csv の sector 名と対応づける
-    "電機・精密": "1615.T",  # 銀行など、仮の例（実運用時は調整推奨）
-    "銀行": "1615.T",       # 銀行ETF
-    "エネルギー資源": "1662.T",  # 石油
-    "建設": "1619.T",       # 建設・資材
-    "情報通信": "1595.T",    # テクノロジー系
-    # 見つからない場合は TOPIX 全体にフォールバック
+    "電機・精密": "1615.T",
+    "銀行": "1615.T",
+    "エネルギー資源": "1662.T",
+    "建設": "1619.T",
+    "情報通信": "1595.T",
+    # 見つからない場合は TOPIX にフォールバック
 }
 
 
@@ -293,18 +284,19 @@ def calc_sector_strength(sector: str) -> int:
     セクター強度（0〜100）。
     - 対応するETF/指数があればそれを利用
     - 無ければ TOPIX 全体と同じ扱い
-
-    基本イメージ：
-    - 直近1日・5日のパフォーマンスが良いほど高得点
-    - 市場平均に劣るセクターは点数を下げる
     """
     sector = str(sector)
     ticker = _SECTOR_TICKER_MAP.get(sector, _MARKET_TICKERS["TOPIX"])
 
     sec_1 = _safe_last_pct(ticker)
     sec_5 = _safe_n_day_return(ticker, days=5)
+    sec_20 = _safe_n_day_return(ticker, days=20)
+    sec_60 = _safe_n_day_return(ticker, days=60, period="250d")
+
     mkt_1 = _safe_last_pct(_MARKET_TICKERS["TOPIX"])
     mkt_5 = _safe_n_day_return(_MARKET_TICKERS["TOPIX"], days=5)
+    mkt_20 = _safe_n_day_return(_MARKET_TICKERS["TOPIX"], days=20)
+    mkt_60 = _safe_n_day_return(_MARKET_TICKERS["TOPIX"], days=60, period="250d")
 
     score = 50.0
 
@@ -312,18 +304,165 @@ def calc_sector_strength(sector: str) -> int:
     score += max(-15.0, min(15.0, sec_1 * 8.0))
     score += max(-10.0, min(10.0, sec_5 * (10.0 / 3.0)))
 
+    # 中期〜長期
+    score += max(-8.0, min(8.0, sec_20 * 2.0))
+    score += max(-7.0, min(7.0, sec_60 * 1.5))
+
     # 相対パフォーマンス（TOPIX比）
     rel_1 = sec_1 - mkt_1
     rel_5 = sec_5 - mkt_5
+    rel_20 = sec_20 - mkt_20
+    rel_60 = sec_60 - mkt_60
+
     score += max(-10.0, min(10.0, rel_1 * 10.0))
-    score += max(-5.0, min(5.0, rel_5 * 3.0))
+    score += max(-6.0, min(6.0, rel_5 * 3.0))
+    score += max(-6.0, min(6.0, rel_20 * 2.0))
+    score += max(-5.0, min(5.0, rel_60 * 1.5))
 
     score = max(0.0, min(100.0, score))
     return int(round(score))
 
 
 # =====================================================
-# スコア内部ロジック（トレンド/押し目/流動性強化）
+# ファンダメンタルスコア
+# =====================================================
+
+
+def fetch_fundamentals(ticker: str) -> Dict[str, float]:
+    """
+    yfinance から簡易ファンダ情報を取得して dict で返す。
+    取れないものは NaN。
+    """
+    out: Dict[str, float] = {
+        "market_cap": np.nan,
+        "roe": np.nan,
+        "op_margin": np.nan,
+        "rev_growth": np.nan,
+        "pbr": np.nan,
+        "per": np.nan,
+        "div_yield": np.nan,
+    }
+
+    try:
+        tk = yf.Ticker(ticker)
+    except Exception:
+        return out
+
+    # fast_info から時価総額
+    try:
+        fi = tk.fast_info
+        mc = getattr(fi, "market_cap", None)
+        if mc is not None:
+            out["market_cap"] = float(mc)
+    except Exception:
+        pass
+
+    # info から各種指標
+    try:
+        info = tk.info
+    except Exception:
+        info = {}
+
+    def _get(key, default=np.nan):
+        v = info.get(key, default)
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+    # ROE / 営業利益率 / 成長率など（存在するなら）
+    out["roe"] = _get("returnOnEquity", np.nan)
+    out["op_margin"] = _get("operatingMargins", np.nan)
+    if np.isnan(out["op_margin"]):
+        out["op_margin"] = _get("profitMargins", np.nan)
+
+    out["rev_growth"] = _get("revenueGrowth", np.nan)
+    out["pbr"] = _get("priceToBook", np.nan)
+    out["per"] = _get("trailingPE", np.nan)
+    dy = info.get("dividendYield", np.nan)
+    try:
+        out["div_yield"] = float(dy) * 100.0 if dy not in (None, np.nan) else np.nan
+    except Exception:
+        out["div_yield"] = np.nan
+
+    return out
+
+
+def calc_fundamental_score(f: Dict[str, float]) -> int:
+    """
+    ファンダメンタルの総合スコア 0〜100。
+    - ROE
+    - 利益率
+    - 売上成長
+    - PBR
+    - 配当利回り
+    """
+    score = 0.0
+
+    roe = f.get("roe", np.nan)
+    opm = f.get("op_margin", np.nan)
+    gr = f.get("rev_growth", np.nan)
+    pbr = f.get("pbr", np.nan)
+    dy = f.get("div_yield", np.nan)
+
+    # ROE: 0〜20%以上を 0〜25点
+    if np.isfinite(roe):
+        if roe <= 0:
+            s = 0.0
+        elif roe >= 0.2:
+            s = 25.0
+        else:
+            s = 25.0 * (roe / 0.2)
+        score += s
+
+    # 営業利益率: 0〜20%以上を 0〜20点
+    if np.isfinite(opm):
+        if opm <= 0:
+            s = 0.0
+        elif opm >= 0.2:
+            s = 20.0
+        else:
+            s = 20.0 * (opm / 0.2)
+        score += s
+
+    # 売上成長率: -10%〜+20% を 0〜25点
+    if np.isfinite(gr):
+        if gr <= -0.1:
+            s = 0.0
+        elif gr >= 0.2:
+            s = 25.0
+        else:
+            s = 25.0 * ((gr + 0.1) / 0.3)
+        s = max(0.0, min(25.0, s))
+        score += s
+
+    # PBR: 1〜2倍を高評価、極端な高PBRは減点
+    if np.isfinite(pbr):
+        if pbr < 0.5:
+            s = 8.0
+        elif pbr <= 1.5:
+            s = 15.0
+        elif pbr <= 3.0:
+            s = 10.0
+        elif pbr <= 5.0:
+            s = 5.0
+        else:
+            s = 0.0
+        score += s
+
+    # 配当利回り: 2〜5% を高評価
+    if np.isfinite(dy) and dy > 0:
+        if 2.0 <= dy <= 5.0:
+            score += 10.0
+        elif dy > 0.5:
+            score += 5.0
+
+    score = max(0.0, min(100.0, score))
+    return int(round(score))
+
+
+# =====================================================
+# スコア内部ロジック
 # =====================================================
 
 
@@ -341,7 +480,7 @@ def _trend_metric(metrics: Dict[str, float]) -> float:
 
     score = 0.0
 
-    # 1) 傾き：右肩上がりを高評価
+    # 傾き：右肩上がりを高評価
     if np.isfinite(slope):
         if slope <= 0:
             slope_score = 0.0
@@ -351,7 +490,7 @@ def _trend_metric(metrics: Dict[str, float]) -> float:
             slope_score = 50.0 * (slope / 0.01)
         score += slope_score
 
-    # 2) 高値からの位置：高値更新圏〜浅い押しを高評価
+    # 高値からの位置：高値更新圏〜浅い押しを高評価
     if np.isfinite(off_high):
         if off_high >= 0:
             pos_score = 25.0  # 高値更新圏
@@ -361,7 +500,7 @@ def _trend_metric(metrics: Dict[str, float]) -> float:
             pos_score = 25.0 - (abs(off_high) / 25.0) * 20.0
         score += max(0.0, min(25.0, pos_score))
 
-    # 3) MA5 vs MA20：ゴールデンクロス・パーフェクトオーダー寄りを加点
+    # MA5 vs MA20：ゴールデンクロス寄りを加点
     if np.isfinite(ma5) and np.isfinite(ma20) and ma20 > 0:
         if ma5 > ma20:
             score += 15.0  # 短期が長期を上回る＝強い
@@ -378,11 +517,13 @@ def _pullback_metric(metrics: Dict[str, float]) -> float:
     - 高値からの下落率
     - 日柄（高値からの日数）
     - 下ヒゲ比率
+    - 出来高バースト
     """
     rsi = metrics.get("rsi", np.nan)
     off_high = metrics.get("off_high_pct", np.nan)
     days = metrics.get("days_since_high60", np.nan)
     shadow = metrics.get("lower_shadow_ratio", np.nan)
+    vol_ratio = metrics.get("vol_ratio20", np.nan)
 
     score = 0.0
 
@@ -391,7 +532,6 @@ def _pullback_metric(metrics: Dict[str, float]) -> float:
         if rsi < 20 or rsi > 60:
             rsi_score = 5.0
         elif 20 <= rsi <= 50:
-            # 20→0点, 35→満点, 50→0点（山型）
             center = 35.0
             width = 15.0
             rsi_score = 45.0 * max(0.0, 1.0 - abs(rsi - center) / width)
@@ -401,7 +541,6 @@ def _pullback_metric(metrics: Dict[str, float]) -> float:
 
     # 高値からの下落率
     if np.isfinite(off_high):
-        # -5%〜-25% の押しを高評価
         if off_high >= -3:
             drop_score = 10.0
         elif off_high <= -30:
@@ -432,6 +571,18 @@ def _pullback_metric(metrics: Dict[str, float]) -> float:
             shadow_score = 0.0
         score += shadow_score
 
+    # 出来高バースト（Volume Burst）
+    if np.isfinite(vol_ratio):
+        if vol_ratio >= 2.5:
+            vol_score = 10.0
+        elif vol_ratio >= 1.5:
+            vol_score = 7.0
+        elif vol_ratio >= 1.0:
+            vol_score = 3.0
+        else:
+            vol_score = 0.0
+        score += vol_score
+
     return max(0.0, min(100.0, score))
 
 
@@ -444,7 +595,7 @@ def _liquidity_score(metrics: Dict[str, float]) -> float:
     turnover = metrics.get("turnover_avg20", np.nan)
     vola = metrics.get("vola20", np.nan)
 
-    # 売買代金: 1億〜20億で 0〜16点 に補正（大型〜中型を優遇）
+    # 売買代金: 1億〜20億で 0〜16点 に補正
     if not np.isfinite(turnover) or turnover < 1e8:
         liq = 0.0
     elif turnover >= 20e8:
@@ -452,15 +603,15 @@ def _liquidity_score(metrics: Dict[str, float]) -> float:
     else:
         liq = 16.0 * (turnover - 1e8) / (19e8)
 
-    # ボラティリティ: 低すぎても動かないので中庸を優遇
+    # ボラティリティ: 1.5〜3.5% をベストに
     if np.isfinite(vola):
-        if vola < 0.015:       # 1.5% 未満 → あまり動かない
+        if vola < 0.015:
             vola_score = 1.0
-        elif vola < 0.035:     # 1.5〜3.5% → 理想
+        elif vola < 0.035:
             vola_score = 4.0
-        elif vola < 0.06:      # 3.5〜6% → 少し荒い
+        elif vola < 0.06:
             vola_score = 2.0
-        else:                  # 6%以上 → ボラ高すぎ
+        else:
             vola_score = 0.0
     else:
         vola_score = 0.0
@@ -477,6 +628,7 @@ def calc_core_score(
     market_score: int,
     sector_strength: int,
     metrics: Dict[str, float],
+    fundamental_score: int | None = None,
 ) -> Tuple[int, str]:
     """
     Core用（中期押し目）スコア 0〜100 ＋ コメント1行
@@ -485,20 +637,25 @@ def calc_core_score(
     - セクター強度 20
     - トレンド強度 20
     - 押し目の質 20
-    - 流動性 & 安定度 20
+    - 流動性 & 安定度 10
+    - ファンダ 10
     """
     trend_raw = _trend_metric(metrics)        # 0〜100
     pullback_raw = _pullback_metric(metrics)  # 0〜100
     liq_raw = _liquidity_score(metrics)       # 0〜20
 
-    # 各項目をウェイトに合わせてスケーリング
     m_component = max(0.0, min(20.0, market_score / 100.0 * 20.0))
     s_component = max(0.0, min(20.0, sector_strength / 100.0 * 20.0))
     t_component = max(0.0, min(20.0, trend_raw / 100.0 * 20.0))
     p_component = max(0.0, min(20.0, pullback_raw / 100.0 * 20.0))
-    l_component = max(0.0, min(20.0, liq_raw))
+    l_component = max(0.0, min(10.0, liq_raw / 20.0 * 10.0))
 
-    total = int(round(m_component + s_component + t_component + p_component + l_component))
+    if fundamental_score is None or not np.isfinite(fundamental_score):
+        f_component = 5.0  # 情報なしなら中立寄り
+    else:
+        f_component = max(0.0, min(10.0, fundamental_score / 100.0 * 10.0))
+
+    total = int(round(m_component + s_component + t_component + p_component + l_component + f_component))
 
     # コメント生成
     comments: List[str] = []
@@ -528,6 +685,19 @@ def calc_core_score(
         comments.append("流動性◎")
     elif liq_raw >= 10:
         comments.append("流動性◯")
+
+    vol_ratio = metrics.get("vol_ratio20", np.nan)
+    if np.isfinite(vol_ratio):
+        if vol_ratio >= 2.0:
+            comments.append("需給◎（出来高増）")
+        elif vol_ratio >= 1.3:
+            comments.append("需給◯")
+
+    if fundamental_score is not None and np.isfinite(fundamental_score):
+        if fundamental_score >= 70:
+            comments.append("ファンダ◎")
+        elif fundamental_score >= 50:
+            comments.append("ファンダ◯")
 
     if not comments:
         comments.append("押し目良好")
@@ -599,7 +769,7 @@ def calc_shortterm_score(
 
 
 # =====================================================
-# メッセージ整形（Ver2.0）
+# メッセージ整形
 # =====================================================
 
 
@@ -666,7 +836,7 @@ def _rank_sectors_from_candidates(
     scored: list[tuple[str, int]] = []
     for sec, cnt in counts.items():
         strength = sector_strength_map.get(sec, 50)
-        score = cnt * 10 + strength  # 出現数をやや重視
+        score = cnt * 10 + strength
         scored.append((sec, score))
 
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -679,14 +849,12 @@ def _build_priority_names(core_list: list[dict], short_list: list[dict]) -> list
     """
     top: list[str] = []
 
-    # Core優先
     for r in core_list:
         code = r["ticker"].replace(".T", "")
         top.append(f"{code} {r['name']}（Core {r['score']}）")
         if len(top) >= 3:
             return top
 
-    # ShortTerm で補填
     for r in short_list:
         code = r["ticker"].replace(".T", "")
         top.append(f"{code} {r['name']}（Short {r['score']}）")
@@ -704,17 +872,10 @@ def build_line_message(
     sector_strength_map: dict[str, int],
 ) -> str:
     """
-    LINE通知 Ver2.0 の本文を 1 本のテキストとして返す。
-    フォーマット:
-    - 今日の結論（最優先セクター、最優先銘柄TOP3含む）
-    - TOPセクター
-    - 相場3行まとめ
-    - Core
-    - ShortTerm
+    LINE通知本文を 1 本のテキストとして返す。
     """
     label, regime_label, max_lev, max_pos, comment = _market_label_and_risk(market_score)
 
-    # セクターランキング
     ranked_sectors = _rank_sectors_from_candidates(core_list, short_list, sector_strength_map)
     if ranked_sectors:
         top_sector_name = ranked_sectors[0][0]
@@ -723,7 +884,6 @@ def build_line_message(
         top_sector_name = "なし"
         top_sector_strength = 0
 
-    # 最優先銘柄TOP3
     priority_names = _build_priority_names(core_list, short_list)
 
     lines: list[str] = []
@@ -748,7 +908,6 @@ def build_line_message(
         lines.append("- 最優先銘柄TOP3: 対象なし")
     lines.append("")
 
-    # TOPセクター表示
     lines.append("◆ 今日のTOPセクター")
     if ranked_sectors:
         for i, (sec, score) in enumerate(ranked_sectors[:3], 1):
@@ -758,13 +917,11 @@ def build_line_message(
         lines.append("セクター候補なし（Core/ShortTerm該当なし）")
     lines.append("")
 
-    # 相場3行まとめ
     lines.append("◆ 今日の相場3行まとめ")
     three_lines = _build_three_line_summary(market_score, top_sector_name)
     lines.extend(three_lines)
     lines.append("")
 
-    # Coreセクション
     lines.append("◆ Core（本命候補）")
     if core_list:
         for i, r in enumerate(core_list, 1):
@@ -777,7 +934,6 @@ def build_line_message(
         lines.append("本命条件を満たす銘柄なし。今日は無理に攻めない選択もあり。")
     lines.append("")
 
-    # ShortTermセクション
     lines.append("◆ ShortTerm（短期1〜3日候補）")
     if short_list:
         for i, r in enumerate(short_list, 1):
