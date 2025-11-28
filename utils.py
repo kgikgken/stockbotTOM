@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
@@ -5,6 +6,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import os
+import yfinance as yf
 
 
 # =====================================================
@@ -168,28 +170,160 @@ def extract_metrics(df: pd.DataFrame) -> Dict[str, float] | None:
 
 
 # =====================================================
-# 地合い・セクター強度（仮実装）
+# 地合い・セクター強度（強化版）
 # =====================================================
+
+# yfinance で使うインデックス / ETF
+_MARKET_TICKERS = {
+    "NK": "^N225",      # 日経平均
+    "TOPIX": "^TOPX",   # TOPIX
+    "NDX": "^NDX",      # NASDAQ100
+    "VIX": "^VIX",      # VIX
+    "USDJPY": "JPY=X",  # ドル円（Yahooは JPY=X）
+}
+
+
+def _safe_last_pct(ticker: str, period: str = "10d") -> float:
+    """
+    指定ティッカーの直近の日足から「前日比(%)」を返す。
+    取れなければ 0.0。
+    """
+    try:
+        df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False)
+    except Exception:
+        return 0.0
+    if df is None or len(df) < 2:
+        return 0.0
+    close = df["Close"].astype(float)
+    ret = close.pct_change().iloc[-1]
+    if not np.isfinite(ret):
+        return 0.0
+    return float(ret * 100.0)  # %
+
+
+def _safe_n_day_return(ticker: str, days: int = 5, period: str = "20d") -> float:
+    """
+    指定ティッカーの n 日リターン(%) を返す。
+    足りなければ 0.0。
+    """
+    try:
+        df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False)
+    except Exception:
+        return 0.0
+    if df is None or len(df) <= days:
+        return 0.0
+    close = df["Close"].astype(float)
+    ret = close.iloc[-1] / close.iloc[-(days + 1)] - 1.0
+    if not np.isfinite(ret):
+        return 0.0
+    return float(ret * 100.0)
 
 
 def calc_market_score() -> int:
     """
-    とりあえず 60 固定。
-    あとでユーザーが本物ロジックに差し替える前提。
+    地合いスコア（0〜100）を算出する本物ロジック。
+    ざっくりイメージ：
+    - 日本株（N225 / TOPIX）の強さ
+    - 米ハイテク（NDX）の雰囲気
+    - VIX（恐怖指数、低いほど良い）
+    - ドル円（急変はマイナス）
+
+    ★ポイント：
+    「今日は攻めてOKか？」をざっくり点数化。
     """
-    return 60
+    # 日本株：日経・TOPIXの 1日 & 5日リターン
+    nk_1 = _safe_last_pct(_MARKET_TICKERS["NK"])
+    nk_5 = _safe_n_day_return(_MARKET_TICKERS["NK"], days=5)
+
+    tp_1 = _safe_last_pct(_MARKET_TICKERS["TOPIX"])
+    tp_5 = _safe_n_day_return(_MARKET_TICKERS["TOPIX"], days=5)
+
+    # 米ハイテク
+    ndx_1 = _safe_last_pct(_MARKET_TICKERS["NDX"])
+    ndx_5 = _safe_n_day_return(_MARKET_TICKERS["NDX"], days=5)
+
+    # VIX：上昇はリスクオフ
+    vix_1 = _safe_last_pct(_MARKET_TICKERS["VIX"])
+
+    # ドル円の1日変動（急変ならマイナス）
+    fx_1 = _safe_last_pct(_MARKET_TICKERS["USDJPY"])
+
+    score = 50.0  # ベースは中立50
+
+    # 日本株（重視）
+    jp_today = (nk_1 + tp_1) / 2.0
+    jp_5d = (nk_5 + tp_5) / 2.0
+
+    # 1日 +1% で +10点、-1% で -10点くらいのノリ
+    score += max(-15.0, min(15.0, jp_today * 10.0))
+    # 5日 +3% で +10点、-3% で -10点
+    score += max(-10.0, min(10.0, jp_5d * (10.0 / 3.0)))
+
+    # 米ハイテク（NDX）：リスクオンかどうか
+    us_mix = (ndx_1 * 0.6 + ndx_5 * 0.4)
+    score += max(-8.0, min(8.0, us_mix * 4.0))
+
+    # VIX：上昇＝マイナス
+    score -= max(-10.0, min(10.0, vix_1 * 2.0))
+
+    # ドル円：急激な動きはマイナス
+    if abs(fx_1) > 0.7:
+        score -= 5.0
+    elif abs(fx_1) > 0.4:
+        score -= 2.0
+
+    score = max(0.0, min(100.0, score))
+    return int(round(score))
+
+
+# 簡易セクター→インデックス/ETF対応表（必要に応じてメンテ）
+_SECTOR_TICKER_MAP: Dict[str, str] = {
+    # 例：ユーザーの universe_jpx.csv の sector 名と対応づける
+    "電機・精密": "1615.T",  # 銀行など、仮の例（実運用時は調整推奨）
+    "銀行": "1615.T",       # 銀行ETF
+    "エネルギー資源": "1662.T",  # 石油
+    "建設": "1619.T",       # 建設・資材
+    "情報通信": "1595.T",    # テクノロジー系
+    # 見つからない場合は TOPIX 全体にフォールバック
+}
 
 
 def calc_sector_strength(sector: str) -> int:
     """
-    セクター強度（仮で全部50固定）。
-    あとでTOPIX-17などから差し替え予定。
+    セクター強度（0〜100）。
+    - 対応するETF/指数があればそれを利用
+    - 無ければ TOPIX 全体と同じ扱い
+
+    基本イメージ：
+    - 直近1日・5日のパフォーマンスが良いほど高得点
+    - 市場平均に劣るセクターは点数を下げる
     """
-    return 50
+    sector = str(sector)
+    ticker = _SECTOR_TICKER_MAP.get(sector, _MARKET_TICKERS["TOPIX"])
+
+    sec_1 = _safe_last_pct(ticker)
+    sec_5 = _safe_n_day_return(ticker, days=5)
+    mkt_1 = _safe_last_pct(_MARKET_TICKERS["TOPIX"])
+    mkt_5 = _safe_n_day_return(_MARKET_TICKERS["TOPIX"], days=5)
+
+    score = 50.0
+
+    # 絶対パフォーマンス
+    score += max(-15.0, min(15.0, sec_1 * 8.0))
+    score += max(-10.0, min(10.0, sec_5 * (10.0 / 3.0)))
+
+    # 相対パフォーマンス（TOPIX比）
+    rel_1 = sec_1 - mkt_1
+    rel_5 = sec_5 - mkt_5
+    score += max(-10.0, min(10.0, rel_1 * 10.0))
+    score += max(-5.0, min(5.0, rel_5 * 3.0))
+
+    score = max(0.0, min(100.0, score))
+    return int(round(score))
 
 
 # =====================================================
-# スコア内部ロジック
+# スコア内部ロジック（トレンド/押し目/流動性強化）
 # =====================================================
 
 
@@ -198,30 +332,41 @@ def _trend_metric(metrics: Dict[str, float]) -> float:
     トレンド強度を 0〜100 に正規化。
     - 20MA の傾き (slope)
     - 高値からの位置 (off_high_pct)
+    - MA5 と MA20 の位置関係
     """
     slope = metrics.get("trend_slope20", np.nan)
     off_high = metrics.get("off_high_pct", np.nan)
+    ma5 = metrics.get("ma5", np.nan)
+    ma20 = metrics.get("ma20", np.nan)
 
     score = 0.0
 
+    # 1) 傾き：右肩上がりを高評価
     if np.isfinite(slope):
         if slope <= 0:
             slope_score = 0.0
         elif slope >= 0.01:  # 1%/日 以上ならMAX
-            slope_score = 60.0
+            slope_score = 50.0
         else:
-            slope_score = 60.0 * (slope / 0.01)
+            slope_score = 50.0 * (slope / 0.01)
         score += slope_score
 
+    # 2) 高値からの位置：高値更新圏〜浅い押しを高評価
     if np.isfinite(off_high):
-        # 高値から -0%〜-20% の範囲を 0〜40 点にマッピング（浅めの押しが高得点）
         if off_high >= 0:
-            pos_score = 30.0  # 高値更新圏
+            pos_score = 25.0  # 高値更新圏
         elif off_high <= -25:
             pos_score = 5.0
         else:
-            pos_score = 30.0 - (abs(off_high) / 25.0) * 25.0
-        score += max(0.0, min(40.0, pos_score))
+            pos_score = 25.0 - (abs(off_high) / 25.0) * 20.0
+        score += max(0.0, min(25.0, pos_score))
+
+    # 3) MA5 vs MA20：ゴールデンクロス・パーフェクトオーダー寄りを加点
+    if np.isfinite(ma5) and np.isfinite(ma20) and ma20 > 0:
+        if ma5 > ma20:
+            score += 15.0  # 短期が長期を上回る＝強い
+        elif ma5 > ma20 * 0.98:
+            score += 8.0   # ほぼ同水準
 
     return max(0.0, min(100.0, score))
 
@@ -244,12 +389,12 @@ def _pullback_metric(metrics: Dict[str, float]) -> float:
     # RSI 部分：30〜40 を高評価にする三角関数
     if np.isfinite(rsi):
         if rsi < 20 or rsi > 60:
-            rsi_score = 10.0
+            rsi_score = 5.0
         elif 20 <= rsi <= 50:
             # 20→0点, 35→満点, 50→0点（山型）
             center = 35.0
             width = 15.0
-            rsi_score = 40.0 * max(0.0, 1.0 - abs(rsi - center) / width)
+            rsi_score = 45.0 * max(0.0, 1.0 - abs(rsi - center) / width)
         else:
             rsi_score = 10.0
         score += rsi_score
@@ -262,15 +407,15 @@ def _pullback_metric(metrics: Dict[str, float]) -> float:
         elif off_high <= -30:
             drop_score = 5.0
         else:
-            drop_score = 30.0 * min(1.0, abs(off_high - 3) / 25.0)
-        score += max(0.0, min(30.0, drop_score))
+            drop_score = 25.0 * min(1.0, abs(off_high - 3) / 25.0)
+        score += max(0.0, min(25.0, drop_score))
 
     # 日柄（2〜15日くらいの調整を高評価）
     if np.isfinite(days):
         if days < 1:
             day_score = 5.0
         elif days > 30:
-            day_score = 10.0
+            day_score = 8.0
         else:
             center = 8.0
             width = 8.0
@@ -299,22 +444,24 @@ def _liquidity_score(metrics: Dict[str, float]) -> float:
     turnover = metrics.get("turnover_avg20", np.nan)
     vola = metrics.get("vola20", np.nan)
 
-    # 売買代金: 1億〜10億で 0〜16点
+    # 売買代金: 1億〜20億で 0〜16点 に補正（大型〜中型を優遇）
     if not np.isfinite(turnover) or turnover < 1e8:
         liq = 0.0
-    elif turnover >= 10e8:
+    elif turnover >= 20e8:
         liq = 16.0
     else:
-        liq = 16.0 * (turnover - 1e8) / (9e8)
+        liq = 16.0 * (turnover - 1e8) / (19e8)
 
-    # ボラティリティ: 低め〜適度を優遇
+    # ボラティリティ: 低すぎても動かないので中庸を優遇
     if np.isfinite(vola):
-        if vola < 0.02:       # 2%
+        if vola < 0.015:       # 1.5% 未満 → あまり動かない
+            vola_score = 1.0
+        elif vola < 0.035:     # 1.5〜3.5% → 理想
             vola_score = 4.0
-        elif vola > 0.06:     # 6%以上は減点
+        elif vola < 0.06:      # 3.5〜6% → 少し荒い
+            vola_score = 2.0
+        else:                  # 6%以上 → ボラ高すぎ
             vola_score = 0.0
-        else:
-            vola_score = 4.0 * (0.06 - vola) / (0.04)
     else:
         vola_score = 0.0
 
