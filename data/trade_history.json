@@ -8,5 +8,10 @@
     "timestamp": "2025-11-28T02:02:49.002Z",
     "profit": 100,
     "new_equity": 3030100
+  },
+  {
+    "timestamp": "2025-11-28T10:09:38.437Z",
+    "profit": 340562,
+    "new_equity": 3370662
   }
 ]
