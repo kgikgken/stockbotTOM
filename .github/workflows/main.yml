@@ -2,13 +2,15 @@ name: stockbot-scheduler
 
 on:
   schedule:
-    # JST 08:30 → UTC 23:30（前日）
-    - cron: "30 23 * * *"
+    - cron: '30 23 * * *'   # JST 08:30 = UTC 23:30
   workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+
+    env:
+      WORKER_URL: ${{ secrets.WORKER_URL }}
 
     steps:
       - name: Checkout repository
@@ -17,21 +19,15 @@ jobs:
       - name: Set LINE token
         run: echo "LINE_TOKEN=${{ secrets.LINE_TOKEN }}" >> $GITHUB_ENV
 
-      - name: Set WORKER_URL
-        run: echo "WORKER_URL=${{ secrets.WORKER_URL }}" >> $GITHUB_ENV
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy requests
 
       - name: Run main.py
-        env:
-          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
-          WORKER_URL: ${{ secrets.WORKER_URL }}
-        run: |
-          python main.py
+        run: python main.py
