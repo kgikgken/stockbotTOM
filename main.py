@@ -823,6 +823,44 @@ def screen_all() -> str:
 
 # =================================================
 # 9. エントリポイント
+# ============================
+#  LINE送信（Cloudflare Worker 経由）
+# ============================
+import os
+import requests
+
+def send_to_lineworker(text: str):
+    """Cloudflare Worker に結果を送る → WorkerがLINEへ投稿する"""
+    WORKER_URL = os.getenv("WORKER_URL")   # GitHub Actions で環境変数に設定したURL
+
+    if not WORKER_URL:
+        print("ERROR: WORKER_URL not set")
+        return
+
+    payload = {"text": text}
+
+    try:
+        r = requests.post(
+            WORKER_URL,
+            json=payload,
+            timeout=15
+        )
+        print("Worker response:", r.status_code, r.text)
+    except Exception as e:
+        print("ERROR while sending to Worker:", e)
+
+
+# ============================
+#  エントリポイント
+# ============================
+def main() -> None:
+    text = screen_all()
+    print(text)
+    send_to_lineworker(text)  # ← これが無かったのでLINEに届かなかった
+
+
+if __name__ == "__main__":
+    main()
 # =================================================
 
 def main() -> None:
