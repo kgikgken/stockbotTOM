@@ -1,52 +1,31 @@
 from __future__ import annotations
-"""
-stockbotTOM / main.py
-
-日本株スイングトレード朝イチスクリーニング & 戦略通知ボット（完全版）
-- universe_jpx.csv → 全銘柄ユニバース
-- yfinance → 日足を取得
-- utils.market → 地合いスコア（Market Score）
-- utils.scoring → Core A/B スコア判定
-- positions.csv → ポジション分析（資産/損益/レバレッジ）
-- Cloudflare Worker 経由でLINEに通知
-"""
-
 import os
-import json
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
-
-from utils.market import calc_market_score
-from utils.scoring import score_stock, classify_core
-
 import yfinance as yf
 import requests
 
+from utils.market import calc_market_score
+from utils.sector import top_sectors_5d
+from utils.position import load_positions, analyze_positions
+from utils.scoring import score_stock
+from utils.util import jst_today_str
+
 
 # ============================================================
-# LINE 送信用（Worker）
+# 基本設定
 # ============================================================
+UNIVERSE_PATH = "universe_jpx.csv"
 WORKER_URL = os.getenv("WORKER_URL")
 
-def send_line_message(text: str):
-    if not WORKER_URL:
-        print("[ERROR] WORKER_URL が未設定")
-        return
-    try:
-        r = requests.post(WORKER_URL, json={"message": text})
-        print("LINE 送信ステータス:", r.status_code)
-    except Exception as e:
-        print("LINE送信エラー:", e)
-
 
 # ============================================================
-# 銘柄データ取得
+# データ取得（安全版）
 # ============================================================
-def fetch_price(ticker: str):
+def fetch_history(ticker: str, period="130d"):
     try:
-        df = yf.Ticker(ticker).history(period="3mo")
-        if df.empty:
+        df = yf.Ticker(ticker).history(period=period)
+        if df is None or df.empty:
             return None
         return df
     except:
@@ -54,142 +33,138 @@ def fetch_price(ticker: str):
 
 
 # ============================================================
-# ポジション読み込み
-# ============================================================
-def load_positions() -> pd.DataFrame:
-    try:
-        return pd.read_csv("positions.csv")
-    except:
-        return pd.DataFrame(columns=["ticker", "qty", "avg_price"])
-
-
-# ============================================================
-# ポジション分析
-# ============================================================
-def analyze_positions(df_pos: pd.DataFrame):
-    result_lines = []
-
-    total_value = 0
-    for _, row in df_pos.iterrows():
-        ticker = row["ticker"]
-        qty = row["qty"]
-        avg = row["avg_price"]
-
-        hist = fetch_price(ticker)
-        if hist is None:
-            result_lines.append(f"- {ticker}: データ取得失敗（現値不明）")
-            continue
-
-        current = float(hist["Close"].iloc[-1])
-        pnl_pct = (current - avg) / avg * 100
-        pv = current * qty
-        total_value += pv
-
-        result_lines.append(
-            f"- {ticker}: 現値 {current:.1f} / 取得 {avg:.1f} / 損益 {pnl_pct:+.2f}%"
-        )
-
-    # 推定資産
-    try:
-        with open("data/equity.json", "r") as f:
-            equity_data = json.load(f)
-            est_equity = equity_data.get("equity", 3000000)
-    except:
-        est_equity = 3000000
-
-    leverage = total_value / est_equity if est_equity > 0 else 0
-
-    return result_lines, total_value, est_equity, leverage
-
-
-# ============================================================
-# Core 候補スクリーニング
+# スクリーニング実行
 # ============================================================
 def run_screening():
-    # 銘柄ユニバース
-    uni = pd.read_csv("universe_jpx.csv")
+    try:
+        uni = pd.read_csv(UNIVERSE_PATH)
+    except:
+        return [], []
 
-    results_A = []
-    results_B = []
+    if "ticker" not in uni.columns:
+        return [], []
+
+    A_list = []
+    B_list = []
 
     for _, row in uni.iterrows():
-        ticker = row["ticker"]
-        hist = fetch_price(ticker)
-        if hist is None:
+        ticker = str(row["ticker"])
+        name = str(row.get("name", ticker))
+        sector = str(row.get("sector", "不明"))
+
+        hist = fetch_history(ticker)
+        if hist is None or len(hist) < 60:
             continue
 
-        score = score_stock(hist)
-        rank = classify_core(score)
+        sc = score_stock(hist)
+        if sc is None:
+            continue
 
-        if rank == "A":
-            results_A.append((ticker, score))
-        elif rank == "B":
-            results_B.append((ticker, score))
+        price = float(hist["Close"].iloc[-1])
 
-    # スコア順に並べる
-    results_A.sort(key=lambda x: x[1], reverse=True)
-    results_B.sort(key=lambda x: x[1], reverse=True)
+        info = {
+            "ticker": ticker,
+            "name": name,
+            "sector": sector,
+            "score": sc,
+            "price": price,
+        }
 
-    return results_A, results_B
+        if sc >= 80:
+            A_list.append(info)
+        elif sc >= 70:
+            B_list.append(info)
+
+    A_list = sorted(A_list, key=lambda x: x["score"], reverse=True)
+    B_list = sorted(B_list, key=lambda x: x["score"], reverse=True)
+
+    return A_list, B_list
 
 
 # ============================================================
-# 日報作成
+# レポート生成
 # ============================================================
 def build_report():
+    today = jst_today_str()
+
     # ---- 地合い ----
     mkt = calc_market_score()
-    market_score = mkt["score"]
-    market_comment = mkt["comment"]
+    mkt_score = mkt["score"]
+    mkt_comment = mkt["comment"]
 
-    # ---- スクリーニング ----
+    # ---- セクター ----
+    secs = top_sectors_5d()
+    if secs:
+        sector_text = "\n".join([f"{i+1}. {s[0]} ({s[1]:+.2f}%)" for i, s in enumerate(secs)])
+    else:
+        sector_text = "算出不可（データ不足）"
+
+    # ---- screening ----
     A_list, B_list = run_screening()
 
-    # ---- ポジション ----
-    df_pos = load_positions()
-    pos_lines, total_value, est_equity, leverage = analyze_positions(df_pos)
+    # ---- ポジ ----
+    pos_df = load_positions()
+    pos_text, total_asset = analyze_positions(pos_df)
 
-    # ---- レポート文面 ----
+    # ---- assemble ----
     lines = []
-    today = (datetime.now(timezone(timedelta(hours=9)))).strftime("%Y-%m-%d")
-
     lines.append(f"📅 {today} stockbotTOM 日報\n")
-    lines.append("◆ 今日の結論")
-    lines.append(f"- 地合いスコア: {market_score}点")
-    lines.append(f"- コメント: {market_comment}")
-    lines.append(f"- 推定運用資産: {est_equity:,.0f}円\n")
 
-    # ---- Core A ----
+    lines.append("◆ 今日の結論")
+    lines.append(f"- 地合いスコア: {mkt_score}点")
+    lines.append(f"- コメント: {mkt_comment}")
+    lines.append("")
+
+    lines.append("◆ 今日のTOPセクター（5日騰落率）")
+    lines.append(sector_text)
+    lines.append("")
+
     lines.append("◆ Core候補 Aランク（本命押し目）")
-    if len(A_list) == 0:
+    if not A_list:
         lines.append("本命Aランクなし。")
     else:
-        for t, s in A_list[:10]:
-            lines.append(f"{t} : Score {s}")
+        for r in A_list:
+            lines.append(f"- {r['ticker']} {r['name']}  Score:{r['score']}  現値:{r['price']:.1f}")
+    lines.append("")
 
-    # ---- Core B ----
-    lines.append("\n◆ Core候補 Bランク（押し目候補）")
-    if len(B_list) == 0:
-        lines.append("Bランクもなし。")
+    lines.append("◆ Core候補 Bランク（押し目候補）")
+    if not B_list:
+        lines.append("Bランク候補なし。")
     else:
-        for t, s in B_list[:10]:
-            lines.append(f"{t} : Score {s}")
+        for r in B_list:
+            lines.append(f"- {r['ticker']} {r['name']}  Score:{r['score']}  現値:{r['price']:.1f}")
+    lines.append("")
 
-    # ---- ポジション ----
-    lines.append("\n◆ ポジション分析")
-    lines.append(f"推定ポジション総額: {total_value:,.0f}円（レバ約 {leverage:.2f}倍）")
-    if len(pos_lines) == 0:
-        lines.append("ポジションなし。")
-    else:
-        lines.extend(pos_lines)
+    lines.append("◆ ポジション分析")
+    lines.append(pos_text)
 
     return "\n".join(lines)
 
 
 # ============================================================
-# メイン
+# LINE送信
 # ============================================================
-if __name__ == "__main__":
+def send_line(text: str):
+    if not WORKER_URL:
+        print("[WARN] WORKER_URL が未設定（printのみ）")
+        print(text)
+        return
+
+    try:
+        r = requests.post(WORKER_URL, json={"text": text}, timeout=10)
+        print("[LINE RESULT]", r.status_code, r.text)
+    except Exception as e:
+        print("[ERROR] LINE送信に失敗:", e)
+
+
+# ============================================================
+# Entry
+# ============================================================
+def main():
     report = build_report()
     print(report)
-    send_line_message(report)
+    send_line(report)
+
+
+if __name__ == "__main__":
+    main()
