@@ -1,231 +1,195 @@
 from __future__ import annotations
-
 """
-日本株スイングトレード用 朝イチスクリーニング & 戦略通知ボット（完全版）
-機能:
-- universe_jpx.csv を読み込み（全銘柄ユニバース想定）
-- yfinance で日足 OHLCV を取得
-- テクニカル評価を算出
-- Core スコア（0〜100）を算出
-- 地合い（0〜100）
-- セクターTOP3（5日騰落率）
-- positions.csv から保有ポジション分析
-- data/equity.json による推定運用資産（LINE通知で更新前提）
-- Cloudflare Worker 経由で LINE にテキスト送信
+stockbotTOM / main.py
+
+日本株スイングトレード朝イチスクリーニング & 戦略通知ボット（完全版）
+- universe_jpx.csv → 全銘柄ユニバース
+- yfinance → 日足を取得
+- utils.market → 地合いスコア（Market Score）
+- utils.scoring → Core A/B スコア判定
+- positions.csv → ポジション分析（資産/損益/レバレッジ）
+- Cloudflare Worker 経由でLINEに通知
 """
 
 import os
-import math
 import json
-import numpy as np
 import pandas as pd
+import numpy as np
+from datetime import datetime, timezone, timedelta
+
+from utils.market import calc_market_score
+from utils.scoring import score_stock, classify_core
+
 import yfinance as yf
-from datetime import datetime, timedelta, timezone
-
-from utils import (
-    safe_price,
-    calc_market_score,
-    calc_sector_strength,
-    calc_core_score,
-    load_positions,
-    load_equity,
-    estimate_total_equity,
-)
-
-
-JST = timezone(timedelta(hours=9))
+import requests
 
 
 # ============================================================
-# Core 候補抽出
+# LINE 送信用（Worker）
 # ============================================================
+WORKER_URL = os.getenv("WORKER_URL")
 
-def load_universe(csv_path: str = "universe_jpx.csv") -> pd.DataFrame:
-    if not os.path.exists(csv_path):
-        return pd.DataFrame()
+def send_line_message(text: str):
+    if not WORKER_URL:
+        print("[ERROR] WORKER_URL が未設定")
+        return
     try:
-        df = pd.read_csv(csv_path)
-        df = df.dropna(subset=["ticker"])
-        df["ticker"] = df["ticker"].astype(str)
+        r = requests.post(WORKER_URL, json={"message": text})
+        print("LINE 送信ステータス:", r.status_code)
+    except Exception as e:
+        print("LINE送信エラー:", e)
+
+
+# ============================================================
+# 銘柄データ取得
+# ============================================================
+def fetch_price(ticker: str):
+    try:
+        df = yf.Ticker(ticker).history(period="3mo")
+        if df.empty:
+            return None
         return df
-    except Exception:
-        return pd.DataFrame()
+    except:
+        return None
 
 
-def screen_core_candidates(universe: pd.DataFrame) -> list[dict]:
-    """Core Aランクのみ抽出（score ≥ 75）"""
-
-    results = []
-
-    tickers = universe["ticker"].astype(str).tolist()
-    if len(tickers) == 0:
-        return []
-
-    # 一括取得（高速化）
+# ============================================================
+# ポジション読み込み
+# ============================================================
+def load_positions() -> pd.DataFrame:
     try:
-        hist = yf.download(
-            tickers=tickers,
-            period="60d",
-            interval="1d",
-            group_by="ticker",
-            progress=False,
+        return pd.read_csv("positions.csv")
+    except:
+        return pd.DataFrame(columns=["ticker", "qty", "avg_price"])
+
+
+# ============================================================
+# ポジション分析
+# ============================================================
+def analyze_positions(df_pos: pd.DataFrame):
+    result_lines = []
+
+    total_value = 0
+    for _, row in df_pos.iterrows():
+        ticker = row["ticker"]
+        qty = row["qty"]
+        avg = row["avg_price"]
+
+        hist = fetch_price(ticker)
+        if hist is None:
+            result_lines.append(f"- {ticker}: データ取得失敗（現値不明）")
+            continue
+
+        current = float(hist["Close"].iloc[-1])
+        pnl_pct = (current - avg) / avg * 100
+        pv = current * qty
+        total_value += pv
+
+        result_lines.append(
+            f"- {ticker}: 現値 {current:.1f} / 取得 {avg:.1f} / 損益 {pnl_pct:+.2f}%"
         )
-    except Exception:
-        hist = None
 
-    for t in tickers:
-        try:
-            h = hist[t] if hist is not None else yf.Ticker(t).history(period="60d")
-        except Exception:
-            continue
+    # 推定資産
+    try:
+        with open("data/equity.json", "r") as f:
+            equity_data = json.load(f)
+            est_equity = equity_data.get("equity", 3000000)
+    except:
+        est_equity = 3000000
 
-        if h is None or len(h) < 40:
-            continue
+    leverage = total_value / est_equity if est_equity > 0 else 0
 
-        score = calc_core_score(h)
-        if score >= 75:
-            results.append(
-                {
-                    "ticker": t,
-                    "score": score,
-                }
-            )
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results
+    return result_lines, total_value, est_equity, leverage
 
 
 # ============================================================
-# メッセージ生成
+# Core 候補スクリーニング
 # ============================================================
+def run_screening():
+    # 銘柄ユニバース
+    uni = pd.read_csv("universe_jpx.csv")
 
-def build_message(
-    market_info: dict,
-    sectors: list,
-    core_list: list,
-    positions: list,
-    total_equity: float,
-    total_position_value: float,
-):
+    results_A = []
+    results_B = []
+
+    for _, row in uni.iterrows():
+        ticker = row["ticker"]
+        hist = fetch_price(ticker)
+        if hist is None:
+            continue
+
+        score = score_stock(hist)
+        rank = classify_core(score)
+
+        if rank == "A":
+            results_A.append((ticker, score))
+        elif rank == "B":
+            results_B.append((ticker, score))
+
+    # スコア順に並べる
+    results_A.sort(key=lambda x: x[1], reverse=True)
+    results_B.sort(key=lambda x: x[1], reverse=True)
+
+    return results_A, results_B
+
+
+# ============================================================
+# 日報作成
+# ============================================================
+def build_report():
+    # ---- 地合い ----
+    mkt = calc_market_score()
+    market_score = mkt["score"]
+    market_comment = mkt["comment"]
+
+    # ---- スクリーニング ----
+    A_list, B_list = run_screening()
+
+    # ---- ポジション ----
+    df_pos = load_positions()
+    pos_lines, total_value, est_equity, leverage = analyze_positions(df_pos)
+
+    # ---- レポート文面 ----
     lines = []
+    today = (datetime.now(timezone(timedelta(hours=9)))).strftime("%Y-%m-%d")
 
-    today = datetime.now(JST).strftime("%Y-%m-%d")
     lines.append(f"📅 {today} stockbotTOM 日報\n")
-
-    # --------------------------------------------------------
-    # 地合い
-    # --------------------------------------------------------
-    ms = market_info
     lines.append("◆ 今日の結論")
-    lines.append(f"- 地合いスコア: {ms['score']}点")
-    lines.append(f"- コメント: {ms['comment']}\n")
+    lines.append(f"- 地合いスコア: {market_score}点")
+    lines.append(f"- コメント: {market_comment}")
+    lines.append(f"- 推定運用資産: {est_equity:,.0f}円\n")
 
-    # --------------------------------------------------------
-    # セクターTOP3
-    # --------------------------------------------------------
-    lines.append("◆ 今日のTOPセクター（5日騰落率）")
-    if len(sectors) == 0:
-        lines.append("算出できるセクターデータがありません。\n")
-    else:
-        for i, s in enumerate(sectors, 1):
-            lines.append(f"{i}位: {s['sector']}（{s['perf']:.2f}%）")
-        lines.append("")
-
-    # --------------------------------------------------------
-    # Core候補
-    # --------------------------------------------------------
+    # ---- Core A ----
     lines.append("◆ Core候補 Aランク（本命押し目）")
-    if len(core_list) == 0:
-        lines.append("本命Aランク条件なし。\n")
+    if len(A_list) == 0:
+        lines.append("本命Aランクなし。")
     else:
-        for c in core_list:
-            lines.append(f"- {c['ticker']}（Score {c['score']}）")
-        lines.append("")
+        for t, s in A_list[:10]:
+            lines.append(f"{t} : Score {s}")
 
-    # --------------------------------------------------------
-    # ポジション分析
-    # --------------------------------------------------------
-    lines.append("◆ ポジション分析")
-    lines.append(f"推定運用資産: {total_equity:,.0f}円")
-    lines.append(f"推定ポジション総額: {total_position_value:,.0f}円（レバ約 {total_position_value/total_equity:.2f}倍）")
-
-    if len(positions) == 0:
-        lines.append("保有ポジションなし。\n")
+    # ---- Core B ----
+    lines.append("\n◆ Core候補 Bランク（押し目候補）")
+    if len(B_list) == 0:
+        lines.append("Bランクもなし。")
     else:
-        for p in positions:
-            if p["current"] is None:
-                lines.append(f"- {p['ticker']}: データ取得失敗")
-            else:
-                pct = (p["current"] - p["price"]) / p["price"] * 100
-                lines.append(
-                    f"- {p['ticker']}: 現値 {p['current']} / 取得 {p['price']} / 損益 {pct:.2f}%"
-                )
-        lines.append("")
+        for t, s in B_list[:10]:
+            lines.append(f"{t} : Score {s}")
+
+    # ---- ポジション ----
+    lines.append("\n◆ ポジション分析")
+    lines.append(f"推定ポジション総額: {total_value:,.0f}円（レバ約 {leverage:.2f}倍）")
+    if len(pos_lines) == 0:
+        lines.append("ポジションなし。")
+    else:
+        lines.extend(pos_lines)
 
     return "\n".join(lines)
 
 
 # ============================================================
-# メイン処理
+# メイン
 # ============================================================
-
-def main():
-    universe = load_universe()
-    positions = load_positions()
-    equity_json = load_equity()
-
-    # --------------------------------------------------------
-    # 地合い
-    # --------------------------------------------------------
-    market_info = calc_market_score()
-
-    # --------------------------------------------------------
-    # セクタートップ
-    # --------------------------------------------------------
-    sectors = calc_sector_strength()
-
-    # --------------------------------------------------------
-    # Core候補 Aランク
-    # --------------------------------------------------------
-    core_list = screen_core_candidates(universe)
-
-    # --------------------------------------------------------
-    # ポジション評価
-    # --------------------------------------------------------
-    total_equity = estimate_total_equity(equity_json, positions)
-    total_position_value = 0
-
-    for p in positions:
-        cur = safe_price(p["ticker"])
-        p["current"] = cur
-        if cur is not None:
-            total_position_value += cur * p["qty"]
-
-    # --------------------------------------------------------
-    # LINE メッセージ作成
-    # --------------------------------------------------------
-    msg = build_message(
-        market_info,
-        sectors,
-        core_list,
-        positions,
-        total_equity,
-        total_position_value,
-    )
-
-    print(msg)
-
-    # --------------------------------------------------------
-    # Cloudflare Worker へ送信
-    # --------------------------------------------------------
-    url = os.getenv("WORKER_URL", "")
-    if url:
-        try:
-            import requests
-            requests.post(url, json={"text": msg}, timeout=10)
-        except Exception as e:
-            print("[WARN] LINE送信エラー:", e)
-
-
 if __name__ == "__main__":
-    main()
+    report = build_report()
+    print(report)
+    send_line_message(report)
