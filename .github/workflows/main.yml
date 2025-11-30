@@ -2,8 +2,7 @@ name: Run stockbot
 
 on:
   schedule:
-    # JST 08:30 実行 → UTC 23:30（前日）
-    - cron: '30 23 * * *'
+    - cron: '30 23 * * *'   # JST 08:30 実行
   workflow_dispatch:
 
 jobs:
@@ -22,10 +21,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-
-    # 🔥 CSV読み込みエラー対策：CSVを作業ディレクトリへコピー
-    - name: Copy csv files
-      run: cp *.csv ./
 
     - name: Run bot
       env:
