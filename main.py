@@ -9,7 +9,7 @@ from utils.market import calc_market_score
 from utils.sector import top_sectors_5d
 from utils.position import load_positions, analyze_positions
 from utils.scoring import score_stock
-from utils.market import jst_today_str
+from utils.util import jst_today_str
 
 
 # ============================================================
@@ -20,20 +20,21 @@ WORKER_URL = os.getenv("WORKER_URL")
 
 
 # ============================================================
-# データ取得（安全版）
+# 安全データ取得
 # ============================================================
 def fetch_history(ticker: str, period="130d"):
+    """yfinance安全ラッパー"""
     try:
         df = yf.Ticker(ticker).history(period=period)
         if df is None or df.empty:
             return None
         return df
-    except:
+    except Exception:
         return None
 
 
 # ============================================================
-# スクリーニング実行
+# スクリーニング
 # ============================================================
 def run_screening():
     try:
@@ -57,7 +58,7 @@ def run_screening():
             continue
 
         sc = score_stock(hist)
-        if sc is None:
+        if sc is None or np.isnan(sc):
             continue
 
         price = float(hist["Close"].iloc[-1])
@@ -136,7 +137,12 @@ def build_report():
     lines.append("")
 
     lines.append("◆ ポジション分析")
-    lines.append(pos_text)
+
+    # 🔥 pos_text が list / str / None どれでも安全に処理
+    if isinstance(pos_text, list):
+        lines.extend(pos_text)
+    else:
+        lines.append(str(pos_text))
 
     return "\n".join(lines)
 
@@ -146,7 +152,7 @@ def build_report():
 # ============================================================
 def send_line(text: str):
     if not WORKER_URL:
-        print("[WARN] WORKER_URL が未設定（printのみ）")
+        print("[WARN] WORKER_URL 未設定 → printのみ")
         print(text)
         return
 
@@ -154,7 +160,7 @@ def send_line(text: str):
         r = requests.post(WORKER_URL, json={"text": text}, timeout=10)
         print("[LINE RESULT]", r.status_code, r.text)
     except Exception as e:
-        print("[ERROR] LINE送信に失敗:", e)
+        print("[ERROR] LINE送信失敗:", e)
 
 
 # ============================================================
