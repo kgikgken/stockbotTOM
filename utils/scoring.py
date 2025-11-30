@@ -1,47 +1,87 @@
 import numpy as np
 import pandas as pd
 
-
-# スコア計算（100点満点）
-def score_stock(hist: pd.DataFrame) -> int:
-    close = hist["Close"]
-
-    # ① トレンド（20MAの傾き）
-    ma20 = close.rolling(20).mean()
-    trend = (ma20.iloc[-1] - ma20.iloc[-5]) / ma20.iloc[-5] * 100 if ma20.iloc[-5] != 0 else 0
-    trend_score = np.clip(trend * 2, -20, 20)
-
-    # ② 押し目の質
-    rsi = calc_rsi(close)
-    rsi_score = 20 - abs(rsi - 40)
-
-    # ③ 高値からの下落率
-    peak = close.max()
-    drop = (peak - close.iloc[-1]) / peak * 100
-    drop_score = np.clip(drop, 0, 20)
-
-    # ④ 流動性（ボラ＋売買代金）
-    vol = hist["Volume"].iloc[-20:].mean()
-    vol_score = np.log10(max(vol, 1)) * 5
-    vol_score = np.clip(vol_score, 0, 20)
-
-    total = trend_score + rsi_score + drop_score + vol_score
-    return int(np.clip(total, 0, 100))
+# =============
+# 安全補助
+# =============
+def safe(x):
+    """NaN 保護。数字でなければ None を返す"""
+    try:
+        v = float(x)
+        if np.isnan(v):
+            return None
+        return v
+    except:
+        return None
 
 
-def classify_core(score: int) -> str:
-    if score >= 75:
-        return "A"
-    elif score >= 60:
-        return "B"
+# =============
+# スコア計算
+# =============
+def score_stock(df: pd.DataFrame):
+    """
+    Aランク / Bランク判定用の総合スコア（0–100）
+    NaN が一つでも混ざると None を返す（安全フィルター）
+    """
+
+    # --- 必須カラムの存在チェック ---
+    need = ["Close", "Open", "High", "Low", "Volume"]
+    if any(col not in df.columns for col in need):
+        return None
+
+    # --- 指標計算に必要な終値 ---
+    close = safe(df["Close"].iloc[-1])
+    if close is None:
+        return None
+
+    # --- 移動平均 ---
+    ma20 = safe(df["Close"].rolling(20).mean().iloc[-1])
+    ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
+
+    # --- RSI ---
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean().iloc[-1]
+    avg_loss = loss.rolling(14).mean().iloc[-1]
+
+    if avg_loss == 0 or avg_gain is None or avg_loss is None:
+        rsi = None
     else:
-        return "N"  # 候補外
+        rsi = 100 - (100 / (1 + avg_gain / avg_loss))
 
+    # 全部 safe 化
+    rsi = safe(rsi)
 
-def calc_rsi(close: pd.Series, period=14):
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
-    rsi = 100 - 100 / (1 + rs)
-    return rsi.iloc[-1]
+    # --- ボラ20 ---
+    vola20 = safe(df["Close"].pct_change().rolling(20).std().iloc[-1])
+
+    # --- どれか一個でも NaN → スキップ ---
+    if any(v is None for v in [ma20, ma50, rsi, vola20]):
+        return None
+
+    # ===== スコアリング =====
+    score = 0
+
+    # トレンド
+    if close > ma20:
+        score += 10
+    if close > ma50:
+        score += 10
+
+    # RSI（押し目評価）
+    if 30 <= rsi <= 45:
+        score += 15
+    elif 20 <= rsi < 30 or 45 < rsi <= 55:
+        score += 8
+
+    # ボラティリティ
+    if vola20 < 0.02:
+        score += 5
+    elif vola20 < 0.06:
+        score += 3
+
+    # 上限調整
+    score = int(np.clip(score, 0, 100))
+
+    return score
