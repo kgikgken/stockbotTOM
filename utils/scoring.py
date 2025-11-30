@@ -1,87 +1,117 @@
 import numpy as np
 import pandas as pd
 
-# =============
-# 安全補助
-# =============
-def safe(x):
-    """NaN 保護。数字でなければ None を返す"""
+# ============================================================
+# 指標計算補助（NaN安全）
+# ============================================================
+
+def nz(x, default=np.nan):
+    """NaN → default"""
     try:
-        v = float(x)
-        if np.isnan(v):
-            return None
-        return v
+        if x is None:
+            return default
+        if np.isnan(float(x)):
+            return default
+        return float(x)
     except:
-        return None
+        return default
 
 
-# =============
-# スコア計算
-# =============
-def score_stock(df: pd.DataFrame):
+# ============================================================
+# Aランク / Bランク スクリーニング用スコアリング
+# ============================================================
+
+def score_stock(df: pd.DataFrame) -> float:
     """
-    Aランク / Bランク判定用の総合スコア（0–100）
-    NaN が一つでも混ざると None を返す（安全フィルター）
+    df: yfinance OHLCV + Close/MA/RSI が計算済み
+    戻り値: 0〜100（NaNの場合は -1 を返して落とす）
     """
 
-    # --- 必須カラムの存在チェック ---
-    need = ["Close", "Open", "High", "Low", "Volume"]
-    if any(col not in df.columns for col in need):
-        return None
+    try:
+        last = df.iloc[-1]
+    except:
+        return -1
 
-    # --- 指標計算に必要な終値 ---
-    close = safe(df["Close"].iloc[-1])
-    if close is None:
-        return None
+    close = nz(last.get("Close"))
+    ma20 = nz(last.get("ma20"))
+    ma50 = nz(last.get("ma50"))
+    rsi = nz(last.get("rsi14"))
+    shadow = nz(last.get("lower_shadow_ratio"))
+    vola = nz(last.get("vola20"))
+    off = nz(last.get("off_high_pct"))
+    days = nz(last.get("days_since_high60"))
 
-    # --- 移動平均 ---
-    ma20 = safe(df["Close"].rolling(20).mean().iloc[-1])
-    ma50 = safe(df["Close"].rolling(50).mean().iloc[-1])
+    if any(np.isnan([close, ma20, ma50, rsi])):
+        return -1  # 指標欠損はスキップ
 
-    # --- RSI ---
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean().iloc[-1]
-    avg_loss = loss.rolling(14).mean().iloc[-1]
-
-    if avg_loss == 0 or avg_gain is None or avg_loss is None:
-        rsi = None
-    else:
-        rsi = 100 - (100 / (1 + avg_gain / avg_loss))
-
-    # 全部 safe 化
-    rsi = safe(rsi)
-
-    # --- ボラ20 ---
-    vola20 = safe(df["Close"].pct_change().rolling(20).std().iloc[-1])
-
-    # --- どれか一個でも NaN → スキップ ---
-    if any(v is None for v in [ma20, ma50, rsi, vola20]):
-        return None
-
-    # ===== スコアリング =====
     score = 0
 
-    # トレンド
-    if close > ma20:
+    # ----------------------------------------
+    # ① トレンド強度（最大30点）
+    # ----------------------------------------
+    # MA配置
+    if close > ma20 > ma50:
+        score += 18
+    elif close > ma20:
         score += 10
-    if close > ma50:
-        score += 10
+    elif ma20 > ma50:
+        score += 6
 
-    # RSI（押し目評価）
+    # 高値からの距離（押し目判定）
+    if not np.isnan(off):
+        if -8 <= off <= -4:
+            score += 12
+        elif -15 <= off < -8:
+            score += 7
+
+    # ----------------------------------------
+    # ② RSI押しの質（最大20点）
+    # ----------------------------------------
     if 30 <= rsi <= 45:
-        score += 15
+        score += 12
     elif 20 <= rsi < 30 or 45 < rsi <= 55:
-        score += 8
+        score += 6
 
-    # ボラティリティ
-    if vola20 < 0.02:
-        score += 5
-    elif vola20 < 0.06:
+    # ----------------------------------------
+    # ③ 反転サイン（最大10点）
+    # ----------------------------------------
+    if shadow >= 0.5:
+        score += 6
+    elif shadow >= 0.3:
         score += 3
 
-    # 上限調整
-    score = int(np.clip(score, 0, 100))
+    # ----------------------------------------
+    # ④ 流動性 & ボラ（最大20点）
+    # ----------------------------------------
+    if not np.isnan(vola):
+        if vola < 0.02:
+            score += 12
+        elif vola < 0.05:
+            score += 6
 
-    return score
+    # ----------------------------------------
+    # ⑤ 日柄調整（最大10点）
+    # ----------------------------------------
+    if 2 <= days <= 12:
+        score += 8
+    elif 1 <= days < 2 or 12 < days <= 25:
+        score += 4
+
+    return float(score)
+
+
+# ============================================================
+# Core分類（Aランク / Bランク）
+# ============================================================
+
+def classify_core(score: float):
+    """
+    A: 75〜100
+    B: 60〜74
+    C: 0〜59（返さない）
+    """
+    if score >= 75:
+        return "A"
+    if score >= 60:
+        return "B"
+    return None
