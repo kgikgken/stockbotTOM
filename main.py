@@ -873,6 +873,7 @@ def main() -> None:
     text = screen_all()
     print(text)
     send_to_lineworker(text)
-
+# 🔥 Worker へテスト送信
+send_to_lineworker("テスト送信：main.py → Worker → LINE 成功")
 if __name__ == "__main__":
     main()
