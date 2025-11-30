@@ -9,7 +9,7 @@ from utils.market import calc_market_score
 from utils.sector import top_sectors_5d
 from utils.position import load_positions, analyze_positions
 from utils.scoring import score_stock
-from utils.util import jst_today_str
+from utils.market import jst_today_str
 
 
 # ============================================================
