@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 from typing import List, Dict, Tuple
+
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -12,30 +13,43 @@ from utils.position import load_positions, analyze_positions
 from utils.scoring import score_stock
 from utils.util import jst_today_str
 
-
+# ============================================================
+# 基本設定
+# ============================================================
 UNIVERSE_PATH = "universe_jpx.csv"
-POSITIONS_PATH = "positions.csv"
 WORKER_URL = os.getenv("WORKER_URL")
 
+# 表示する銘柄数の上限
+MAX_A = 3          # Aランク最大表示数
+MAX_TOTAL = 5      # A+B 合計最大表示数
+
 
 # ============================================================
-# 共通ユーティリティ
+# データ取得（安全版）
 # ============================================================
-def fetch_history(ticker: str, period: str = "130d") -> pd.DataFrame | None:
-    """安全版ヒストリカル取得"""
+def fetch_history(ticker: str, period: str = "130d"):
+    """個別銘柄の株価履歴を安全に取得"""
     try:
         df = yf.Ticker(ticker).history(period=period)
         if df is None or df.empty:
             return None
         return df
-    except Exception as e:
-        print(f"[WARN] fetch_history failed: {ticker} {e}")
+    except Exception:
         return None
 
 
-def _classify_vola(vola: float) -> str:
-    """ボラティリティ分類: low/mid/high"""
-    if vola is None or not np.isfinite(vola):
+def calc_vola20(close: pd.Series) -> float:
+    """20日ボラ（シンプル版）"""
+    if close is None or len(close) < 21:
+        return float("nan")
+    # pandas の将来変更に備えて fill_method=None を明示
+    ret = close.pct_change(fill_method=None)
+    return float(ret.rolling(20).std().iloc[-1])
+
+
+def classify_vola(vola: float) -> str:
+    """ボラティリティのざっくり分類"""
+    if not np.isfinite(vola):
         return "mid"
     if vola < 0.02:
         return "low"
@@ -44,80 +58,64 @@ def _classify_vola(vola: float) -> str:
     return "mid"
 
 
-def _calc_tp_sl_for_candidate(score: float, vola: float) -> Tuple[float, float]:
+def calc_tp_sl_for_screen(price: float, vola: float, market_score: int) -> Tuple[float, float, float, float]:
     """
-    スクリーニング銘柄用 TP/SL（現値ベース、％）
-    - score が高いほど TP を遠く
-    - ボラ高いほど TP/SL を広く
+    スクリーニング用の利確/損切り目安を計算
+    戻り値: (tp_pct, sl_pct, tp_price, sl_price)
     """
-    # --- TP 基本ライン ---
-    if score >= 90:
-        tp = 0.12
-    elif score >= 85:
-        tp = 0.10
-    elif score >= 80:
-        tp = 0.08
-    else:
-        tp = 0.07
+    vola_class = classify_vola(vola)
 
-    vola_class = _classify_vola(vola)
+    # --- 利確 ---
+    tp = 0.08  # ベース 8%
     if vola_class == "low":
         tp -= 0.01
-        sl = -0.035
     elif vola_class == "high":
         tp += 0.02
-        sl = -0.060
-    else:
-        sl = -0.045
 
-    # 安全な範囲にクリップ
+    if market_score >= 70:
+        tp += 0.02
+    elif market_score <= 40:
+        tp -= 0.02
+
     tp = float(np.clip(tp, 0.06, 0.15))
-    sl = float(np.clip(sl, -0.07, -0.03))
-    return tp, sl
 
+    # --- 損切り ---
+    sl = -0.04  # ベース -4%
+    if vola_class == "low":
+        sl = -0.03
+    elif vola_class == "high":
+        sl = -0.05
 
-def _in_label(score: float) -> str:
-    """IN の強さラベル（期待値ベース）"""
-    if score >= 88:
-        return "強IN（自信度◎）"
-    if score >= 82:
-        return "通常IN（自信度◯）"
-    if score >= 78:
-        return "軽めIN（打診）"
-    return "様子見"
+    if market_score >= 70:
+        sl -= 0.005
+    elif market_score <= 40:
+        sl += 0.005
 
+    sl = float(np.clip(sl, -0.07, -0.02))
 
-def _fmt_yen(v: float) -> str:
-    if v is None or not np.isfinite(v):
-        return "-"
-    return f"{int(round(v)):,}円"
+    tp_price = price * (1.0 + tp)
+    sl_price = price * (1.0 + sl)
+    return tp, sl, tp_price, sl_price
 
 
 # ============================================================
-# スクリーニング本体
+# スクリーニング実行
 # ============================================================
-def run_screening() -> Tuple[List[Dict], List[Dict]]:
+def run_screening(market_score: int):
     """
-    ユニバース全体をスクリーニング
-    戻り値: (Aリスト, Bリスト)
-    各要素は dict:
-      {
-        ticker, name, sector, score, price,
-        vola20, tp_pct, sl_pct, in_label
-      }
+    ユニバース全体をスコアリングして
+    A/B ランクの中から「本当に組みたい」3〜5銘柄だけに絞る
     """
     try:
         uni = pd.read_csv(UNIVERSE_PATH)
-    except Exception as e:
-        print(f"[WARN] universe load failed: {e}")
+    except Exception:
         return [], []
 
     if "ticker" not in uni.columns:
-        print("[WARN] universe_jpx.csv に ticker カラムがありません")
         return [], []
 
-    A_list: List[Dict] = []
-    B_list: List[Dict] = []
+    candidates_a: List[Dict] = []
+    candidates_b: List[Dict] = []
 
     for _, row in uni.iterrows():
         ticker = str(row["ticker"])
@@ -128,55 +126,55 @@ def run_screening() -> Tuple[List[Dict], List[Dict]]:
         if hist is None or len(hist) < 60:
             continue
 
-        # スコア算出（utils.scoring）
-        sc = score_stock(hist)
-        if sc is None or not np.isfinite(sc):
+        score = score_stock(hist)
+        if score is None or not np.isfinite(score):
             continue
-        sc = float(sc)
+
+        # そもそも弱い銘柄は除外（70未満は無視）
+        if score < 70:
+            continue
 
         close = hist["Close"].astype(float)
-        if close.isna().all():
-            continue
         price = float(close.iloc[-1])
-
-        # ボラティリティ（20日）
-        if len(close) >= 21:
-            vola20 = close.pct_change(fill_method=None).rolling(20).std().iloc[-1]
-            vola20 = float(vola20) if np.isfinite(vola20) else np.nan
-        else:
-            vola20 = np.nan
-
-        tp_pct, sl_pct = _calc_tp_sl_for_candidate(sc, vola20)
-        in_lbl = _in_label(sc)
+        vola20 = calc_vola20(close)
+        tp_pct, sl_pct, tp_price, sl_price = calc_tp_sl_for_screen(price, vola20, market_score)
 
         info = {
             "ticker": ticker,
             "name": name,
             "sector": sector,
-            "score": sc,
+            "score": float(score),
             "price": price,
-            "vola20": vola20,
             "tp_pct": tp_pct,
             "sl_pct": sl_pct,
-            "in_label": in_lbl,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
         }
 
-        # ランク振り分け
-        if sc >= 80:
-            A_list.append(info)
-        elif sc >= 70:
-            B_list.append(info)
+        # スコア帯で A/B ランク分け（A は少しだけ厳しめ）
+        if score >= 85:
+            candidates_a.append(info)
+        else:
+            candidates_b.append(info)
 
-    A_list = sorted(A_list, key=lambda x: x["score"], reverse=True)
-    B_list = sorted(B_list, key=lambda x: x["score"], reverse=True)
+    # スコア順にソート
+    candidates_a.sort(key=lambda x: x["score"], reverse=True)
+    candidates_b.sort(key=lambda x: x["score"], reverse=True)
 
-    return A_list, B_list
+    # A から最大 MAX_A
+    a_list = candidates_a[:MAX_A]
+
+    # 残り枠を B で埋める（合計 MAX_TOTAL まで）
+    remain = max(0, MAX_TOTAL - len(a_list))
+    b_list = candidates_b[:remain]
+
+    return a_list, b_list
 
 
 # ============================================================
-# レポート生成（3分割）
+# レポート生成
 # ============================================================
-def build_report_parts() -> List[str]:
+def build_report():
     today = jst_today_str()
 
     # ---- 地合い ----
@@ -184,127 +182,73 @@ def build_report_parts() -> List[str]:
     mkt_score = int(mkt.get("score", 50))
     mkt_comment = str(mkt.get("comment", "中立"))
 
-    # ---- セクターTOP3 ----
+    # ---- セクター ----
     secs = top_sectors_5d()
-    sec_lines: List[str] = []
-    if isinstance(secs, (list, tuple)) and len(secs) > 0:
-        for i, s in enumerate(secs[:3]):
-            # s: (sector, pct) を想定
-            try:
-                sector_name = str(s[0])
-                pct = float(s[1])
-                sec_lines.append(f"{i+1}. {sector_name} ({pct:+.2f}%)")
-            except Exception:
-                continue
-    if not sec_lines:
-        sec_lines.append("算出できるセクターデータがありません。")
+    if secs:
+        sector_lines = [f"{i+1}. {s[0]} ({s[1]:+.2f}%)" for i, s in enumerate(secs)]
+        sector_text = "\n".join(sector_lines)
+    else:
+        sector_text = "算出不可（データ不足）"
 
     # ---- スクリーニング ----
-    A_list, B_list = run_screening()
+    a_list, b_list = run_screening(mkt_score)
 
     # ---- ポジション ----
     try:
-        try:
-            pos_df = load_positions(POSITIONS_PATH)
-        except TypeError:
-            # 古いシグネチャ対策
-            pos_df = load_positions()
-    except Exception as e:
-        print(f"[WARN] load_positions failed: {e}")
-        pos_df = None
+        pos_df = load_positions("positions.csv")
+        pos_text, *rest = analyze_positions(pos_df)
+        # analyze_positions 側で「◆ ポジション分析」見出し込みのテキストを返している想定
+        pos_message = pos_text
+    except Exception:
+        pos_message = "◆ ポジション分析\nポジション情報の取得に失敗しました。"
 
-    pos_text = "ポジション情報なし。"
-    risk_summary = ""
+    # ===== ここから LINE 用メッセージ組み立て =====
+    lines: List[str] = []
+    lines.append(f"📅 {today} stockbotTOM 日報\n")
 
-    try:
-        if pos_df is None:
-            pos_text = "ポジション情報なし。positions.csv が読めません。"
-        else:
-            res = analyze_positions(pos_df)
-            if isinstance(res, tuple):
-                # (text, total_asset, total_pos, lev, risk_info) を想定
-                if len(res) >= 1:
-                    pos_text = str(res[0])
-                if len(res) >= 5 and isinstance(res[4], str):
-                    risk_summary = res[4]
-            else:
-                pos_text = str(res)
-    except Exception as e:
-        pos_text = f"ポジション分析中にエラー: {e}"
+    lines.append("◆ 今日の結論")
+    lines.append(f"- 地合いスコア: {mkt_score}点")
+    lines.append(f"- コメント: {mkt_comment}")
+    lines.append("")
 
-    # --------------------------------------------------------
-    # Part1: 結論＋セクター
-    # --------------------------------------------------------
-    part1_lines: List[str] = []
-    part1_lines.append(f"📅 {today} stockbotTOM 日報\n")
-    part1_lines.append("◆ 今日の結論")
-    part1_lines.append(f"- 地合いスコア: {mkt_score}点")
-    part1_lines.append(f"- コメント: {mkt_comment}")
-    part1_lines.append("")
-    part1_lines.append("◆ 今日のTOPセクター（5日騰落率）")
-    part1_lines.extend(sec_lines)
+    lines.append("◆ 今日のTOPセクター（5日騰落率）")
+    lines.append(sector_text)
+    lines.append("")
 
-    part1 = "\n".join(part1_lines)
-
-    # --------------------------------------------------------
-    # Part2: Core候補（A/B）＋IN目安＋TP/SL
-    # --------------------------------------------------------
-    part2_lines: List[str] = []
-    part2_lines.append("◆ Core候補 Aランク（本命押し目）")
-    if not A_list:
-        part2_lines.append("本命Aランクなし。")
+    # ---- Aランク ----
+    lines.append("◆ Core候補 Aランク（本命押し目）")
+    if not a_list:
+        lines.append("本命Aランクなし。")
     else:
-        for r in A_list[:30]:
-            part2_lines.append(
-                f"- {r['ticker']} {r['name']}  "
-                f"Score:{r['score']:.1f}  現値:{r['price']:.1f}"
-            )
-            part2_lines.append(
-                f"   IN目安: {r['in_label']} / "
-                f"TP:+{r['tp_pct']*100:.1f}%({_fmt_yen(r['price']*(1+r['tp_pct']))}) / "
-                f"SL:{r['sl_pct']*100:.1f}%({_fmt_yen(r['price']*(1+r['sl_pct']))})"
-            )
-    part2_lines.append("")
+        for r in a_list:
+            lines.append(f"- {r['ticker']} {r['name']}  Score:{r['score']:.1f}  現値:{r['price']:.1f}")
+            lines.append(f"    ・IN目安: {r['price']:.1f}")
+            lines.append(f"    ・利確目安: +{r['tp_pct']*100:.1f}%（{r['tp_price']:.1f}）")
+            lines.append(f"    ・損切り目安: {r['sl_pct']*100:.1f}%（{r['sl_price']:.1f}）")
+    lines.append("")
 
-    part2_lines.append("◆ Core候補 Bランク（押し目候補）")
-    if not B_list:
-        part2_lines.append("Bランク候補なし。")
+    # ---- Bランク ----
+    lines.append("◆ Core候補 Bランク（押し目候補・ロット控えめ）")
+    if not b_list:
+        lines.append("Bランク候補なし。")
     else:
-        for r in B_list[:50]:
-            part2_lines.append(
-                f"- {r['ticker']} {r['name']}  "
-                f"Score:{r['score']:.1f}  現値:{r['price']:.1f}"
-            )
-            part2_lines.append(
-                f"   IN目安: {r['in_label']} / "
-                f"TP:+{r['tp_pct']*100:.1f}%({_fmt_yen(r['price']*(1+r['tp_pct']))}) / "
-                f"SL:{r['sl_pct']*100:.1f}%({_fmt_yen(r['price']*(1+r['sl_pct']))})"
-            )
+        for r in b_list:
+            lines.append(f"- {r['ticker']} {r['name']}  Score:{r['score']:.1f}  現値:{r['price']:.1f}")
+            lines.append(f"    ・IN目安: {r['price']:.1f}")
+            lines.append(f"    ・利確目安: +{r['tp_pct']*100:.1f}%（{r['tp_price']:.1f}）")
+            lines.append(f"    ・損切り目安: {r['sl_pct']*100:.1f}%（{r['sl_price']:.1f}）")
 
-    part2 = "\n".join(part2_lines)
+    screen_message = "\n".join(lines)
 
-    # --------------------------------------------------------
-    # Part3: ポジション分析（TP/SLは utils.position 側で計算済み想定）
-    # --------------------------------------------------------
-    part3_lines: List[str] = []
-    part3_lines.append("◆ ポジション分析")
-    part3_lines.append(pos_text)
-    if risk_summary:
-        part3_lines.append("")
-        part3_lines.append(risk_summary)
-
-    part3 = "\n".join(part3_lines)
-
-    return [part1, part2, part3]
+    return screen_message, pos_message
 
 
 # ============================================================
 # LINE送信
 # ============================================================
 def send_line(text: str):
-    """1メッセージ送信"""
     if not WORKER_URL:
-        print("[WARN] WORKER_URL 未設定（print のみ）")
+        print("[WARN] WORKER_URL が未設定（print のみ）")
         print(text)
         return
 
@@ -313,24 +257,23 @@ def send_line(text: str):
         print("[LINE RESULT]", r.status_code, r.text)
     except Exception as e:
         print("[ERROR] LINE送信に失敗:", e)
-
-
-def send_line_multi(parts: List[str]):
-    """複数メッセージ分割送信"""
-    for idx, p in enumerate(parts, start=1):
-        if not p or not str(p).strip():
-            continue
-        print(f"\n===== PART {idx} =====\n")
-        print(p)
-        send_line(p)
+        print(text)
 
 
 # ============================================================
 # Entry
 # ============================================================
 def main():
-    parts = build_report_parts()
-    send_line_multi(parts)
+    screen_message, pos_message = build_report()
+    # GitHub Actions のログ確認用
+    print("==== SCREENING ====")
+    print(screen_message)
+    print("==== POSITIONS ====")
+    print(pos_message)
+
+    # LINE には 2 通に分けて送信（長文対策）
+    send_line(screen_message)
+    send_line(pos_message)
 
 
 if __name__ == "__main__":
