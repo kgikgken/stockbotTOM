@@ -1,217 +1,170 @@
 from __future__ import annotations
-
-import json
-import os
-from typing import List, Tuple, Optional
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import yfinance as yf
 
 
-EQUITY_PATH_DEFAULT = "data/equity.json"
-
-
 # ============================================================
-# yfinance ラッパ
+# 安全価格取得
 # ============================================================
-
-def _fetch_history(ticker: str, period: str = "60d") -> Optional[pd.DataFrame]:
+def _safe_price(ticker: str):
+    """現在値を安全に取る"""
     try:
-        df = yf.download(ticker, period=period, interval="1d", progress=False)
+        df = yf.download(ticker, period="5d", interval="1d", progress=False)
         if df is None or df.empty:
-            return None
-        return df
-    except Exception:
-        return None
+            return np.nan
+        return float(df["Close"].iloc[-1])
+    except:
+        return np.nan
 
 
-def _fetch_last_price(ticker: str) -> Optional[float]:
-    df = _fetch_history(ticker, period="5d")
-    if df is None:
-        return None
+# ============================================================
+# ボラティリティ分類
+# ============================================================
+def _classify_vola(vola: float) -> str:
+    if not np.isfinite(vola):
+        return "mid"
+    if vola < 0.02:
+        return "low"
+    if vola > 0.06:
+        return "high"
+    return "mid"
+
+
+def _calc_vola20(ticker: str):
     try:
-        close = df["Close"].astype(float)
-        return float(close.iloc[-1])
-    except Exception:
-        return None
-
-
-def _calc_20d_vola(ticker: str) -> Optional[float]:
-    df = _fetch_history(ticker, period="90d")
-    if df is None:
-        return None
-    try:
+        df = yf.download(ticker, period="60d", interval="1d", progress=False)
+        if df is None or df.empty:
+            return np.nan
         close = df["Close"].astype(float)
         ret = close.pct_change(fill_method=None)
-        vola = float(ret.rolling(20).std().iloc[-1])
-        if not np.isfinite(vola) or vola <= 0:
-            return None
-        return vola
-    except Exception:
-        return None
+        vola20 = ret.rolling(20).std().iloc[-1]
+        return float(vola20)
+    except:
+        return np.nan
 
 
 # ============================================================
-# ボラに応じた 利確 / 損切り
+# 保有銘柄のTP/SL計算
 # ============================================================
-
-def _classify_vola(vola: Optional[float]) -> Tuple[str, float]:
+def _tp_sl_for_position(cur_price: float, vola20: float):
     """
-    vola: 20日ボラ（0.02 = 2%）を想定
-    戻り値: (カテゴリ, 実際に使うボラ値)
+    Returns:
+      tp_pct, sl_pct, tp_price, sl_price
     """
-    if vola is None or not np.isfinite(vola) or vola <= 0:
-        return "M", 0.02  # デフォルト中ボラ
 
-    v = float(np.clip(vola, 0.005, 0.08))
+    vc = _classify_vola(vola20)
 
-    if v < 0.015:
-        return "L", v
-    elif v < 0.035:
-        return "M", v
-    else:
-        return "H", v
+    # デフォルト
+    tp = 8.0
+    sl = 4.0
 
+    if vc == "low":
+        tp = 6.0
+        sl = 3.0
+    elif vc == "high":
+        tp = 12.0
+        sl = 6.0
 
-def _calc_tp_sl_for_pos(price: float, vola: Optional[float]) -> Tuple[float, float, float, float]:
-    """
-    保有ポジション用の TP/SL
-    返り値: (tp_pct, sl_pct, tp_price, sl_price)
-    """
-    cls, v = _classify_vola(vola)
+    tp_price = cur_price * (1 + tp / 100)
+    sl_price = cur_price * (1 - sl / 100)
 
-    if cls == "L":
-        tp_pct = 0.035  # +3.5%
-        sl_pct = 0.015  # -1.5%
-    elif cls == "M":
-        tp_pct = 0.05   # +5%
-        sl_pct = 0.025  # -2.5%
-    else:  # H
-        tp_pct = 0.07   # +7%
-        sl_pct = 0.035  # -3.5%
-
-    tp_price = price * (1.0 + tp_pct)
-    sl_price = price * (1.0 - sl_pct)
-    return tp_pct, sl_pct, tp_price, sl_price
+    return tp, sl, tp_price, sl_price
 
 
 # ============================================================
 # positions.csv 読み込み
 # ============================================================
-
-def load_positions(path: str) -> pd.DataFrame:
-    """
-    positions.csv を読み込む
-    想定カラム: ticker,size,price
-    """
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["ticker", "size", "price"])
-
+def load_positions(path: str = "positions.csv") -> pd.DataFrame:
     try:
         df = pd.read_csv(path)
-    except Exception:
+        # 必須カラム保証
+        req = {"ticker", "size", "price"}
+        if not req.issubset(df.columns):
+            raise ValueError("positions.csv に必要な列がありません")
+        return df
+    except Exception as e:
+        print("[WARN] positions.csv 読み込み失敗:", e)
         return pd.DataFrame(columns=["ticker", "size", "price"])
 
-    # カラム名ゆらぎ対策
-    cols = {c.lower(): c for c in df.columns}
-    ticker_col = cols.get("ticker")
-    size_col = cols.get("size") or cols.get("qty") or cols.get("quantity")
-    price_col = cols.get("price") or cols.get("avg") or cols.get("average")
 
-    if not (ticker_col and size_col and price_col):
-        return pd.DataFrame(columns=["ticker", "size", "price"])
-
-    out = pd.DataFrame()
-    out["ticker"] = df[ticker_col].astype(str)
-    out["size"] = pd.to_numeric(df[size_col], errors="coerce").fillna(0).astype(int)
-    out["price"] = pd.to_numeric(df[price_col], errors="coerce").fillna(0.0).astype(float)
-    return out
+# ============================================================
+# 保有銘柄のリスク評価
+# ============================================================
+def _risk_level(vola: float) -> str:
+    if not np.isfinite(vola):
+        return "中立"
+    if vola < 0.02:
+        return "低リスク"
+    if vola > 0.06:
+        return "高リスク"
+    return "中リスク"
 
 
 # ============================================================
-# equity.json 読み込み
+# 保有ポジション分析（メイン）
 # ============================================================
-
-def _load_equity(equity_path: str, fallback_total_pos: float) -> float:
+def analyze_positions(df: pd.DataFrame):
     """
-    Cloudflare Worker から更新される equity.json を読む。
-    なければ total_pos をそのまま返す。
-    """
-    try:
-        if os.path.exists(equity_path):
-            with open(equity_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            val = float(data.get("equity", fallback_total_pos))
-            if np.isfinite(val) and val > 0:
-                return val
-    except Exception:
-        pass
-    return fallback_total_pos
-
-
-# ============================================================
-# ポジション分析
-# ============================================================
-
-def analyze_positions(
-    df: pd.DataFrame,
-    equity_path: str = EQUITY_PATH_DEFAULT,
-) -> Tuple[str, float, float, float, List[str]]:
-    """
-    返り値:
-      pos_text: 画面に出すテキスト
-      total_asset: 推定運用資産
-      total_pos:   ポジション総額
-      lev:         レバレッジ
-      risk_lines:  各ポジションの TP/SL 推奨行
+    Return:
+      pos_text(str)
+      total_asset(float)
+      total_pos(float)
+      lev(float)
+      risk_info(list[dict])
     """
     if df is None or df.empty:
-        return "ポジションなし。", 0.0, 0.0, 0.0, []
+        return "（現在ポジションなし）", 0, 0, 0, []
 
-    lines: List[str] = []
-    risk_lines: List[str] = []
-
-    total_pos = 0.0
+    lines = []
+    total_pos = 0
+    total_asset = 0
+    risk_info = []
 
     for _, r in df.iterrows():
         ticker = str(r["ticker"])
-        size = int(r["size"])
-        buy_price = float(r["price"])
+        size = float(r["size"])
+        cost = float(r["price"])
 
-        if size <= 0 or buy_price <= 0:
+        cur = _safe_price(ticker)
+        if not np.isfinite(cur):
             continue
 
-        cur = _fetch_last_price(ticker)
-        if cur is None:
-            lines.append(f"- {ticker}: データ取得失敗（現値不明）")
-            continue
+        pnl_pct = (cur - cost) / cost * 100
+        vola20 = _calc_vola20(ticker)
+        risk = _risk_level(vola20)
 
+        # TP/SL
+        tp_pct, sl_pct, tp_price, sl_price = _tp_sl_for_position(cur, vola20)
+
+        # 評価額
         pos_val = cur * size
         total_pos += pos_val
 
-        pnl_pct = (cur - buy_price) / buy_price * 100.0
-
-        # 利確/損切り
-        vola20 = _calc_20d_vola(ticker)
-        tp_pct, sl_pct, tp_price, sl_price = _calc_tp_sl_for_pos(cur, vola20)
+        # 推定総資産（含み損益込み）
+        total_asset += pos_val
 
         lines.append(
-            f"- {ticker}: 現値 {cur:.1f} / 取得 {buy_price:.1f} / 損益 {pnl_pct:+.2f}%"
+            f"- {ticker}: 現値 {cur:.1f} / 取得 {cost:.1f} / 損益 {pnl_pct:.2f}%\n"
+            f"    ・利確目安: +{tp_pct:.1f}%（{tp_price:.1f}）\n"
+            f"    ・損切り目安: -{sl_pct:.1f}%（{sl_price:.1f}）\n"
+            f"    ・リスク: {risk}"
         )
 
-        risk_lines.append(
-            f"- {ticker}: 利確:+{tp_pct*100:.1f}%（{tp_price:.0f}円） / "
-            f"損切:-{sl_pct*100:.1f}%（{sl_price:.0f}円）"
-        )
+        risk_info.append({
+            "ticker": ticker,
+            "cur": cur,
+            "cost": cost,
+            "pnl_pct": pnl_pct,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+            "risk": risk
+        })
 
-    if total_pos <= 0:
-        return "ポジションなし。", 0.0, 0.0, 0.0, []
+    # レバレッジ計算（超単純化版）
+    lev = total_pos / total_asset if total_asset > 0 else 0
 
-    total_asset = _load_equity(equity_path, total_pos)
-    lev = float(total_pos / total_asset) if total_asset > 0 else 0.0
-
-    lines.append(f"- 推定運用資産: {total_asset:,.0f}円")
-    lines.append(f"- 推定ポジション総額: {total_pos:,.0f}円（レバ約 {lev:.2f}倍）")
-
-    return "\n".join(lines), total_asset, total_pos, lev, risk_lines
+    text = "\n".join(lines)
+    return text, total_asset, total_pos, lev, risk_info
