@@ -4,24 +4,44 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+import time
 
+# ====== utils ======
 from utils.market import calc_market_score
 from utils.sector import top_sectors_5d
+from utils.scoring import score_stock, calc_inout_for_stock, calc_vola20
 from utils.position import load_positions, analyze_positions
-from utils.scoring import score_stock
 from utils.util import jst_today_str
 
 
-# ============================================================
-# 基本設定
-# ============================================================
+# ====== 基本設定 ======
 UNIVERSE_PATH = "universe_jpx.csv"
+POS_PATH = "positions.csv"
 WORKER_URL = os.getenv("WORKER_URL")
 
 
-# ============================================================
-# データ取得（安全版）
-# ============================================================
+# ===== LINE送信（1通ずつ / リトライあり） =====
+def send_line(text: str):
+    if not WORKER_URL:
+        print("[WARN] WORKER_URL未設定：printのみ\n", text)
+        return
+
+    payload = {"text": text}
+
+    for attempt in range(2):
+        try:
+            r = requests.post(WORKER_URL, json=payload, timeout=10)
+            print(f"[LINE] status={r.status_code}")
+            if r.status_code == 200:
+                return
+        except Exception as e:
+            print("[LINE ERROR]", e)
+        time.sleep(1)
+
+    print("[FATAL] LINE送信失敗:", text)
+
+
+# ======== データ取得（安全版）=========
 def fetch_history(ticker: str, period="130d"):
     try:
         df = yf.Ticker(ticker).history(period=period)
@@ -32,33 +52,7 @@ def fetch_history(ticker: str, period="130d"):
         return None
 
 
-# ============================================================
-# スクリーニング実行
-# ============================================================
-def calc_inout_guidance(hist):
-    """IN目安・利確・損切りのガイドライン（簡易版）"""
-    close = hist["Close"]
-    last = float(close.iloc[-1])
-    ma20 = close.rolling(20).mean().iloc[-1]
-
-    # ボラ
-    vola20 = close.pct_change().rolling(20).std().iloc[-1]
-    vola = float(vola20) if np.isfinite(vola20) else 0.02
-
-    # IN目安
-    if last < ma20:
-        in_comment = "押し目圏（IN候補）"
-    else:
-        in_comment = "上昇中（INは慎重）"
-
-    # 利確 +2〜3σ
-    tp = last * (1 + 2 * vola)
-    # 損切り -2σ
-    sl = last * (1 - 2 * vola)
-
-    return in_comment, tp, sl
-
-
+# ======== スクリーニング ========
 def run_screening():
     try:
         uni = pd.read_csv(UNIVERSE_PATH)
@@ -68,41 +62,37 @@ def run_screening():
     if "ticker" not in uni.columns:
         return [], []
 
-    A_list = []
-    B_list = []
+    A_list, B_list = [], []
 
     for _, row in uni.iterrows():
         ticker = str(row["ticker"])
         name = str(row.get("name", ticker))
-        sector = str(row.get("sector", "不明"))
 
         hist = fetch_history(ticker)
         if hist is None or len(hist) < 60:
             continue
 
-        sc = score_stock(hist)
-        if sc is None:
+        score = score_stock(hist)
+        if score is None:
             continue
 
         price = float(hist["Close"].iloc[-1])
-
-        # IN目安・利確・損切り
-        in_comment, tp, sl = calc_inout_guidance(hist)
+        vola20 = calc_vola20(hist)
+        in_rank, tp_pct, sl_pct = calc_inout_for_stock(hist)
 
         info = {
             "ticker": ticker,
             "name": name,
-            "sector": sector,
-            "score": sc,
+            "score": score,
             "price": price,
-            "in_comment": in_comment,
-            "tp": tp,
-            "sl": sl,
+            "in_rank": in_rank,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
         }
 
-        if sc >= 80:
+        if score >= 80:
             A_list.append(info)
-        elif sc >= 70:
+        elif score >= 70:
             B_list.append(info)
 
     A_list = sorted(A_list, key=lambda x: x["score"], reverse=True)
@@ -111,113 +101,106 @@ def run_screening():
     return A_list, B_list
 
 
-# ============================================================
-# レポート生成
-# ============================================================
-def build_report():
+# ======== レポート生成（各項目ごと）===========
+def build_report_parts():
+
     today = jst_today_str()
 
-    # ---- 地合い ----
+    # === 地合い ===
     mkt = calc_market_score()
     mkt_score = mkt["score"]
     mkt_comment = mkt["comment"]
 
-    # ---- セクター ----
+    # === セクター ===
     secs = top_sectors_5d()
     if secs:
-        sector_text = "\n".join([f"{i+1}. {s[0]} ({s[1]:+.2f}%)" for i, s in enumerate(secs)])
+        sector_text = "\n".join(
+            [f"{i+1}. {s[0]} ({s[1]:+.2f}%)" for i, s in enumerate(secs)]
+        )
     else:
-        sector_text = "算出不可（データ不足）"
+        sector_text = "データ不足"
 
-    # ---- screening ----
+    # === スクリーニング ===
     A_list, B_list = run_screening()
 
-    # ---- ポジ ----
-    pos_df = load_positions()
-    pos_text, total_asset, total_pos, lev, risk_info = analyze_positions(pos_df)
+    # === ポジション ===
+    pos_df = load_positions(POS_PATH)
+    pos_text, total_asset, total_pos, lev, risk_comment = analyze_positions(pos_df)
 
-    # ---- assemble ----
-    lines = []
-    lines.append(f"📅 {today} stockbotTOM 日報\n")
+    # ----PART 1（今日の結論）----
+    part1 = f"""
+📅 {today} stockbotTOM
 
-    lines.append("◆ 今日の結論")
-    lines.append(f"- 地合いスコア: {mkt_score}点")
-    lines.append(f"- コメント: {mkt_comment}")
-    lines.append("")
+◆ 今日の結論
+- 地合いスコア: {mkt_score}点
+- コメント: {mkt_comment}
 
-    lines.append("◆ 今日のTOPセクター（5日騰落率）")
-    lines.append(sector_text)
-    lines.append("")
+◆ 今日のTOPセクター（5日騰落率）
+{sector_text}
+"""
 
-    # ---- Aランク ----
-    lines.append("◆ Core候補 Aランク（本命押し目）")
+    # ----PART 2（Core Aランク）----
     if not A_list:
-        lines.append("本命Aランクなし。")
+        a_text = "本命Aランクなし。"
     else:
+        lines = []
         for r in A_list:
             lines.append(
-                f"- {r['ticker']} {r['name']}  Score:{r['score']}  現値:{r['price']:.1f}"
+                f"- {r['ticker']} {r['name']} Score:{r['score']} 現値:{r['price']:.1f}\n"
+                f"  IN:{r['in_rank']}  TP:+{r['tp_pct']:.1f}%  SL:-{r['sl_pct']:.1f}%"
             )
-            lines.append(
-                f"    IN目安:{r['in_comment']} / 利確:{r['tp']:.1f} / 損切:{r['sl']:.1f}"
-            )
-    lines.append("")
+        a_text = "\n".join(lines)
 
-    # ---- Bランク ----
-    lines.append("◆ Core候補 Bランク（押し目候補）")
+    part2 = f"""
+◆ Core候補 Aランク（本命押し目）
+{a_text}
+"""
+
+    # ----PART 3（Core Bランク）----
     if not B_list:
-        lines.append("Bランク候補なし。")
+        b_text = "Bランク候補なし。"
     else:
+        lines = []
         for r in B_list:
             lines.append(
-                f"- {r['ticker']} {r['name']}  Score:{r['score']}  現値:{r['price']:.1f}"
+                f"- {r['ticker']} {r['name']} Score:{r['score']} 現値:{r['price']:.1f}\n"
+                f"  IN:{r['in_rank']}  TP:+{r['tp_pct']:.1f}%  SL:-{r['sl_pct']:.1f}%"
             )
-            lines.append(
-                f"    IN目安:{r['in_comment']} / 利確:{r['tp']:.1f} / 損切:{r['sl']:.1f}"
-            )
-    lines.append("")
+        b_text = "\n".join(lines)
 
-    # ---- ポジション ----
-    lines.append("◆ ポジション分析")
-    lines.append(pos_text)
-    lines.append("")
-    lines.append("◆ 推奨ポジションリスク")
-    lines.append(risk_info)
+    part3 = f"""
+◆ Core候補 Bランク（押し目候補）
+{b_text}
+"""
 
-    return "\n".join(lines)
+    # ----PART 4（ポジション分析）----
+    part4 = f"""
+◆ ポジション分析
+{pos_text}
 
+推定運用資産: {total_asset:,.0f}円
+推定ポジション総額: {total_pos:,.0f}円（レバ約 {lev:.2f}倍）
+{risk_comment}
+"""
 
-# ============================================================
-# LINE送信（長文分割＋エラー検知付き）
-# ============================================================
-def send_line(text: str) -> None:
-    if not WORKER_URL:
-        print("[WARN] WORKER_URL 未設定。以下を標準出力のみ:")
-        print(text)
-        return
-
-    max_len = 4000
-    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or ["(empty)"]
-
-    for idx, part in enumerate(chunks, start=1):
-        try:
-            print(f"[INFO] LINE送信 {idx}/{len(chunks)} 文字数={len(part)}")
-            r = requests.post(WORKER_URL, json={"text": part}, timeout=20)
-            print("[LINE RESULT]", r.status_code, r.text[:200])
-            if r.status_code != 200:
-                raise RuntimeError(f"Worker error: {r.status_code} {r.text}")
-        except Exception as e:
-            print("[ERROR] LINE送信に失敗:", repr(e))
-            raise
+    return part1.strip(), part2.strip(), part3.strip(), part4.strip()
 
 
-# ============================================================
-# Entry
-# ============================================================
+# ======== entry =========
 def main():
-    text = build_report()
-    print(text)
-    send_line(text)
+    parts = build_report_parts()
+
+    print("[INFO] sending PART1")
+    send_line(parts[0])
+
+    print("[INFO] sending PART2")
+    send_line(parts[1])
+
+    print("[INFO] sending PART3")
+    send_line(parts[2])
+
+    print("[INFO] sending PART4")
+    send_line(parts[3])
 
 
 if __name__ == "__main__":
