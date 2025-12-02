@@ -1,7 +1,11 @@
 from __future__ import annotations
+
 import os
-import pandas as pd
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Tuple, Optional
+
 import numpy as np
+import pandas as pd
 import yfinance as yf
 import requests
 
@@ -13,18 +17,94 @@ from utils.util import jst_today_str
 
 
 UNIVERSE_PATH = "universe_jpx.csv"
+POSITIONS_PATH = "positions.csv"
 WORKER_URL = os.getenv("WORKER_URL")
 
-# スコア分類
-A_MIN = 85.0
-B_MIN = 80.0
-MAX_PICKS = 5   # A+B 合計最大5
+# Aランク最大数（あなたの指定）
+MAX_A = 5
+MAX_TOTAL = 5
+
+# 決算フィルタ
+EARNINGS_EXCLUDE_DAYS = 3
 
 
-# ========================
-# 株価データ
-# ========================
-def fetch_history(ticker: str, period="130d"):
+# ============================================================
+# 日付ユーティリティ
+# ============================================================
+def jst_today_date() -> datetime.date:
+    return datetime.now(timezone(timedelta(hours=9))).date()
+
+
+# ============================================================
+# イベント（あとで強化可能）
+# ============================================================
+EVENT_CALENDAR: List[Dict[str, str]] = []
+
+
+def build_event_warnings(today: datetime.date) -> List[str]:
+    warns = []
+    for ev in EVENT_CALENDAR:
+        try:
+            d = datetime.strptime(ev["date"], "%Y-%m-%d").date()
+        except:
+            continue
+
+        delta = (d - today).days
+        if -1 <= delta <= 2:
+            when = (
+                f"{delta}日後" if delta > 0 else ("本日" if delta == 0 else "直近")
+            )
+            warns.append(f"⚠ {ev['label']}（{when}）: ポジションサイズ注意")
+
+    return warns
+
+
+# ============================================================
+# Universe 読み込み
+# ============================================================
+def load_universe(path: str = UNIVERSE_PATH) -> Optional[pd.DataFrame]:
+    if not os.path.exists(path):
+        print("[WARN] universe file missing")
+        return None
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        print("[WARN] cannot read universe:", e)
+        return None
+
+    if "ticker" not in df.columns:
+        print("[WARN] universe has no ticker col")
+        return None
+
+    df["ticker"] = df["ticker"].astype(str)
+
+    if "earnings_date" in df.columns:
+        df["earnings_date_parsed"] = pd.to_datetime(
+            df["earnings_date"], errors="coerce"
+        ).dt.date
+    else:
+        df["earnings_date_parsed"] = pd.NaT
+
+    return df
+
+
+def in_earnings_window(row, today):
+    d = row.get("earnings_date_parsed")
+    if d is None or pd.isna(d):
+        return False
+    try:
+        if abs((d - today).days) <= EARNINGS_EXCLUDE_DAYS:
+            return True
+    except:
+        pass
+    return False
+
+
+# ============================================================
+# データ取得
+# ============================================================
+def fetch_history(ticker: str, period: str = "130d"):
     try:
         df = yf.Ticker(ticker).history(period=period)
         if df is None or df.empty:
@@ -34,229 +114,272 @@ def fetch_history(ticker: str, period="130d"):
         return None
 
 
-# ========================
-# TP/SL をスコアとボラから決定
-# ========================
-def decide_tp_sl(score: float, vola: float):
-    if vola < 0.015:
-        tp, sl = 0.06, -0.03
-    elif vola < 0.03:
-        tp, sl = 0.08, -0.04
-    else:
+# ============================================================
+# TP / SL 設計
+# ============================================================
+def calc_candidate_tp_sl(price, vola20, mkt_score):
+    if price <= 0:
+        return 0, 0, price, price
+
+    v = float(vola20) if np.isfinite(vola20) else 0.04
+
+    if v < 0.02:
+        tp, sl = 0.08, -0.03
+    elif v > 0.06:
         tp, sl = 0.12, -0.06
+    else:
+        tp, sl = 0.10, -0.04
 
-    if score >= 90:
+    # 市場の地合いで微調整
+    if mkt_score >= 70:
         tp += 0.02
-    if score < 83:
-        tp -= 0.01
+    elif mkt_score < 45:
+        tp -= 0.02
+        sl = max(sl, -0.03)
 
-    tp = float(np.clip(tp, 0.04, 0.15))
-    sl = float(np.clip(sl, -0.08, -0.02))
-    return tp, sl
+    tp = float(np.clip(tp, 0.05, 0.18))
+    sl = float(np.clip(sl, -0.07, -0.02))
+    return tp, sl, price * (1 + tp), price * (1 + sl)
 
 
-# ========================
-# スクリーニング（決算 ±3日弾く + A/B スコア分類）
-# ========================
-def run_screening():
-    try:
-        uni = pd.read_csv(UNIVERSE_PATH)
-    except:
+# ============================================================
+# スクリーニング本体
+# ============================================================
+def run_screening(today, mkt_score, total_asset):
+    df = load_universe()
+    if df is None:
         return [], []
 
-    A = []
-    B = []
+    A, B = [], []
 
-    for _, row in uni.iterrows():
-        ticker = str(row["ticker"])
+    for _, row in df.iterrows():
+        ticker = str(row["ticker"]).strip()
+        if not ticker:
+            continue
+
+        # 決算直近は除外
+        if in_earnings_window(row, today):
+            continue
+
         name = str(row.get("name", ticker))
-        sector = str(row.get("sector", "不明"))
-        ed = row.get("earnings_date", "")
-
-        # 決算日前後 ±3日は除外（空欄は除外しない）
-        if isinstance(ed, str) and "-" in ed:
-            try:
-                ed_dt = pd.to_datetime(ed)
-                today = pd.to_datetime(jst_today_str())
-                if abs((ed_dt - today).days) <= 3:
-                    continue
-            except:
-                pass
 
         hist = fetch_history(ticker)
         if hist is None or len(hist) < 60:
             continue
 
-        score = score_stock(hist)
-        if score is None:
+        sc = score_stock(hist)
+        if sc is None or not np.isfinite(sc):
             continue
-        score = float(score)
 
-        price = float(hist["Close"].iloc[-1])
-        vola20 = hist["Close"].pct_change().rolling(20).std().iloc[-1]
-        if vola20 is None or np.isnan(vola20):
-            vola20 = 0.02
+        close = hist["Close"].astype(float)
+        price = float(close.iloc[-1])
+        vola20 = float(close.pct_change().rolling(20).std().iloc[-1])
 
-        tp, sl = decide_tp_sl(score, vola20)
+        tp_pct, sl_pct, tp_price, sl_price = calc_candidate_tp_sl(
+            price, vola20, mkt_score
+        )
 
-        rec = {
+        info = {
             "ticker": ticker,
             "name": name,
-            "sector": sector,
-            "score": score,
+            "score": float(sc),
             "price": price,
-            "tp": tp,
-            "sl": sl,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
         }
 
-        if score >= A_MIN:
-            A.append(rec)
-        elif score >= B_MIN:
-            B.append(rec)
+        # --- スコア帯で A / B 判定 ---
+        if sc >= 85:
+            A.append(info)
+        elif sc >= 75:
+            B.append(info)
 
+    # スコア順
     A.sort(key=lambda x: x["score"], reverse=True)
     B.sort(key=lambda x: x["score"], reverse=True)
 
-    return A, B
+    return A, B(
+    # ============================================================
+# A/B 最終選定（最大5銘柄）
+# ============================================================
+def select_primary(A_list, B_list, max_total=5):
+    """
+    ・Aを優先して max_total まで埋める
+    ・Aがmax_total以上 → A上位max_totalのみ
+    ・Aが少ない場合 → Bから補充
+    """
+    A_sel = A_list[:max_total]
+    remain = max_total - len(A_sel)
 
+    if remain > 0:
+        B_sel = B_list[:remain]
+    else:
+        B_sel = []
 
-# ========================
-# A優先で最大5銘柄
-# ========================
-def select_candidates(A, B):
-    A_sel = A[:MAX_PICKS]
-    remain = MAX_PICKS - len(A_sel)
-    B_sel = B[:remain] if remain > 0 else []
     return A_sel, B_sel
 
 
-# ========================
-# 建て玉最大金額
-# ========================
-def calc_max_position(total_asset, lev):
-    return int(total_asset * lev)
-
-
-# ========================
-# LINE送信（あなたのWorker対応版・絶対に壊さない）
-# ========================
-def send_line(text: str):
-    if not WORKER_URL:
-        print("[WARN] WORKER_URL 未設定 → print のみ")
-        print(text)
-        return
-
-    chunk = 3800
-    chunks = [text[i:i + chunk] for i in range(0, len(text), chunk)]
-
-    for ch in chunks:
-        try:
-            r = requests.post(WORKER_URL, json={"text": ch}, timeout=10)
-            print("[LINE RESULT]", r.status_code, r.text)
-        except Exception as e:
-            print("[ERROR] LINE送信失敗:", e)
-
-
-# ========================
-# レポート生成
-# ========================
-def build_report():
-    today = jst_today_str()
-
-    # 市場
-    mkt = calc_market_score()
-    mkt_score = mkt["score"]
+# ============================================================
+# レポート生成：Core候補
+# ============================================================
+def build_core_report(today_str, today_date, mkt, total_asset):
+    mkt_score = int(mkt["score"])
     mkt_comment = mkt["comment"]
-    lev = mkt["leverage"]
-    est_asset = mkt["asset"]
 
-    max_pos = calc_max_position(est_asset, lev)
+    # 推奨レバ（あなた仕様）
+    if mkt_score >= 70:
+        target_lev = 1.8
+        lev_label = "強め（押し目＋一部ブレイク可）"
+    elif mkt_score >= 60:
+        target_lev = 1.5
+        lev_label = "やや強め（押し目メイン）"
+    elif mkt_score >= 50:
+        target_lev = 1.3
+        lev_label = "標準（押し目のみ）"
+    else:
+        target_lev = 1.1
+        lev_label = "守り寄り（ロット下げ）"
 
-    # セクター
+    # トップセクター
     secs = top_sectors_5d()
     if secs:
-        sector_text = "\n".join([f"{i+1}. {s[0]} ({s[1]:+.2f}%)" for i, s in enumerate(secs)])
+        sector_text = "\n".join([
+            f"{i+1}. {s[0]} ({s[1]:+.2f}%)"
+            for i, s in enumerate(secs)
+        ])
     else:
-        sector_text = "算出不可"
-
-    # イベント（自動判断は後で追加予定）
-    event_text = "特筆すべきイベントなし（通常モード）"
+        sector_text = "算出不可（データ不足）"
 
     # スクリーニング
-    A_all, B_all = run_screening()
-    A_list, B_list = select_candidates(A_all, B_all)
+    A_list, B_list = run_screening(
+        today=today_date,
+        mkt_score=mkt_score,
+        total_asset=total_asset,
+    )
 
-    # ポジション
-    pos_df = load_positions("positions.csv")
-    pos_text, total_asset, total_pos, lev_used, risk_info = analyze_positions(pos_df)
+    # A優先で5つ
+    A_sel, B_sel = select_primary(A_list, B_list, max_total=5)
 
-    # assemble
+    # イベント警告
+    warns = build_event_warnings(today_date)
+
+    # ---------------------------
+    # レポート本文
+    # ---------------------------
     lines = []
+    lines.append(f"📅 {today_str} stockbotTOM 日報\n")
 
-    lines.append(f"📅 {today} stockbotTOM 日報\n")
     lines.append("◆ 今日の結論")
     lines.append(f"- 地合いスコア: {mkt_score}点")
     lines.append(f"- コメント: {mkt_comment}")
-    lines.append(f"- 推奨レバ: 約{lev:.1f}倍（Aランク最大{MAX_PICKS}銘柄）")
-    lines.append(f"- 推定運用資産ベース: 約{est_asset:,}円\n")
+    lines.append(f"- 推奨レバ: 約{target_lev:.1f}倍（{lev_label}） / Aランク最大5銘柄")
+    lines.append(f"- 推定運用資産ベース: 約{int(total_asset):,}円")
+    if warns:
+        lines.extend(warns)
+    lines.append("")
 
     lines.append("◆ 今日のTOPセクター（5日騰落率）")
-    lines.append(sector_text + "\n")
+    lines.append(sector_text)
+    lines.append("")
 
-    lines.append("◆ 今日のイベント・警戒情報")
-    lines.append(f"- {event_text}\n")
-
-    lines.append(f"◆ Core候補 Aランク（最大{MAX_PICKS}銘柄）")
-    if not A_list:
-        lines.append("Aランクなし\n")
+    # ---------------------------
+    # Aランク
+    # ---------------------------
+    lines.append("◆ Core候補 Aランク（本命・最大5銘柄）")
+    if not A_sel:
+        lines.append("Aランク候補なし（無理IN禁止）。\n")
     else:
-        for r in A_list:
-            p = r["price"]
-            tp_price = p * (1 + r["tp"])
-            sl_price = p * (1 + r["sl"])
+        for r in A_sel:
             lines.append(
-                f"- {r['ticker']} {r['name']} Score:{r['score']:.1f} 現値:{p:.1f}\n"
-                f"    ・IN目安: {p:.1f}\n"
-                f"    ・利確目安: {r['tp']*100:.1f}%（{tp_price:.1f}）\n"
-                f"    ・損切り目安: {r['sl']*100:.1f}%（{sl_price:.1f}）"
+                f"- {r['ticker']} {r['name']}  Score:{r['score']:.1f}  現値:{r['price']:.1f}"
             )
-        lines.append("")
+            lines.append(
+                f"    ・IN目安: {r['price']:.1f}"
+                f"\n    ・利確目安: +{r['tp_pct']*100:.1f}%（{r['tp_price']:.1f}）"
+                f"\n    ・損切り目安: {r['sl_pct']*100:.1f}%（{r['sl_price']:.1f}）"
+            )
+            lines.append("")
 
-    lines.append("◆ Core候補 Bランク")
-    if not B_list:
-        if A_list:
-            lines.append("Aランクで枠が埋まっているため省略。\n")
-        else:
+    # ---------------------------
+    # Bランク
+    # ---------------------------
+    lines.append("◆ Core候補 Bランク（押し目候補）")
+    if len(A_sel) >= 5:
+        lines.append("Aランク5銘柄で枠が埋まったため、Bランクは省略。\n")
+    else:
+        if not B_sel:
             lines.append("Bランク候補なし。\n")
-    else:
-        for r in B_list:
-            p = r["price"]
-            tp_price = p * (1 + r["tp"])
-            sl_price = p * (1 + r["sl"])
-            lines.append(
-                f"- {r['ticker']} {r['name']} Score:{r['score']:.1f} 現値:{p:.1f}\n"
-                f"    ・利確目安: {r['tp']*100:.1f}%（{tp_price:.1f}） / 損切り目安: {r['sl']*100:.1f}%（{sl_price:.1f}）"
-            )
-        lines.append("")
-
-    lines.append("📊 ポジション分析")
-    lines.append(pos_text + "\n")
-
-    lines.append("◆ 本日の建て玉最大金額")
-    lines.append(f"- 推奨レバ: {lev:.1f}倍")
-    lines.append(f"- 運用資産ベース: 約{est_asset:,}円")
-    lines.append(f"- 今日のMAX建て玉: 約{max_pos:,}円")
+        else:
+            for r in B_sel:
+                lines.append(
+                    f"- {r['ticker']} {r['name']}  Score:{r['score']:.1f}  現値:{r['price']:.1f}"
+                )
+            lines.append("")
 
     return "\n".join(lines)
 
 
-# ========================
-# Entry
-# ========================
+# ============================================================
+# ポジションレポート
+# ============================================================
+def build_position_report(today_str, pos_text):
+    lines = []
+    lines.append(f"📊 {today_str} ポジション分析\n")
+    lines.append("◆ ポジションサマリ")
+    lines.append(pos_text.strip())
+    return "\n".join(lines)
+
+
+# ============================================================
+# LINE送信（ワーカー互換・分割）
+# ============================================================
+def send_line(text):
+    if not WORKER_URL:
+        print("[WARN] WORKER_URL 未設定 → printのみ")
+        print(text)
+        return
+
+    chunk = 3800
+    parts = [text[i:i + chunk] for i in range(0, len(text), chunk)]
+
+    for p in parts:
+        try:
+            r = requests.post(WORKER_URL, json={"text": p}, timeout=12)
+            print("[LINE RESULT]", r.status_code, r.text)
+        except Exception as e:
+            print("[ERROR] LINE送信失敗:", e)
+            print(p)
+
+
+# ============================================================
+# MAIN
+# ============================================================
 def main():
-    text = build_report()
-    print(text)
-    send_line(text)
+    today_str = jst_today_str()
+    today_date = jst_today_date()
+
+    # 市場
+    mkt = calc_market_score()
+
+    # ポジション
+    pos_df = load_positions(POSITIONS_PATH)
+    pos_text, total_asset, total_pos, lev, risk = analyze_positions(pos_df)
+
+    # レポート作成
+    core = build_core_report(today_str, today_date, mkt, total_asset)
+    posrep = build_position_report(today_str, pos_text)
+
+    # print
+    print(core)
+    print("\n" + "=" * 60 + "\n")
+    print(posrep)
+
+    # 送信（2通）
+    send_line(core)
+    send_line(posrep)
+
 
 if __name__ == "__main__":
     main()
