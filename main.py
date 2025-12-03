@@ -32,6 +32,9 @@ MAX_FINAL_STOCKS = 3           # 最終的に LINE に出すのは最大3銘柄
 # 決算フィルタ: ±N日
 EARNINGS_EXCLUDE_DAYS = 3
 
+# 薄板・低流動除外用（20日平均売買代金の最低ライン・目安）
+MIN_TURNOVER_20D = 1e8  # 1億円目安（必要なら後で調整）
+
 
 # ============================================================
 # 日付 / イベント関連
@@ -219,7 +222,7 @@ def calc_volatility(close: pd.Series, window: int = 20) -> float:
 def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
     """
     地合いスコアから推奨レバ / コメント
-    （今までの挙動を維持しつつ、“勝ちやすさ優先” に微調整済）
+    “1年後の資産最大化” を意識したバランス型。
     """
     if mkt_score >= 70:
         return 1.8, "強め（押し目＋一部ブレイク可）"
@@ -269,7 +272,6 @@ def build_sector_strength_map() -> Dict[str, float]:
     strength: Dict[str, float] = {}
 
     for rank, (name, chg) in enumerate(secs[:5]):
-        # chg がプラスのときだけボーナス強め
         base = 6 - rank  # 1位:6, 2位:5, ...
         boost = max(chg, 0.0) * 0.3
         strength[name] = base + boost
@@ -278,7 +280,7 @@ def build_sector_strength_map() -> Dict[str, float]:
 
 
 # ============================================================
-# Top10用の強化スコアリング
+# Top10用の強化スコアリング（Setup 優先）
 # ============================================================
 def score_candidate(
     ticker: str,
@@ -292,6 +294,7 @@ def score_candidate(
     """
     Top10銘柄の内部スコアリング（強化版）
     “今日から3〜10日スイングで勝ちやすいか” を判定する。
+    Setup(形) ＞ Quality(素性) の比率。
     """
 
     close = hist["Close"].astype(float)
@@ -324,11 +327,13 @@ def score_candidate(
     else:
         score -= 6.0
 
-    # 3. ボラティリティの安定感
-    if vola20 < 0.02:
-        score += 5.0
-    elif vola20 > 0.05:
-        score -= 4.0
+    # 3. ボラティリティの安定感（地合いに応じて可変）
+    if vola20 < 0.018:
+        # 弱地合いほど低ボラを強く優遇
+        score += 8.0 if mkt_score < 60 else 5.0
+    elif vola20 > 0.06:
+        # 弱地合いほど高ボラを強く減点
+        score -= 8.0 if mkt_score < 60 else 5.0
 
     # 4. ATR（値幅の取りやすさ）
     if atr and price > 0:
@@ -338,7 +343,7 @@ def score_candidate(
         elif atr_ratio < 0.01 or atr_ratio > 0.06:
             score -= 5.0
 
-    # 5. 出来高（薄商いを減点）
+    # 5. 出来高（薄商いを減点・短期の盛り上がりを加点）
     if "Volume" in hist.columns:
         vol = hist["Volume"].astype(float)
         if len(vol) >= 20:
@@ -465,7 +470,6 @@ def enhance_market_score() -> Dict:
         sox = yf.Ticker("^SOX").history(period="5d")
         if sox is not None and not sox.empty:
             sox_chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100.0
-            # 5日で +10% → +5点 / -10% → -5点 くらいのイメージ
             score += float(np.clip(sox_chg / 2.0, -5.0, 5.0))
     except Exception as e:
         print("[WARN] SOX fetch failed:", e)
@@ -475,7 +479,6 @@ def enhance_market_score() -> Dict:
         nvda = yf.Ticker("NVDA").history(period="5d")
         if nvda is not None and not nvda.empty:
             nvda_chg = float(nvda["Close"].iloc[-1] / nvda["Close"].iloc[0] - 1.0) * 100.0
-            # 5日で +12% → +4点 / -12% → -4点 くらい
             score += float(np.clip(nvda_chg / 3.0, -4.0, 4.0))
     except Exception as e:
         print("[WARN] NVDA fetch failed:", e)
@@ -513,6 +516,16 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         hist = fetch_history(ticker)
         if hist is None or len(hist) < 60:
             continue
+
+        # 売買代金フィルタ（20日平均）
+        if "Volume" in hist.columns:
+            close = hist["Close"].astype(float)
+            vol = hist["Volume"].astype(float)
+            if len(close) >= 20:
+                turn_ma20 = float((close * vol).rolling(20).mean().iloc[-1])
+                if np.isfinite(turn_ma20) and turn_ma20 < MIN_TURNOVER_20D:
+                    # 薄板・低流動はスイング対象から外す
+                    continue
 
         base_score = score_stock(hist)
         if base_score is None or not np.isfinite(base_score):
