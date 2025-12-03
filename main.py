@@ -32,9 +32,6 @@ MAX_FINAL_STOCKS = 3           # 最終的に LINE に出すのは最大3銘柄
 # 決算フィルタ: ±N日
 EARNINGS_EXCLUDE_DAYS = 3
 
-# 薄板・低流動除外用（20日平均売買代金の最低ライン・目安）
-MIN_TURNOVER_20D = 1e8  # 1億円目安（必要なら後で調整）
-
 
 # ============================================================
 # 日付 / イベント関連
@@ -222,7 +219,6 @@ def calc_volatility(close: pd.Series, window: int = 20) -> float:
 def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
     """
     地合いスコアから推奨レバ / コメント
-    “1年後の資産最大化” を意識したバランス型。
     """
     if mkt_score >= 70:
         return 1.8, "強め（押し目＋一部ブレイク可）"
@@ -280,7 +276,7 @@ def build_sector_strength_map() -> Dict[str, float]:
 
 
 # ============================================================
-# Top10用の強化スコアリング（Setup 優先）
+# Top10用の三階層スコアリング
 # ============================================================
 def score_candidate(
     ticker: str,
@@ -292,9 +288,8 @@ def score_candidate(
     sector_strength: Dict[str, float],
 ) -> Dict:
     """
-    Top10銘柄の内部スコアリング（強化版）
+    Quality / Setup / Regime の三階層でスコアを構成し、
     “今日から3〜10日スイングで勝ちやすいか” を判定する。
-    Setup(形) ＞ Quality(素性) の比率。
     """
 
     close = hist["Close"].astype(float)
@@ -307,43 +302,43 @@ def score_candidate(
     atr = calc_atr(hist)
     vola20 = calc_volatility(close, 20)
 
-    score = float(score_raw)
+    # --- Quality（ベースは ACDE） ---
+    quality_score = float(score_raw)
+
+    # --- Setup（短期の形・テクニカル） ---
+    setup_score = 0.0
 
     # 1. トレンド方向（MAの並び）
-    trend_score = 0.0
     if ma5 > ma20 > ma60:
-        trend_score += 12.0
+        setup_score += 12.0
     elif ma20 > ma5 > ma60:
-        trend_score += 6.0
+        setup_score += 6.0
     elif ma20 > ma60 > ma5:
-        trend_score += 3.0
-    score += trend_score
+        setup_score += 3.0
 
     # 2. RSI（過熱 / 売られ過ぎの調整）
     if 40 <= rsi <= 65:
-        score += 10.0
+        setup_score += 10.0
     elif 30 <= rsi < 40 or 65 < rsi <= 70:
-        score += 3.0
+        setup_score += 3.0
     else:
-        score -= 6.0
+        setup_score -= 6.0
 
-    # 3. ボラティリティの安定感（地合いに応じて可変）
-    if vola20 < 0.018:
-        # 弱地合いほど低ボラを強く優遇
-        score += 8.0 if mkt_score < 60 else 5.0
-    elif vola20 > 0.06:
-        # 弱地合いほど高ボラを強く減点
-        score -= 8.0 if mkt_score < 60 else 5.0
+    # 3. ボラティリティの安定感
+    if vola20 < 0.02:
+        setup_score += 5.0
+    elif vola20 > 0.05:
+        setup_score -= 4.0
 
     # 4. ATR（値幅の取りやすさ）
     if atr and price > 0:
         atr_ratio = atr / price
         if 0.015 <= atr_ratio <= 0.035:
-            score += 6.0
+            setup_score += 6.0
         elif atr_ratio < 0.01 or atr_ratio > 0.06:
-            score -= 5.0
+            setup_score -= 5.0
 
-    # 5. 出来高（薄商いを減点・短期の盛り上がりを加点）
+    # 5. 出来高（薄商いを減点）
     if "Volume" in hist.columns:
         vol = hist["Volume"].astype(float)
         if len(vol) >= 20:
@@ -352,24 +347,37 @@ def score_candidate(
             if v_ma > 0:
                 ratio = v_now / v_ma
                 if ratio >= 1.5:
-                    score += 3.0
+                    setup_score += 3.0
                 elif ratio <= 0.5:
-                    score -= 3.0
+                    setup_score -= 3.0
 
-    # 6. 地合いの追い風
-    score += (mkt_score - 50) * 0.12
+    # --- Regime（地合い・セクター） ---
+    regime_score = 0.0
 
-    # 7. セクター強度ブースト
+    # 地合い
+    regime_score += (mkt_score - 50) * 0.12
+
+    # セクター強度ブースト
     if sector_strength:
-        score += sector_strength.get(sector, 0.0)
+        regime_score += sector_strength.get(sector, 0.0)
+
+    # --- 三階層を合成 ---
+    # Setup > Quality > Regime の順で効くように重みを設定
+    wQ = 0.7
+    wS = 1.0
+    wR = 0.6
+
+    total_score = quality_score * wQ + setup_score * wS + regime_score * wR
 
     return {
         "ticker": ticker,
         "name": name,
         "sector": sector,
         "price": price,
-        "score_raw": float(score_raw),
-        "score_final": float(score),
+        "score_quality": quality_score,
+        "score_setup": setup_score,
+        "score_regime": regime_score,
+        "score_final": float(total_score),
         "ma5": ma5,
         "ma20": ma20,
         "ma60": ma60,
@@ -517,16 +525,6 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         if hist is None or len(hist) < 60:
             continue
 
-        # 売買代金フィルタ（20日平均）
-        if "Volume" in hist.columns:
-            close = hist["Close"].astype(float)
-            vol = hist["Volume"].astype(float)
-            if len(close) >= 20:
-                turn_ma20 = float((close * vol).rolling(20).mean().iloc[-1])
-                if np.isfinite(turn_ma20) and turn_ma20 < MIN_TURNOVER_20D:
-                    # 薄板・低流動はスイング対象から外す
-                    continue
-
         base_score = score_stock(hist)
         if base_score is None or not np.isfinite(base_score):
             continue
@@ -546,7 +544,7 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         )
         raw_candidates.append(info)
 
-    # Top10 抽出
+    # Top10 抽出（スコア最終版でソート）
     raw_candidates.sort(key=lambda x: x["score_final"], reverse=True)
     top10 = raw_candidates[:SCREENING_TOP_N]
 
@@ -559,18 +557,28 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         tp_price = entry * (1.0 + tp_pct)
         sl_price = entry * (1.0 + sl_pct)
 
+        price = float(c["price"])
+        gap_ratio = abs(price - entry) / price if price > 0 else 1.0
+
+        # 今日IN候補か、数日以内IN候補かを分類
+        if gap_ratio <= 0.01:
+            entry_type = "today"      # 今日から入ってOKゾーン
+        else:
+            entry_type = "soon"       # 数日以内に押し目を待つゾーン
+
         final_list.append(
             {
                 "ticker": c["ticker"],
                 "name": c["name"],
                 "sector": c["sector"],
                 "score": c["score_final"],
-                "price": c["price"],
+                "price": price,
                 "entry": entry,
                 "tp_pct": tp_pct,
                 "sl_pct": sl_pct,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "entry_type": entry_type,
             }
         )
 
@@ -614,6 +622,8 @@ def build_report(
 
     # スクリーニング（Top10 → 最終3）
     core_list = run_screening(today_date, mkt_score)
+    today_list = [c for c in core_list if c.get("entry_type") == "today"]
+    soon_list = [c for c in core_list if c.get("entry_type") == "soon"]
 
     lines: List[str] = []
 
@@ -638,16 +648,34 @@ def build_report(
         lines.append(ev)
     lines.append("")
 
-    # --- Core候補 Aランク ---
-    lines.append(f"◆ Core候補 Aランク（本命押し目・最大{MAX_FINAL_STOCKS}銘柄）")
-    if not core_list:
-        lines.append("本命Aランク候補なし（今日は無理IN禁止寄り）。")
+    # --- Core候補 Aランク（今日IN） ---
+    lines.append(f"◆ Core候補 Aランク（本命押し目・今日IN候補・最大{MAX_FINAL_STOCKS}銘柄）")
+    if not today_list:
+        lines.append("今日すぐにINできる本命Aランク候補はなし。")
     else:
-        for c in core_list:
+        for c in today_list:
             lines.append(
                 f"- {c['ticker']} {c['name']}  Score:{c['score']:.1f} 現値:{c['price']:.1f}"
             )
             lines.append(f"    ・IN目安: {c['entry']:.1f}")
+            lines.append(
+                f"    ・利確目安: +{c['tp_pct']*100:.1f}%（{c['tp_price']:.1f}）"
+            )
+            lines.append(
+                f"    ・損切り目安: {c['sl_pct']*100:.1f}%（{c['sl_price']:.1f}）"
+            )
+            lines.append("")
+
+    # --- Core候補 Aランク（数日以内IN） ---
+    lines.append(f"◆ Core候補 Aランク（数日以内の押し目待ち候補）")
+    if not soon_list:
+        lines.append("数日以内の押し目待ちAランク候補なし。")
+    else:
+        for c in soon_list:
+            lines.append(
+                f"- {c['ticker']} {c['name']}  Score:{c['score']:.1f} 現値:{c['price']:.1f}"
+            )
+            lines.append(f"    ・理想IN目安: {c['entry']:.1f}")
             lines.append(
                 f"    ・利確目安: +{c['tp_pct']*100:.1f}%（{c['tp_price']:.1f}）"
             )
