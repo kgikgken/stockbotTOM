@@ -9,7 +9,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 
-# 既存utilsは全て使用（機能削除なし）
+# 既存utilsはすべて利用（機能削減なし）
 from utils.market import calc_market_score
 from utils.sector import top_sectors_5d
 from utils.position import load_positions, analyze_positions
@@ -177,6 +177,7 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
 def calc_volatility(close: pd.Series, window: int = 20) -> float:
     if len(close) < window + 1:
         return 0.03
+    # FutureWarning 対応で fill_method=None
     ret = close.pct_change(fill_method=None)
     v = ret.rolling(window).std().iloc[-1]
     if v is None or not np.isfinite(v):
@@ -210,7 +211,7 @@ def calc_max_position(total_asset: float, lev: float) -> int:
 
 
 # ============================================================
-# Top10用の強化スコアリング
+# Top10用の強化スコアリング（3〜10日スイング向け）
 # ============================================================
 def score_candidate(
     ticker: str,
@@ -275,6 +276,26 @@ def score_candidate(
     # 6. 地合いの追い風
     score += (mkt_score - 50) * 0.12
 
+    # 7. 「行き過ぎ高値」を減点（RSI + 5日騰落 + MA乖離）
+    if len(close) >= 5:
+        ret_5d = close.iloc[-1] / close.iloc[-5] - 1.0
+    else:
+        ret_5d = 0.0
+
+    ma_spread = 0.0
+    if ma20 != 0:
+        ma_spread = (ma5 - ma20) / abs(ma20)
+
+    overheat_penalty = 0.0
+    if rsi > 72:
+        overheat_penalty -= 6.0
+    if ret_5d > 0.12:
+        overheat_penalty -= 4.0
+    if ma_spread > 0.05:
+        overheat_penalty -= 4.0
+
+    score += overheat_penalty
+
     return {
         "ticker": ticker,
         "name": name,
@@ -304,9 +325,9 @@ def compute_entry_price(
     """
     “今日から3〜10日スイングで勝ちやすい” IN価格
     - ベースは MA20 付近
-    - ATR で上下に少しずらす
+    - ATR で少し下に寄せる
     - 直近安値より下になり過ぎたら補正
-    - トレンドが強いときはやや高め
+    - 強い上昇トレンドではやや高め
     """
     price = float(close.iloc[-1])
     last_low = float(close.iloc[-5:].min())
@@ -322,11 +343,11 @@ def compute_entry_price(
     if price > ma5 > ma20:
         target = ma20 + (ma5 - ma20) * 0.3
 
-    # 現値より上になってしまったら、現値の少し下で待つイメージに補正
+    # 現値より上になってしまったら、現値の少し下に補正
     if target > price:
         target = price * 0.995
 
-    # 直近安値より下になり過ぎたら、「安値割れはしない」前提で少し上に補正
+    # 直近安値より下になり過ぎたら、「安値割れしない」前提で少し上に補正
     if target < last_low:
         target = last_low * 1.02
 
@@ -367,7 +388,44 @@ def calc_candidate_tp_sl(vola20: float, mkt_score: int) -> Tuple[float, float]:
 
 
 # ============================================================
-# スクリーニング（Top10 → 最終3）
+# IN価格が「明日〜数日で現実的か？」チェック
+# ============================================================
+def is_entry_reachable(
+    price: float,
+    entry: float,
+    atr: float,
+) -> bool:
+    """
+    今日〜2営業日くらいで “現実的にタッチし得る” IN かどうかの判定
+    - 価格差が 2ATR を大きく超える → NG
+    - 7%以上下に置く → 深すぎる押し目として NG
+    """
+    if not (np.isfinite(price) and np.isfinite(entry)):
+        return False
+
+    if entry >= price * 1.01:
+        # そもそも現値より上にあるような IN は除外
+        return False
+
+    dd = price - entry
+    if dd <= 0:
+        # ほぼ同値〜少し下はOK
+        return True
+
+    # ATR が取れていない場合はざっくり 7% まで許容
+    if not atr or atr <= 0:
+        return dd <= price * 0.07
+
+    # 通常は 2ATR + 3% くらいを “ギリ届く” とみなす
+    max_dd = max(2.0 * atr, price * 0.03)
+    if dd > max_dd and dd > price * 0.07:
+        return False
+
+    return True
+
+
+# ============================================================
+# スクリーニング（Top10 → 最終3 + セクター分散）
 # ============================================================
 def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
     df = load_universe(UNIVERSE_PATH)
@@ -396,7 +454,7 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         if base_score is None or not np.isfinite(base_score):
             continue
 
-        # あまりに低スコアは除外（元A/Bの下限相当）
+        # あまりに低スコアな銘柄はそもそも候補にしない
         if base_score < 75:
             continue
 
@@ -410,12 +468,12 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         )
         raw_candidates.append(info)
 
-    # Top10 抽出
+    # Top10 抽出（内部強化スコア順）
     raw_candidates.sort(key=lambda x: x["score_final"], reverse=True)
     top10 = raw_candidates[:SCREENING_TOP_N]
 
-    # Top10 から最終3銘柄
-    final_list: List[Dict] = []
+    # Top10 から IN価格・TP/SL を計算しつつフィルタ
+    enriched: List[Dict] = []
     for c in top10:
         close = c["hist"]["Close"].astype(float)
         entry = compute_entry_price(close, c["ma5"], c["ma20"], c["atr"])
@@ -423,13 +481,19 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         tp_price = entry * (1.0 + tp_pct)
         sl_price = entry * (1.0 + sl_pct)
 
-        final_list.append(
+        price = c["price"]
+
+        # 「明日〜数日で届き得るIN」だけ残す
+        if not is_entry_reachable(price, entry, c["atr"]):
+            continue
+
+        enriched.append(
             {
                 "ticker": c["ticker"],
                 "name": c["name"],
                 "sector": c["sector"],
                 "score": c["score_final"],
-                "price": c["price"],
+                "price": price,
                 "entry": entry,
                 "tp_pct": tp_pct,
                 "sl_pct": sl_pct,
@@ -438,8 +502,32 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
             }
         )
 
-    final_list.sort(key=lambda x: x["score"], reverse=True)
-    return final_list[:MAX_FINAL_STOCKS]
+    # 強化スコア順に並び替え
+    enriched.sort(key=lambda x: x["score"], reverse=True)
+
+    # セクター分散を意識した最終3銘柄選定
+    selected: List[Dict] = []
+    used_sectors: set[str] = set()
+
+    # 第1パス：なるべくセクターを分散しながらピック
+    for c in enriched:
+        sec = c["sector"]
+        if sec not in used_sectors or len(selected) < 2:
+            selected.append(c)
+            used_sectors.add(sec)
+        if len(selected) >= MAX_FINAL_STOCKS:
+            break
+
+    if len(selected) < MAX_FINAL_STOCKS:
+        # 第2パス：残り枠はセクター被りOKで上から詰める
+        for c in enriched:
+            if c in selected:
+                continue
+            selected.append(c)
+            if len(selected) >= MAX_FINAL_STOCKS:
+                break
+
+    return selected[:MAX_FINAL_STOCKS]
 
 
 # ============================================================
@@ -476,7 +564,7 @@ def build_report(
     if not event_lines:
         event_lines = ["- 特筆すべきイベントなし（通常モード）"]
 
-    # スクリーニング（Top10 → 最終3）
+    # スクリーニング（Top10 → 最終3 + セクター分散）
     core_list = run_screening(today_date, mkt_score)
 
     lines: List[str] = []
