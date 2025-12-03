@@ -23,35 +23,29 @@ WORKER_URL = os.getenv("WORKER_URL")
 EARNINGS_EXCLUDE_DAYS = 3
 
 
-# ===============================
-# 地合い & 日付
-# ===============================
+# ============================================================
+# 日付関連
+# ============================================================
 def jst_today_date() -> datetime.date:
     return datetime.now(timezone(timedelta(hours=9))).date()
 
 
-# ===============================
-# 決算フィルタ
-# ===============================
+# ============================================================
+# Universe 読み込み
+# ============================================================
 def load_universe(path=UNIVERSE_PATH):
     if not os.path.exists(path):
         return None
-    try:
-        df = pd.read_csv(path)
-    except:
-        return None
-
+    df = pd.read_csv(path)
     if "ticker" not in df.columns:
         return None
-
-    df["ticker"] = df["ticker"].astype(str)
 
     if "earnings_date" in df.columns:
         df["earnings_date_parsed"] = pd.to_datetime(
             df["earnings_date"], errors="coerce"
         ).dt.date
     else:
-        df["earnings_date_parsed"] = pd.NaT
+        df["earnings_date_parsed"] = None
 
     return df
 
@@ -66,9 +60,9 @@ def in_earnings_window(row, today):
         return False
 
 
-# ===============================
-# Data fetch
-# ===============================
+# ============================================================
+# 株価取得
+# ============================================================
 def fetch_history(ticker, period="130d"):
     try:
         df = yf.Ticker(ticker).history(period=period)
@@ -79,22 +73,40 @@ def fetch_history(ticker, period="130d"):
         return None
 
 
-# ===============================
-# レバレッジ
-# ===============================
-def calc_target_leverage(mkt_score: int):
-    if mkt_score >= 70:
-        return 2.0, "攻め"
-    if mkt_score >= 50:
-        return 1.3, "標準"
-    if mkt_score >= 40:
-        return 1.0, "守り"
-    return 0.8, "超守り"
+# ============================================================
+# IN価格（最強押し目ロジック）
+# ============================================================
+def calc_in_price(price: float, hist: pd.DataFrame) -> float:
+    """
+    世界最高トレーダー仕様 IN目安（押し目の最強版）
+    ① MA20以下 → MA20
+    ② MA20の角度が上昇 → MA20 + α
+    ③ ボラが大きすぎる時のみ安全側
+    """
+    close = hist["Close"].astype(float)
+    ma20 = close.rolling(20).mean().iloc[-1]
+    slope = ma20 - close.rolling(20).mean().iloc[-5]  # MA20の傾き
+    vola = close.pct_change().rolling(20).std().iloc[-1]
+
+    # ボラ高すぎ → 深追い禁止
+    if vola > 0.06:
+        return round(price * 0.97, 1)
+
+    # MA20下抜け → MA20で押し目拾う
+    if price <= ma20:
+        return round(ma20, 1)
+
+    # MA20が上向き → 少し上で拾う（強気相場）
+    if slope > 0:
+        return round(ma20 * 1.005, 1)
+
+    # 通常：MA20
+    return round(ma20, 1)
 
 
-# ===============================
-# 利確 / 損切り / IN価格
-# ===============================
+# ============================================================
+# 利確・損切り
+# ============================================================
 def calc_candidate_tp_sl(price, vola20, mkt_score):
     if vola20 is None or not np.isfinite(vola20):
         vola20 = 0.04
@@ -113,41 +125,26 @@ def calc_candidate_tp_sl(price, vola20, mkt_score):
         tp += 0.02
     elif mkt_score < 45:
         tp -= 0.02
-        sl = max(sl, -0.03)
 
     tp = float(np.clip(tp, 0.05, 0.18))
     sl = float(np.clip(sl, -0.07, -0.02))
 
-    return tp, sl
+    return tp, sl, price * (1 + tp), price * (1 + sl)
 
 
-def calc_in_price(hist):
-    c = hist["Close"]
-    v = hist["Volume"]
-    ma5 = c.rolling(5).mean()
-    v_ma20 = v.rolling(20).mean()
-
-    for i in range(2, 12):
-        if i >= len(ma5):
-            break
-        if c.iloc[-i] < ma5.iloc[-i] and v.iloc[-i] < v_ma20.iloc[-i]:
-            return round(float(c.iloc[-i]), 1)
-
-    return round(float(c.iloc[-1] * 0.90), 1)
-
-
-# ===============================
+# ============================================================
 # スクリーニング
-# ===============================
+# ============================================================
 def run_screening(today, mkt_score):
     df = load_universe()
     if df is None:
-        return []
+        return [], []
 
-    results = []
+    A_list = []
+    B_list = []
 
     for _, row in df.iterrows():
-        ticker = str(row["ticker"])
+        ticker = str(row["ticker"]).strip()
         if not ticker:
             continue
 
@@ -155,119 +152,132 @@ def run_screening(today, mkt_score):
             continue
 
         name = str(row.get("name", ticker))
-
         hist = fetch_history(ticker)
         if hist is None or len(hist) < 60:
             continue
 
-        sc = score_stock(hist)
-        if sc is None or not np.isfinite(sc):
+        score = score_stock(hist)
+        if score is None or not np.isfinite(score):
             continue
 
-        c = hist["Close"].astype(float)
-        price = float(c.iloc[-1])
+        price = float(hist["Close"].iloc[-1])
+        vola20 = float(hist["Close"].pct_change().rolling(20).std().iloc[-1])
 
-        ret = c.pct_change()
-        vola20 = ret.rolling(20).std().iloc[-1]
+        in_price = calc_in_price(price, hist)
+        tp_pct, sl_pct, tp_price, sl_price = calc_candidate_tp_sl(price, vola20, mkt_score)
 
-        in_price = calc_in_price(hist)
-        tp_pct, sl_pct = calc_candidate_tp_sl(price, vola20, mkt_score)
-
-        results.append({
+        info = {
             "ticker": ticker,
             "name": name,
-            "score": float(sc),
+            "score": float(score),
             "price": price,
             "in_price": in_price,
             "tp_pct": tp_pct,
             "sl_pct": sl_pct,
-            "tp_price": round(in_price * (1 + tp_pct), 1),
-            "sl_price": round(in_price * (1 + sl_pct), 1),
-        })
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+        }
 
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results
+        if score >= 85:
+            A_list.append(info)
+        elif score >= 75:
+            B_list.append(info)
+
+    A_list.sort(key=lambda x: x["score"], reverse=True)
+    B_list.sort(key=lambda x: x["score"], reverse=True)
+    return A_list, B_list
 
 
-# ===============================
-# 分割送信
-# ===============================
-def send_line_chunks(text: str):
+# ============================================================
+# 勝率最優先：Aが0の日は新規INなし
+# ============================================================
+def select_primary_targets(A_list, B_list, max_names=3):
+    if len(A_list) >= max_names:
+        return A_list[:max_names], B_list
+
+    if 0 < len(A_list) < max_names:
+        need = max_names - len(A_list)
+        return A_list + B_list[:need], B_list[need:]
+
+    return [], B_list  # Aが0 → 新規INなし
+
+
+# ============================================================
+# レポート生成
+# ============================================================
+def send_line(text):
     if not WORKER_URL:
-        print("[ERROR] WORKER_URL not set")
         print(text)
         return
 
-    chunk = 3900
-    parts = [text[i:i+chunk] for i in range(0, len(text), chunk)]
-
-    for idx, p in enumerate(parts):
+    chunks = [text[i:i+3800] for i in range(0, len(text), 3800)]
+    for ch in chunks:
         try:
-            r = requests.post(WORKER_URL, json={"text": p}, timeout=10)
-            print(f"[LINE PART {idx+1}/{len(parts)}]", r.status_code)
+            r = requests.post(WORKER_URL, json={"text": ch}, timeout=10)
+            print("[LINE RESULT]", r.status_code, r.text)
         except Exception as e:
             print("[ERROR] LINE送信失敗:", e)
 
 
-# ===============================
-# レポート
-# ===============================
 def build_report():
-    today = jst_today_date()
     today_str = jst_today_str()
+    today_date = jst_today_date()
 
     mkt = calc_market_score()
-    mkt_score = mkt["score"]
+    mkt_score = int(mkt["score"])
     mkt_comment = mkt["comment"]
+    est_asset = mkt["asset"]
+    lev = mkt["leverage"]
 
-    pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset, *_ = analyze_positions(pos_df)
+    max_pos = int(est_asset * lev)
 
     secs = top_sectors_5d()
-    sec_text = "\n".join([
-        f"{i+1}. {s[0]} ({s[1]:+.2f}%)" for i, s in enumerate(secs)
-    ]) if secs else "データ不足"
+    sector_text = "\n".join([f"{i+1}. {s[0]} ({s[1]:+.2f}%)" for i, s in enumerate(secs)])
 
-    results = run_screening(today, mkt_score)
-    A = results[:3]
+    A_list, B_list = run_screening(today_date, mkt_score)
+    primary, rest_B = select_primary_targets(A_list, B_list)
 
-    # ===== パート① 結論 =====
-    p1 = []
-    p1.append(f"📅 {today_str} stockbotTOM 日報\n")
-    p1.append("◆ 今日の結論")
-    p1.append(f"- 地合いスコア: {mkt_score}点")
-    p1.append(f"- コメント: {mkt_comment}")
-    p1.append(f"- 推定運用資産ベース: 約{int(total_asset):,}円")
-    part1 = "\n".join(p1)
+    pos_df = load_positions(POSITIONS_PATH)
+    pos_text, _, _, _, _ = analyze_positions(pos_df)
 
-    # ===== パート② セクター =====
-    part2 = f"◆ 今日のTOPセクター（5日騰落率）\n{sec_text}"
+    lines = []
 
-    # ===== パート③ Aランク =====
-    p3 = []
-    p3.append("◆ Core候補 Aランク（本命押し目・最大3銘柄）")
-    for r in A:
-        p3.append(
-            f"- {r['ticker']} {r['name']}  Score:{r['score']:.1f} 現値:{r['price']:.1f}\n"
-            f"    ・IN目安: {r['in_price']}\n"
-            f"    ・利確目安: +{r['tp_pct']*100:.1f}%（{r['tp_price']}）\n"
-            f"    ・損切り目安: {r['sl_pct']*100:.1f}%（{r['sl_price']}）"
-        )
-    part3 = "\n".join(p3)
+    lines.append(f"📅 {today_str} stockbotTOM 日報\n")
+    lines.append("◆ 今日の結論")
+    lines.append(f"- 地合いスコア: {mkt_score}点")
+    lines.append(f"- コメント: {mkt_comment}")
+    lines.append(f"- 推定運用資産ベース: 約{est_asset:,}円\n")
 
-    # ===== パート④ ポジション =====
-    part4 = f"📊 {today_str} ポジション分析\n{pos_text}"
+    lines.append("◆ 今日のTOPセクター（5日騰落率）")
+    lines.append(sector_text + "\n")
 
-    return [part1, part2, part3, part4]
+    lines.append("◆ Core候補 Aランク（本命押し目・最大3銘柄）")
+    if not primary:
+        lines.append("本命Aランクなし（今日は新規IN禁止）\n")
+    else:
+        for r in primary:
+            lines.append(
+                f"- {r['ticker']} {r['name']}  Score:{r['score']:.1f} 現値:{r['price']:.1f}\n"
+                f"    ・IN目安: {r['in_price']:.1f}\n"
+                f"    ・利確目安: +{r['tp_pct']*100:.1f}%（{r['tp_price']:.1f}）\n"
+                f"    ・損切り目安: {r['sl_pct']*100:.1f}%（{r['sl_price']:.1f}）\n"
+            )
+
+    lines.append("◆ 本日の建て玉最大金額")
+    lines.append(f"- 推奨レバ: {lev:.1f}倍")
+    lines.append(f"- 運用資産ベース: 約{est_asset:,}円")
+    lines.append(f"- 今日のMAX建て玉: 約{max_pos:,}円\n")
+
+    lines.append("📊 ポジション分析")
+    lines.append(pos_text)
+
+    return "\n".join(lines)
 
 
-# ===============================
-# Main
-# ===============================
 def main():
-    parts = build_report()
-    for p in parts:
-        send_line_chunks(p)
+    text = build_report()
+    print(text)
+    send_line(text)
 
 
 if __name__ == "__main__":
