@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -37,11 +38,9 @@ MAX_CORE_POSITIONS = 3          # 同時最大本命銘柄数
 RISK_PER_TRADE = 0.015          # Core: 1.5%/trade
 LIQ_MIN_TURNOVER = 100_000_000  # 最低1億円/日（将来の流動性フィルタ用）
 
-# Core / Sub モード用
-SUB_RISK_FACTOR = 0.10          # Sub は Core の 10% ロット
-SUB_TP_PCT = 0.03               # Sub 利確 +3%
-SUB_SL_PCT = -0.04              # Sub 損切 -4%
-SUB_MAX_CANDIDATES = 3          # Sub 候補最大数
+# Core 固定 TP/SL（RR=2.0）
+CORE_TP_PCT = 0.08
+CORE_SL_PCT = -0.04
 
 # IN ゾーン幅（中心 ±0.5%）
 IN_ZONE_HALF_PCT = 0.005
@@ -237,9 +236,9 @@ def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
     強いときは少し攻め、弱いときはロットを絞る。
     """
     if mkt_score >= 80:
-        return 2.0, "攻めMAX（ただしルール外エントリー禁止）"
+        return 2.5, "攻めMAX（ただしルール外エントリー禁止）"
     if mkt_score >= 70:
-        return 1.8, "やや攻め（押し目＋強いブレイク）"
+        return 2.0, "やや攻め（押し目＋強いブレイク）"
     if mkt_score >= 60:
         return 1.5, "標準〜やや攻め（押し目メイン）"
     if mkt_score >= 50:
@@ -470,7 +469,44 @@ def compute_entry_price(
 
 
 # ============================================================
+# 残りRR（保有ポジション評価用）
+# ============================================================
+def calc_residual_rr(
+    current_price: float,
+    entry_price: float,
+    tp_pct: float = CORE_TP_PCT,
+    sl_pct: float = CORE_SL_PCT,
+) -> Optional[float]:
+    """
+    いまの価格から見た「残りRR」を計算する。
+    - TP/SL は entry 基準で固定（+8% / -4%）
+    - 今値から TP までの距離 / 今値から SL までの距離
+    """
+    if not (np.isfinite(current_price) and np.isfinite(entry_price)):
+        return None
+    if current_price <= 0 or entry_price <= 0:
+        return None
+
+    tp_price = entry_price * (1.0 + tp_pct)
+    sl_price = entry_price * (1.0 + sl_pct)
+
+    # 上方向の残り幅
+    up = max(tp_price / current_price - 1.0, 0.0)
+    # 下方向の残りリスク
+    down = max(1.0 - sl_price / current_price, 0.0)
+
+    if down <= 0:
+        return None
+
+    rr = up / down
+    if not np.isfinite(rr):
+        return None
+    return float(rr)
+
+
+# ============================================================
 # TP / SL ロジック（ボラ＆地合い＆ATR＆直近高値ベース）
+#  ※ Coreは +8% / -4% で固定するので、この関数は今後拡張用。
 # ============================================================
 def calc_candidate_tp_sl(
     vola20: float,
@@ -481,40 +517,11 @@ def calc_candidate_tp_sl(
     """
     ボラ・地合い・ATR・直近高値までの距離から利確 / 損切りの % を決める
     戻り値: (tp_pct, sl_pct) 例: 0.10, -0.04
+    現状 Core は CORE_TP_PCT / CORE_SL_PCT を使う。
     """
-    # --- ボラとATRでベースのレンジ決定 ---
-    v = abs(vola20) if np.isfinite(vola20) else 0.03
-    ar = abs(atr_ratio) if (atr_ratio is not None and np.isfinite(atr_ratio)) else 0.02
-
-    # 基本的な TP/SL の骨格
-    if v < 0.015 and ar < 0.015:
-        tp = 0.06
-        sl = -0.03
-    elif v < 0.03 and ar < 0.03:
-        tp = 0.08
-        sl = -0.04
-    else:
-        tp = 0.12
-        sl = -0.055
-
-    # --- 地合いで微調整 ---
-    if mkt_score >= 70:
-        tp += 0.02         # 追い風なら利幅を伸ばす
-    elif mkt_score < 45:
-        tp -= 0.02         # 向かい風なら少し浅めに
-        sl = max(sl, -0.04)  # 損切りはタイト目
-
-    # --- 直近高値までの距離でTPを現実的に制限 ---
-    if swing_upside is not None and np.isfinite(swing_upside) and swing_upside > 0:
-        # 直近高値までの距離を最大値の目安に
-        max_realistic = swing_upside * 0.9  # 少し手前で利確
-        if tp > max_realistic:
-            tp = max(0.05, max_realistic)
-
-    # 最終クリップ（安全レンジ）
-    tp = float(np.clip(tp, 0.05, 0.18))
-    sl = float(np.clip(sl, -0.07, -0.02))
-
+    # ここでは安全レンジだけを決めておき、Core では固定値を使用
+    tp = CORE_TP_PCT
+    sl = CORE_SL_PCT
     return tp, sl
 
 
@@ -654,18 +661,16 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         close = c["hist"]["Close"].astype(float)
         entry = compute_entry_price(close, c["ma5"], c["ma20"], c["atr"])
 
-        # ATR / 直近高値までの距離を TP/SL に反映
         price = float(c["price"])
-        atr_ratio = (c["atr"] / price) if (price > 0 and c["atr"] is not None and c["atr"] > 0) else None
-        if len(close) >= 20 and entry > 0:
-            swing_high = float(close.tail(20).max())
-            swing_upside = (swing_high / entry - 1.0) if swing_high > entry else None
-        else:
-            swing_upside = None
 
-        tp_pct, sl_pct = calc_candidate_tp_sl(c["vola20"], mkt_score, atr_ratio, swing_upside)
+        # Core用 TP/SL は固定 +8% / -4%
+        tp_pct = CORE_TP_PCT
+        sl_pct = CORE_SL_PCT
         tp_price = entry * (1.0 + tp_pct)
         sl_price = entry * (1.0 + sl_pct)
+
+        # 残りRR（IN 時点想定）= 2.0R 固定
+        rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
 
         price_now = float(c["price"])
         gap_ratio = abs(price_now - entry) / price_now if price_now > 0 else 1.0
@@ -689,8 +694,7 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "entry_type": entry_type,
-                "vola20": c["vola20"],
-                "atr": c["atr"],
+                "rr": rr,
             }
         )
 
@@ -699,72 +703,68 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
 
 
 # ============================================================
-# ホールド日数のざっくり推定（表示用）
+# ポジションRR評価
 # ============================================================
-def guess_holding_days(vola20: float, mkt_score: int) -> str:
-    """ボラと地合いから想定ホールド日数をざっくり決める（表示用）"""
-    v = abs(vola20) if np.isfinite(vola20) else 0.03
-
-    if v < 0.018:
-        return "7〜12日"
-    if v < 0.03:
-        return "4〜8日"
-    return "3〜6日"
-
-
-# ============================================================
-# ロット計算（Core / Sub 共通）
-# ============================================================
-def calc_position_size(
-    entry: float,
-    tp_pct: float,
-    sl_pct: float,
-    total_asset: float,
-    max_total_pos: float,
-    is_sub: bool,
-) -> Tuple[int, float, float, float]:
+def evaluate_positions_rr(pos_df: Optional[pd.DataFrame]) -> List[Dict]:
     """
-    1トレードあたりの推奨株数と想定損失 / 利確額を計算。
-    - Core: RISK_PER_TRADE
-    - Sub : RISK_PER_TRADE * SUB_RISK_FACTOR
+    positions.csv から現在RRを計算する。
+    必須: ticker と entry_price 相当の列。
     """
-    if not (np.isfinite(entry) and entry > 0):
-        return 0, 0.0, 0.0, 0.0
-    if not np.isfinite(sl_pct) or sl_pct >= 0:
-        return 0, 0.0, 0.0, 0.0
-    if not np.isfinite(tp_pct) or tp_pct <= 0:
-        return 0, 0.0, 0.0, 0.0
+    results: List[Dict] = []
+    if pos_df is None or pos_df.empty:
+        return results
 
-    risk_per = RISK_PER_TRADE * (SUB_RISK_FACTOR if is_sub else 1.0)
-    risk_budget = float(total_asset) * risk_per
-    loss_per_share = entry * abs(sl_pct)
+    # entry price 推定
+    def get_entry(row: pd.Series) -> Optional[float]:
+        for col in ["entry_price", "avg_price", "price", "cost"]:
+            if col in row.index and pd.notna(row[col]):
+                try:
+                    v = float(row[col])
+                    if v > 0:
+                        return v
+                except Exception:
+                    continue
+        return None
 
-    if loss_per_share <= 0:
-        return 0, 0.0, 0.0, 0.0
+    price_cache: Dict[str, float] = {}
 
-    shares = int(risk_budget // loss_per_share)
-    if shares <= 0:
-        return 0, 0.0, 0.0, 0.0
+    for _, row in pos_df.iterrows():
+        ticker = str(row.get("ticker", "")).strip()
+        if not ticker:
+            continue
 
-    # 1銘柄あたりの最大建玉（MAX_CORE_POSITIONS で均等割り）
-    max_notional_per_name = max_total_pos / max(MAX_CORE_POSITIONS, 1)
-    notional = shares * entry
-    if notional > max_notional_per_name and entry > 0:
-        shares = int(max_notional_per_name // entry)
-        notional = shares * entry
+        entry_price = get_entry(row)
+        if entry_price is None:
+            continue
 
-    if shares <= 0:
-        return 0, 0.0, 0.0, 0.0
+        # 現値取得
+        if ticker in price_cache:
+            current = price_cache[ticker]
+        else:
+            hist = fetch_history(ticker, period="20d")
+            if hist is None or hist.empty:
+                continue
+            current = float(hist["Close"].iloc[-1])
+            price_cache[ticker] = current
 
-    loss_amount = loss_per_share * shares
-    profit_per_share = entry * tp_pct
-    profit_amount = profit_per_share * shares
+        rr_now = calc_residual_rr(current_price=current, entry_price=entry_price)
+        if rr_now is None:
+            continue
 
-    return shares, notional, loss_amount, profit_amount
+        results.append(
+            {
+                "ticker": ticker,
+                "entry_price": entry_price,
+                "current_price": current,
+                "rr": rr_now,
+            }
+        )
+
+    return results
 
 
 # ============================================================
-# レポート構築（Core / Sub モード対応）
+# レポート構築
 # ============================================================
 def build_report(
     today_str: str,
@@ -772,6 +772,7 @@ def build_report(
     mkt: Dict,
     total_asset: float,
     pos_text: str,
+    pos_df: Optional[pd.DataFrame],
 ) -> str:
     mkt_score = int(mkt.get("score", 50))
     mkt_comment = str(mkt.get("comment", ""))
@@ -786,7 +787,7 @@ def build_report(
     if secs:
         sec_lines = [
             f"{i + 1}. {name} ({chg:+.2f}%)"
-            for i, (name, chg) in enumerate(secs[:5])
+            for i, (name, chg) in enumerate(secs[:3])
         ]
         sec_text = "\n".join(sec_lines)
     else:
@@ -802,11 +803,25 @@ def build_report(
     today_list = [c for c in core_list if c.get("entry_type") == "today"]
     soon_list = [c for c in core_list if c.get("entry_type") == "soon"]
 
-    # モード判定
-    core_mode = len(today_list) > 0
+    # ポジションRR評価
+    pos_rr_list = evaluate_positions_rr(pos_df)
 
-    # 同時最大本命銘柄数（表示用）
-    max_core_positions = MAX_CORE_POSITIONS
+    # 乗り換え（Chain）推奨判定
+    chain_lines: List[str] = []
+    if core_list and pos_rr_list:
+        # 新しい本命は Core の先頭
+        new_core = core_list[0]
+        new_rr = float(new_core.get("rr", 0.0))
+
+        for p in pos_rr_list:
+            old_rr = float(p["rr"])
+            if new_rr > old_rr and new_rr >= 2.0:
+                chain_lines.append(
+                    f"- {p['ticker']}: 現在RR:{old_rr:.1f}R → 本命 {new_core['ticker']} {new_core['name']} (RR:{new_rr:.1f}R) への乗り換え候補"
+                )
+
+    # ロット計算用（1銘柄あたりの許容リスク）
+    per_trade_risk = est_asset * RISK_PER_TRADE if est_asset > 0 else 30_000.0
 
     lines: List[str] = []
 
@@ -817,7 +832,7 @@ def build_report(
     lines.append(f"- 地合いスコア: {mkt_score}点 ({mkt_comment})")
     lines.append(f"- 推奨レバ: 約{rec_lev:.1f}倍（{lev_comment}）")
     lines.append(f"- 運用資産想定: 約{est_asset_int:,}円")
-    lines.append(f"- 同時最大本命銘柄数: {max_core_positions}銘柄")
+    lines.append(f"- 同時最大本命銘柄数: {MAX_CORE_POSITIONS}銘柄")
     lines.append("")
     lines.append("※寄り付きが INゾーン上限より +1.5%以上高い場合は、その日は見送り推奨")
     lines.append("")
@@ -839,132 +854,98 @@ def build_report(
         lines.append("今日INできる本命候補なし")
     else:
         for c in today_list:
-            entry = float(c["entry"])
-            tp_pct = float(c["tp_pct"])
-            sl_pct = float(c["sl_pct"])
-            rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
-            vola20 = float(c.get("vola20", 0.03))
-            hold_text = guess_holding_days(vola20, mkt_score)
+            rr = float(c.get("rr", 2.0))
+            # INゾーン（±0.5%）
+            center = c["entry"]
+            lower = center * (1.0 - IN_ZONE_HALF_PCT)
+            upper = center * (1.0 + IN_ZONE_HALF_PCT)
 
-            zone_low = entry * (1.0 - IN_ZONE_HALF_PCT)
-            zone_high = entry * (1.0 + IN_ZONE_HALF_PCT)
+            # ロット（100株単位）
+            risk_per_share = max(center - c["sl_price"], 0.0)
+            if risk_per_share > 0 and per_trade_risk > 0:
+                raw_shares = int(per_trade_risk / risk_per_share)
+                shares_100 = (raw_shares // 100) * 100
+                if shares_100 < 100:
+                    shares_100 = 0
+            else:
+                shares_100 = 0
 
-            shares, notional, loss_amt, profit_amt = calc_position_size(
-                entry=entry,
-                tp_pct=tp_pct,
-                sl_pct=sl_pct,
-                total_asset=est_asset,
-                max_total_pos=max_pos,
-                is_sub=False,
-            )
+            loss_yen = shares_100 * (center - c["sl_price"]) if shares_100 > 0 else 0.0
+            gain_yen = shares_100 * (c["tp_price"] - center) if shares_100 > 0 else 0.0
+            est_amount = shares_100 * center
 
             lines.append(
                 f"- {c['ticker']} {c['name']} Score:{c['score']:.1f} 現値:{c['price']:.1f} [{c['sector']}]"
             )
             lines.append(
-                f"    ・INゾーン: {zone_low:.1f}〜{zone_high:.1f}（中心{entry:.1f}）"
+                f"    ・INゾーン: {lower:.1f}〜{upper:.1f}（中心{center:.1f}）"
             )
             lines.append(
-                f"    ・利確:+{tp_pct*100:.1f}%（{entry*(1+tp_pct):.1f}） 損切:{sl_pct*100:.1f}%（{entry*(1+sl_pct):.1f}） RR:{rr:.1f}R"
+                f"    ・利確:+{c['tp_pct']*100:.1f}%（{c['tp_price']:.1f}） 損切:{c['sl_pct']*100:.1f}%（{c['sl_price']:.1f}） RR:{rr:.1f}R"
             )
-            lines.append(f"    ・想定ホールド: {hold_text}")
-            if shares > 0:
+            if shares_100 > 0:
                 lines.append(
-                    f"    ・推奨: {shares}株 ≒{notional:,.0f}円 / 損失~{loss_amt:,.0f}円 利確~{profit_amt:,.0f}円"
+                    f"    ・推奨: {shares_100}株 ≒{est_amount:,.0f}円 / 損失~{loss_yen:,.0f}円 利確~{gain_yen:,.0f}円"
                 )
             lines.append("")
 
     # --- Core候補 Aランク（数日以内IN） ---
-    lines.append("◆ Core候補 Aランク（数日以内IN）")
+    lines.append("◆ Core候補 Aランク（数日以内IN候補）")
     if not soon_list:
-        lines.append("数日以内に狙う本命候補なし")
+        lines.append("数日以内IN候補なし")
     else:
         for c in soon_list:
-            entry = float(c["entry"])
-            tp_pct = float(c["tp_pct"])
-            sl_pct = float(c["sl_pct"])
-            rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
-            vola20 = float(c.get("vola20", 0.03))
-            hold_text = guess_holding_days(vola20, mkt_score)
+            rr = float(c.get("rr", 2.0))
+            center = c["entry"]
+            lower = center * (1.0 - IN_ZONE_HALF_PCT)
+            upper = center * (1.0 + IN_ZONE_HALF_PCT)
 
-            zone_low = entry * (1.0 - IN_ZONE_HALF_PCT)
-            zone_high = entry * (1.0 + IN_ZONE_HALF_PCT)
+            risk_per_share = max(center - c["sl_price"], 0.0)
+            if risk_per_share > 0 and per_trade_risk > 0:
+                raw_shares = int(per_trade_risk / risk_per_share)
+                shares_100 = (raw_shares // 100) * 100
+                if shares_100 < 100:
+                    shares_100 = 0
+            else:
+                shares_100 = 0
 
-            shares, notional, loss_amt, profit_amt = calc_position_size(
-                entry=entry,
-                tp_pct=tp_pct,
-                sl_pct=sl_pct,
-                total_asset=est_asset,
-                max_total_pos=max_pos,
-                is_sub=False,
-            )
+            loss_yen = shares_100 * (center - c["sl_price"]) if shares_100 > 0 else 0.0
+            gain_yen = shares_100 * (c["tp_price"] - center) if shares_100 > 0 else 0.0
+            est_amount = shares_100 * center
 
             lines.append(
                 f"- {c['ticker']} {c['name']} Score:{c['score']:.1f} 現値:{c['price']:.1f} [{c['sector']}]"
             )
             lines.append(
-                f"    ・理想IN: {entry:.1f} ゾーン:{zone_low:.1f}〜{zone_high:.1f}"
+                f"    ・理想IN: {center:.1f} ゾーン:{lower:.1f}〜{upper:.1f}"
             )
             lines.append(
-                f"    ・利確:+{tp_pct*100:.1f}% 損切:{sl_pct*100:.1f}% RR:{rr:.1f}R"
+                f"    ・利確:+{c['tp_pct']*100:.1f}% 損切:{c['sl_pct']*100:.1f}% RR:{rr:.1f}R"
             )
-            lines.append(f"    ・想定ホールド: {hold_text}")
-            if shares > 0:
+            if shares_100 > 0:
                 lines.append(
-                    f"    ・推奨: {shares}株 ≒{notional:,.0f}円 / 損失~{loss_amt:,.0f}円 利確~{profit_amt:,.0f}円"
+                    f"    ・推奨: {shares_100}株 ≒{est_amount:,.0f}円 / 損失~{loss_yen:,.0f}円 利確~{gain_yen:,.0f}円"
                 )
             lines.append("")
 
-    # --- Sub モード（Core Today が無い日のみ） ---
-    if not core_mode:
-        lines.append("◆ Sub候補（観察用・小ロット／利確+3%・損切-4%／Coreロットの10%目安）")
-        if not soon_list:
-            lines.append("今日はSubで触る価値のある銘柄も無し（完全ノートレ推奨）")
-        else:
-            sub_candidates = soon_list[:SUB_MAX_CANDIDATES]
-            for c in sub_candidates:
-                entry = float(c["entry"])
-                tp_pct = SUB_TP_PCT
-                sl_pct = SUB_SL_PCT
-                rr = tp_pct / abs(sl_pct)
-                zone_low = entry * (1.0 - IN_ZONE_HALF_PCT)
-                zone_high = entry * (1.0 + IN_ZONE_HALF_PCT)
-
-                shares, notional, loss_amt, profit_amt = calc_position_size(
-                    entry=entry,
-                    tp_pct=tp_pct,
-                    sl_pct=sl_pct,
-                    total_asset=est_asset,
-                    max_total_pos=max_pos,
-                    is_sub=True,
-                )
-
-                lines.append(
-                    f"- {c['ticker']} {c['name']} Score:{c['score']:.1f} 現値:{c['price']:.1f} [{c['sector']}]"
-                )
-                lines.append(
-                    f"    ・Sub IN目安: {entry:.1f} ゾーン:{zone_low:.1f}〜{zone_high:.1f}"
-                )
-                lines.append(
-                    f"    ・Sub利確:+{tp_pct*100:.1f}% 損切:{sl_pct*100:.1f}% RR:{rr:.1f}R 想定:1〜3日"
-                )
-                if shares > 0:
-                    lines.append(
-                        f"    ・Sub推奨: {shares}株 ≒{notional:,.0f}円 / 損失~{loss_amt:,.0f}円 利確~{profit_amt:,.0f}円"
-                    )
-                lines.append("")
-        lines.append("")
-
-    # --- 建て玉最大金額 ---
+    # --- 本日の建て玉最大金額 ---
     lines.append("◆ 本日の建て玉最大金額")
     lines.append(f"- 推奨レバ: {rec_lev:.1f}倍 / MAX建て玉: 約{max_pos:,}円")
     lines.append("")
 
-    # --- ポジション分析 ---
+    # --- ポジションサマリ ---
     lines.append(f"📊 {today_str} ポジション分析")
     lines.append("")
     lines.append("◆ ポジションサマリ")
-    lines.append(pos_text.strip())
+    lines.append(pos_text.strip() if pos_text else "ポジション情報なし")
+    lines.append("")
+
+    # --- ポジション入れ替え（Chain）候補 ---
+    lines.append("◆ ポジション入れ替え候補（RRベース）")
+    if not chain_lines:
+        lines.append("- 本日明確な入れ替え候補なし（既存ポジも許容範囲）")
+    else:
+        lines.extend(chain_lines)
 
     # ここまでがロング版
     long_report = "\n".join(lines)
@@ -972,33 +953,19 @@ def build_report(
     # --- ショート（要約）版 ---
     short_lines: List[str] = []
     short_lines.append(f"📅 {today_str} stockbotTOM 要約")
-    short_lines.append(f"- 地合い:{mkt_score} / レバ:{rec_lev:.1f}倍")
-    short_lines.append(f"- MAX建て玉: 約{max_pos:,}円")
-
-    if core_mode and today_list:
-        best = today_list[0]
-        entry = float(best["entry"])
-        tp_pct = float(best["tp_pct"])
-        sl_pct = float(best["sl_pct"])
-        rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
+    short_lines.append(f"- 地合い: {mkt_score} / レバ目安: {rec_lev:.1f}倍")
+    if core_list:
+        best = core_list[0]
+        rr = float(best.get("rr", 2.0))
         short_lines.append(
             f"- 本命: {best['ticker']} {best['name']} Score:{best['score']:.1f} [{best['sector']}]"
         )
         short_lines.append(
-            f"  IN:{entry:.1f} RR:{rr:.1f}R ロット:{'Core'} 想定:{guess_holding_days(float(best.get('vola20', 0.03)), mkt_score)}"
-        )
-    elif not core_mode and soon_list:
-        best = soon_list[0]
-        entry = float(best["entry"])
-        rr = SUB_TP_PCT / abs(SUB_SL_PCT)
-        short_lines.append(
-            f"- 本命候補（Sub日）: {best['ticker']} {best['name']} Score:{best['score']:.1f} [{best['sector']}]"
-        )
-        short_lines.append(
-            f"  Sub IN:{entry:.1f} RR:{rr:.1f}R ロット:Coreの10% 想定:1〜3日"
+            f"  IN:{best['entry']:.1f} RR:{rr:.1f}R TP:+{best['tp_pct']*100:.1f}% SL:{best['sl_pct']*100:.1f}%"
         )
     else:
-        short_lines.append("- 本命候補なし（今日は完全ノートレ候補日）")
+        short_lines.append("- 本命候補なし（今日は無理に攻めない日）")
+    short_lines.append(f"- MAX建て玉: 約{max_pos:,}円")
 
     short_report = "\n".join(short_lines)
 
@@ -1054,6 +1021,7 @@ def main() -> None:
         mkt=mkt,
         total_asset=total_asset,
         pos_text=pos_text,
+        pos_df=pos_df,
     )
 
     # ログ出力
