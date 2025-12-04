@@ -22,77 +22,78 @@ from utils.util import jst_today_str
 # ============================================================
 UNIVERSE_PATH = "universe_jpx.csv"
 POSITIONS_PATH = "positions.csv"
-EVENTS_PATH = "events.csv"
+EVENTS_PATH = "events.csv"      # あれば読む（無ければ無視）
 WORKER_URL = os.getenv("WORKER_URL")
 
-SCREENING_TOP_N = 15
-MAX_FINAL_STOCKS = 5
+# スクリーニング関連
+SCREENING_TOP_N = 15           # まずは Top15 まで抽出
+MAX_FINAL_STOCKS = 5           # 最終的に LINE に出すのは最大5銘柄
 
+# 決算フィルタ: ±N日
 EARNINGS_EXCLUDE_DAYS = 3
 
-# リスク管理
-MAX_CORE_POSITIONS = 3          # 本命最大
-RISK_PER_TRADE = 0.015          # 1.5%/trade
-LIQ_MIN_TURNOVER = 100_000_000  # 最低1億円/日
+# リスク管理関連
+MAX_CORE_POSITIONS = 3          # 同時最大本命銘柄数
+RISK_PER_TRADE = 0.015          # Core: 1.5%/trade
+LIQ_MIN_TURNOVER = 100_000_000  # 最低1億円/日（将来の流動性フィルタ用）
 
-# ギャップ見送り推奨閾値（寄りがINゾーン上限から+1.5%以上なら見送り推奨）
-GAP_SKIP_THRESHOLD = 0.015
+# Core / Sub モード用
+SUB_RISK_FACTOR = 0.10          # Sub は Core の 10% ロット
+SUB_TP_PCT = 0.03               # Sub 利確 +3%
+SUB_SL_PCT = -0.04              # Sub 損切 -4%
+SUB_MAX_CANDIDATES = 3          # Sub 候補最大数
 
-# テーマブースト（universe_jpx.csv の "theme" 列に入れる想定のラベル）
-THEME_BOOST_MAP: Dict[str, float] = {
-    # 政策・ディフェンシブ
-    "電力": 10.0,
-    "防衛": 9.0,
-    "インフラ": 8.0,
-    "省エネ": 7.0,
-    "資源": 7.0,
-    # 成長・モメンタム
-    "半導体": 9.0,
-    "EV": 8.0,
-    "電池": 8.0,
-    "生成AI": 9.0,
-    "クラウド": 7.0,
-    # 金融
-    "銀行": 7.0,
-    "保険": 6.0,
-    # その他
-    "内需ディフェンシブ": 6.0,
-    "リオープン": 5.0,
-}
+# IN ゾーン幅（中心 ±0.5%）
+IN_ZONE_HALF_PCT = 0.005
 
 
 # ============================================================
 # 日付 / イベント関連
 # ============================================================
 def jst_today_date() -> datetime.date:
+    """JST の「今日」の date を返す"""
     return datetime.now(timezone(timedelta(hours=9))).date()
 
 
 def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
+    """
+    events.csv があれば読み込んで
+    [{"date": "2025-12-13", "label": "FOMC", "kind": "macro"}, ...] を返す。
+    無ければ空リスト。
+    """
     if not os.path.exists(path):
         return []
+
     try:
         df = pd.read_csv(path)
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] failed to read events: {e}")
         return []
-    res: List[Dict[str, str]] = []
-    for _, r in df.iterrows():
-        d = str(r.get("date", "")).strip()
-        lbl = str(r.get("label", "")).strip()
-        kind = str(r.get("kind", "")).strip()
-        if d and lbl:
-            res.append({"date": d, "label": lbl, "kind": kind})
-    return res
+
+    events: List[Dict[str, str]] = []
+    for _, row in df.iterrows():
+        date_str = str(row.get("date", "")).strip()
+        label = str(row.get("label", "")).strip()
+        kind = str(row.get("kind", "")).strip()
+        if not date_str or not label:
+            continue
+        events.append({"date": date_str, "label": label, "kind": kind})
+    return events
 
 
 def build_event_warnings(today: datetime.date) -> List[str]:
-    evs = load_events()
-    res: List[str] = []
-    for ev in evs:
+    """
+    events.csv ベースでイベント警戒文言を作る。
+    イベントの2日前〜翌日まで警告。
+    """
+    events = load_events()
+    warns: List[str] = []
+    for ev in events:
         try:
             d = datetime.strptime(ev["date"], "%Y-%m-%d").date()
         except Exception:
             continue
+
         delta = (d - today).days
         if -1 <= delta <= 2:
             if delta > 0:
@@ -101,8 +102,8 @@ def build_event_warnings(today: datetime.date) -> List[str]:
                 when = "本日"
             else:
                 when = "直近"
-            res.append(f"⚠ {ev['label']}（{when}）: ポジションサイズ注意")
-    return res
+            warns.append(f"⚠ {ev['label']}（{when}）: ポジションサイズ注意")
+    return warns
 
 
 # ============================================================
@@ -110,17 +111,21 @@ def build_event_warnings(today: datetime.date) -> List[str]:
 # ============================================================
 def load_universe(path: str = UNIVERSE_PATH) -> Optional[pd.DataFrame]:
     if not os.path.exists(path):
+        print(f"[WARN] universe file not found: {path}")
         return None
     try:
         df = pd.read_csv(path)
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] failed to read universe: {e}")
         return None
 
     if "ticker" not in df.columns:
+        print("[WARN] universe has no 'ticker' column")
         return None
 
     df["ticker"] = df["ticker"].astype(str)
 
+    # earnings_date を一度だけパース
     if "earnings_date" in df.columns:
         df["earnings_date_parsed"] = pd.to_datetime(
             df["earnings_date"], errors="coerce"
@@ -128,14 +133,11 @@ def load_universe(path: str = UNIVERSE_PATH) -> Optional[pd.DataFrame]:
     else:
         df["earnings_date_parsed"] = pd.NaT
 
-    # theme 列が無くても動くようにする
-    if "theme" not in df.columns:
-        df["theme"] = ""
-
     return df
 
 
 def in_earnings_window(row: pd.Series, today: datetime.date) -> bool:
+    """決算日 ±EARNINGS_EXCLUDE_DAYS に入っていれば True"""
     d = row.get("earnings_date_parsed")
     if d is None or pd.isna(d):
         return False
@@ -147,63 +149,45 @@ def in_earnings_window(row: pd.Series, today: datetime.date) -> bool:
 
 
 def fetch_history(ticker: str, period: str = "130d") -> Optional[pd.DataFrame]:
+    """
+    株価履歴取得（簡易リトライ付き）
+    yfinance 側の一時エラー時に 1 回だけ待って再試行。
+    """
     for attempt in range(2):
         try:
             df = yf.Ticker(ticker).history(period=period)
             if df is not None and not df.empty:
                 return df
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] fetch history failed {ticker} (try {attempt+1}): {e}")
             time.sleep(1.0)
+
     return None
 
 
 # ============================================================
-# テーマ関連ユーティリティ
+# テクニカル指標
 # ============================================================
-def parse_themes(theme_raw: str) -> List[str]:
-    """
-    "電力,防衛" "電力/政策" "電力・防衛" などを分解してリスト化。
-    """
-    if not isinstance(theme_raw, str):
-        return []
-    s = theme_raw.replace("・", ",").replace("/", ",").replace("／", ",").replace("，", ",").replace("、", ",")
-    parts = [p.strip() for p in s.split(",")]
-    return [p for p in parts if p]
-
-
-def calc_theme_score(themes: List[str]) -> float:
-    """
-    THEME_BOOST_MAP に基づいて加点。
-    複数テーマがある場合は合計。ただし過剰加点を防ぐため上限を設ける。
-    """
-    if not themes:
-        return 0.0
-    score = 0.0
-    for t in themes:
-        score += THEME_BOOST_MAP.get(t, 0.0)
-    # 上限（テーマ強くても+18点程度まで）
-    return float(np.clip(score, 0.0, 18.0))
-
-
-# ============================================================
-# テクニカル
-# ============================================================
-def calc_ma(close: pd.Series, w: int) -> float:
-    if len(close) < w:
+def calc_ma(close: pd.Series, window: int) -> float:
+    if len(close) < window:
         return float(close.iloc[-1])
-    return float(close.rolling(w).mean().iloc[-1])
+    return float(close.rolling(window).mean().iloc[-1])
 
 
 def calc_rsi(close: pd.Series, period: int = 14) -> float:
     if len(close) <= period + 1:
         return 50.0
+
     diff = close.diff(1)
     up = diff.clip(lower=0)
     down = -diff.clip(upper=0)
+
     ma_up = up.rolling(period).mean()
     ma_down = down.rolling(period).mean()
+
     rs = ma_up / (ma_down + 1e-9)
     rsi = 100 - (100 / (1 + rs))
+
     v = float(rsi.iloc[-1])
     if not np.isfinite(v):
         return 50.0
@@ -213,110 +197,144 @@ def calc_rsi(close: pd.Series, period: int = 14) -> float:
 def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     if len(df) <= period + 1:
         return 0.0
+
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
+
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
+
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(period).mean().iloc[-1]
+
     if atr is None or not np.isfinite(atr):
         return 0.0
     return float(atr)
 
 
 def calc_volatility(close: pd.Series, window: int = 20) -> float:
-    if len(close) < window:
+    if len(close) < window + 1:
         return 0.03
+
     ret = close.pct_change(fill_method=None)
     v = ret.rolling(window).std().iloc[-1]
+
     if v is None or not np.isfinite(v):
         return 0.03
     return float(v)
 
 
 # ============================================================
-# レバ & 建玉
+# レバレッジ / 建て玉
 # ============================================================
-def recommend_leverage(m: int) -> Tuple[float, str]:
-    if m >= 80:
-        return 2.0, "攻めMAX"
-    if m >= 70:
-        return 1.8, "やや攻め"
-    if m >= 60:
-        return 1.5, "標準〜やや攻め"
-    if m >= 50:
-        return 1.3, "標準"
-    if m >= 40:
-        return 1.1, "やや守り"
-    return 1.0, "守り"
+def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
+    """
+    地合いスコアから推奨レバ / コメント
+    “1年後の資産最大化” を意識して、
+    強いときは少し攻め、弱いときはロットを絞る。
+    """
+    if mkt_score >= 80:
+        return 2.0, "攻めMAX（ただしルール外エントリー禁止）"
+    if mkt_score >= 70:
+        return 1.8, "やや攻め（押し目＋強いブレイク）"
+    if mkt_score >= 60:
+        return 1.5, "標準〜やや攻め（押し目メイン）"
+    if mkt_score >= 50:
+        return 1.3, "標準（本命押し目のみ）"
+    if mkt_score >= 40:
+        return 1.1, "やや守り（ロット控えめ）"
+    return 1.0, "守り（新規は最小ロット〜様子見）"
 
 
-def calc_max_position(asset: float, lev: float) -> int:
-    if not (np.isfinite(asset) and asset > 0 and lev > 0):
+def calc_max_position(total_asset: float, lev: float) -> int:
+    """今日使っていい建て玉最大金額"""
+    if not (np.isfinite(total_asset) and total_asset > 0 and lev > 0):
         return 0
-    return int(round(asset * lev))
+    return int(round(total_asset * lev))
 
 
 # ============================================================
-# 地合いで最低スコアライン調整
+# 動的な最低スコアライン（地合い連動）
 # ============================================================
-def dynamic_min_score(m: int) -> float:
-    if m >= 75:
+def dynamic_min_score(mkt_score: int) -> float:
+    """
+    地合いが強いほど「少し緩く」、弱いほど「厳しく」フィルタする。
+    """
+    if mkt_score >= 75:
         return 70.0
-    if m >= 65:
+    if mkt_score >= 65:
         return 73.0
-    if m >= 55:
+    if mkt_score >= 55:
         return 76.0
-    if m >= 45:
+    if mkt_score >= 45:
         return 79.0
     return 82.0
 
 
 # ============================================================
-# セクター強度
+# セクター強度（Top5をブースト）
 # ============================================================
 def build_sector_strength_map() -> Dict[str, float]:
+    """
+    top_sectors_5d() をスコア化して銘柄スコアに加点する。
+    上位ほど、上昇率が高いほどブースト。
+    """
     secs = top_sectors_5d()
-    res: Dict[str, float] = {}
+    strength: Dict[str, float] = {}
+
     for rank, (name, chg) in enumerate(secs[:5]):
-        base = 6 - rank
+        base = 6 - rank  # 1位:6, 2位:5, ...
         boost = max(chg, 0.0) * 0.3
-        res[name] = base + boost
-    return res
+        strength[name] = base + boost
+
+    return strength
 
 
 # ============================================================
-# スコアウェイト
+# 三階層スコアの重み（地合いで可変）
 # ============================================================
-def get_score_weights(m: int) -> Tuple[float, float, float]:
-    if m >= 75:
+def get_score_weights(mkt_score: int) -> Tuple[float, float, float]:
+    """
+    Quality / Setup / Regime の重みを地合いで変える。
+    強いときは Setup（チャート形状）を重視、
+    弱いときは Regime（地合い・セクター）を重視。
+    """
+    if mkt_score >= 75:
+        # 強いトレンド相場：形が良ければ伸ばす
         return 0.6, 1.2, 0.7
-    if m >= 60:
+    if mkt_score >= 60:
+        # 通常〜やや追い風
         return 0.7, 1.0, 0.7
-    if m >= 50:
+    if mkt_score >= 50:
+        # 中立〜やや逆風：Quality 少し重視
         return 0.8, 0.9, 0.8
-    if m >= 40:
+    if mkt_score >= 40:
+        # 弱い地合い：Regime をより重視
         return 0.8, 0.7, 1.0
+    # 壊れ気味の地合い：Regime を最重視
     return 0.9, 0.6, 1.1
 
 
 # ============================================================
-# 三階層スコア + テーマ
+# Top候補用の三階層スコアリング
 # ============================================================
 def score_candidate(
     ticker: str,
     name: str,
     sector: str,
-    themes: List[str],
     hist: pd.DataFrame,
     score_raw: float,
     mkt_score: int,
     sector_strength: Dict[str, float],
-    theme_score: float,
 ) -> Dict:
+    """
+    Quality / Setup / Regime の三階層でスコアを構成し、
+    “今日から3〜10日スイングで勝ちやすいか” を判定する。
+    """
+
     close = hist["Close"].astype(float)
     price = float(close.iloc[-1])
 
@@ -327,13 +345,13 @@ def score_candidate(
     atr = calc_atr(hist)
     vola20 = calc_volatility(close, 20)
 
-    # Quality
+    # --- Quality（ベースは ACDE） ---
     quality_score = float(score_raw)
 
-    # Setup
+    # --- Setup（短期の形・テクニカル） ---
     setup_score = 0.0
 
-    # トレンド方向
+    # 1. トレンド方向（MAの並び）
     if ma5 > ma20 > ma60:
         setup_score += 12.0
     elif ma20 > ma5 > ma60:
@@ -341,7 +359,7 @@ def score_candidate(
     elif ma20 > ma60 > ma5:
         setup_score += 3.0
 
-    # RSI
+    # 2. RSI（過熱 / 売られ過ぎの調整）
     if 40 <= rsi <= 65:
         setup_score += 10.0
     elif 30 <= rsi < 40 or 65 < rsi <= 70:
@@ -349,13 +367,13 @@ def score_candidate(
     else:
         setup_score -= 6.0
 
-    # ボラ
+    # 3. ボラティリティの安定感
     if vola20 < 0.02:
         setup_score += 5.0
     elif vola20 > 0.05:
         setup_score -= 4.0
 
-    # ATRバランス
+    # 4. ATR（値幅の取りやすさ）
     if atr and price > 0:
         atr_ratio = atr / price
         if 0.015 <= atr_ratio <= 0.035:
@@ -363,52 +381,43 @@ def score_candidate(
         elif atr_ratio < 0.01 or atr_ratio > 0.06:
             setup_score -= 5.0
 
-    # 出来高
+    # 5. 出来高（薄商いを減点）
     if "Volume" in hist.columns:
         vol = hist["Volume"].astype(float)
         if len(vol) >= 20:
             v_ma = float(vol.rolling(20).mean().iloc[-1])
             v_now = float(vol.iloc[-1])
             if v_ma > 0:
-                r = v_now / v_ma
-                if r >= 1.5:
+                ratio = v_now / v_ma
+                if ratio >= 1.5:
                     setup_score += 3.0
-                elif r <= 0.5:
+                elif ratio <= 0.5:
                     setup_score -= 3.0
 
-    # 52週位置（高値掴み/ド底回避）
-    try:
-        hi_52 = float(close.max())
-        lo_52 = float(close.min())
-        span = hi_52 - lo_52
-        if span > 0:
-            loc = (price - lo_52) / span  # 0〜1
-            if loc > 0.95 and rsi > 65:
-                setup_score -= 5.0  # 高値圏での過熱
-            elif loc < 0.2 and rsi < 40 and ma20 < ma60:
-                setup_score -= 3.0  # ド底逆張りは減点
-    except Exception:
-        pass
+    # --- Regime（地合い・セクター） ---
+    regime_score = 0.0
 
-    # Regime + Theme
-    regime_score = (mkt_score - 50) * 0.12
-    regime_score += sector_strength.get(sector, 0.0)
-    regime_score += theme_score  # テーマ加点
+    # 地合い：50を中立として上下にオフセット
+    regime_score += (mkt_score - 50) * 0.12
 
+    # セクター強度ブースト
+    if sector_strength:
+        regime_score += sector_strength.get(sector, 0.0)
+
+    # --- 三階層を合成（地合いで重み可変） ---
     wQ, wS, wR = get_score_weights(mkt_score)
-    total = quality_score * wQ + setup_score * wS + regime_score * wR
+
+    total_score = quality_score * wQ + setup_score * wS + regime_score * wR
 
     return {
         "ticker": ticker,
         "name": name,
         "sector": sector,
-        "themes": themes,
         "price": price,
         "score_quality": quality_score,
         "score_setup": setup_score,
         "score_regime": regime_score,
-        "score_theme": theme_score,
-        "score_final": float(total),
+        "score_final": float(total_score),
         "ma5": ma5,
         "ma20": ma20,
         "ma60": ma60,
@@ -420,22 +429,40 @@ def score_candidate(
 
 
 # ============================================================
-# エントリー中心
+# IN価格ロジック（3〜10日スイング専用）
 # ============================================================
-def compute_entry_price(close: pd.Series, ma5: float, ma20: float, atr: float) -> float:
+def compute_entry_price(
+    close: pd.Series,
+    ma5: float,
+    ma20: float,
+    atr: float,
+) -> float:
+    """
+    “今日から3〜10日スイングで勝ちやすい” IN価格
+    - ベースは MA20 付近
+    - ATR の 0.5 倍分だけ下方向にずらす（押し目をしっかり待つ）
+    - 直近安値を割りすぎないように補正
+    - 強トレンド時は少しだけ浅めに
+    """
     price = float(close.iloc[-1])
     last_low = float(close.iloc[-5:].min())
+
+    # 基本は MA20
     target = ma20
 
+    # ATR で押し目を深く取りに行く（0.5倍）
     if atr and atr > 0:
         target = target - atr * 0.5
 
+    # 強い上昇トレンド：MA5 > MA20 のときは少し上寄せ（深追いしすぎない）
     if price > ma5 > ma20:
         target = ma20 + (ma5 - ma20) * 0.3
 
+    # 現値より上になってしまったら、現値少し下に補正
     if target > price:
         target = price * 0.995
 
+    # 直近安値より下になり過ぎたら、「安値割れはしない」前提で少し上に補正
     if target < last_low:
         target = last_low * 1.02
 
@@ -443,25 +470,7 @@ def compute_entry_price(close: pd.Series, ma5: float, ma20: float, atr: float) -
 
 
 # ============================================================
-# エントリーゾーン（AM8戦略向け：狭め＆やや深め）
-# ============================================================
-def compute_entry_band(entry: float, atr: float, price: float) -> Tuple[float, float]:
-    if entry <= 0 or price <= 0:
-        return entry, entry
-
-    if not atr or atr <= 0:
-        width = entry * 0.007  # ±0.7%
-    else:
-        width = min(atr * 0.25, entry * 0.007)
-
-    low = max(entry - width, entry * 0.985)   # 最低でも -1.5% まで
-    high = min(entry + width, entry * 1.015)  # 最高でも +1.5% まで
-
-    return round(float(low), 1), round(float(high), 1)
-
-
-# ============================================================
-# TP/SL（RRを 2R 付近に）
+# TP / SL ロジック（ボラ＆地合い＆ATR＆直近高値ベース）
 # ============================================================
 def calc_candidate_tp_sl(
     vola20: float,
@@ -469,45 +478,60 @@ def calc_candidate_tp_sl(
     atr_ratio: Optional[float],
     swing_upside: Optional[float],
 ) -> Tuple[float, float]:
+    """
+    ボラ・地合い・ATR・直近高値までの距離から利確 / 損切りの % を決める
+    戻り値: (tp_pct, sl_pct) 例: 0.10, -0.04
+    """
+    # --- ボラとATRでベースのレンジ決定 ---
     v = abs(vola20) if np.isfinite(vola20) else 0.03
     ar = abs(atr_ratio) if (atr_ratio is not None and np.isfinite(atr_ratio)) else 0.02
 
-    # ベース骨格：RR高め
+    # 基本的な TP/SL の骨格
     if v < 0.015 and ar < 0.015:
-        tp = 0.08   # +8%
-        sl = -0.04  # -4%  → 2.0R
+        tp = 0.06
+        sl = -0.03
     elif v < 0.03 and ar < 0.03:
-        tp = 0.10   # +10%
-        sl = -0.04  # -4%  → 2.5R
+        tp = 0.08
+        sl = -0.04
     else:
-        tp = 0.14   # +14%
-        sl = -0.055 # -5.5%  → 約2.5R
+        tp = 0.12
+        sl = -0.055
 
-    # 地合い調整
+    # --- 地合いで微調整 ---
     if mkt_score >= 70:
-        tp += 0.02          # 追い風なら利幅伸ばす
+        tp += 0.02         # 追い風なら利幅を伸ばす
     elif mkt_score < 45:
-        tp -= 0.02          # 逆風なら控えめ
-        sl = max(sl, -0.035)  # 損切りは浅めにタイト化
+        tp -= 0.02         # 向かい風なら少し浅めに
+        sl = max(sl, -0.04)  # 損切りはタイト目
 
-    # 直近高値までの距離でTP制限
-    if swing_upside is not None and swing_upside > 0:
-        max_realistic = swing_upside * 0.9
+    # --- 直近高値までの距離でTPを現実的に制限 ---
+    if swing_upside is not None and np.isfinite(swing_upside) and swing_upside > 0:
+        # 直近高値までの距離を最大値の目安に
+        max_realistic = swing_upside * 0.9  # 少し手前で利確
         if tp > max_realistic:
-            tp = max(0.07, max_realistic)
+            tp = max(0.05, max_realistic)
 
-    # 安全レンジにクリップ
-    tp = float(np.clip(tp, 0.08, 0.22))
-    sl = float(np.clip(sl, -0.06, -0.025))
+    # 最終クリップ（安全レンジ）
+    tp = float(np.clip(tp, 0.05, 0.18))
+    sl = float(np.clip(sl, -0.07, -0.02))
 
     return tp, sl
 
 
 # ============================================================
-# 地合い補正
+# SOX / NVDA / 為替・指数を加味した地合い補正
 # ============================================================
 def enhance_market_score() -> Dict:
+    """
+    calc_market_score() の結果に
+    - SOX / NVDA
+    - USDJPY（円高・円安）
+    - 日経平均
+    の5日騰落を少しだけ上乗せして、
+    日本株スイングの実需に寄せる。
+    """
     base = calc_market_score()
+    # utils.market.calc_market_score が dict か int かを吸収
     if isinstance(base, dict):
         score = float(base.get("score", 50))
         comment = str(base.get("comment", ""))
@@ -517,47 +541,50 @@ def enhance_market_score() -> Dict:
         comment = ""
         info = {"score": int(score), "comment": comment}
 
-    score = float(np.clip(score, 0, 100))
+    # 安全側に初期値クリップ
+    score = float(np.clip(score, 0.0, 100.0))
 
-    # 日経
+    # --- 日経平均の5日騰落 ---
     try:
         nikkei = yf.Ticker("^N225").history(period="6d")
         if nikkei is not None and not nikkei.empty and len(nikkei) >= 2:
-            n_chg = float(nikkei["Close"].iloc[-1] / nikkei["Close"].iloc[0] - 1.0) * 100
-            score += float(np.clip(n_chg / 2.5, -6, 6))
-    except Exception:
-        pass
+            n_chg = float(nikkei["Close"].iloc[-1] / nikkei["Close"].iloc[0] - 1.0) * 100.0
+            score += float(np.clip(n_chg / 2.5, -6.0, 6.0))
+    except Exception as e:
+        print("[WARN] ^N225 fetch failed:", e)
 
-    # SOX
+    # --- 半導体指数（SOX） ---
     try:
         sox = yf.Ticker("^SOX").history(period="6d")
         if sox is not None and not sox.empty and len(sox) >= 2:
-            sox_chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100
-            score += float(np.clip(sox_chg / 3.0, -5, 5))
-    except Exception:
-        pass
+            sox_chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100.0
+            score += float(np.clip(sox_chg / 3.0, -5.0, 5.0))
+    except Exception as e:
+        print("[WARN] ^SOX fetch failed:", e)
 
-    # NVDA
+    # --- NVDA 単体 ---
     try:
-        nv = yf.Ticker("NVDA").history(period="6d")
-        if nv is not None and not nv.empty and len(nv) >= 2:
-            nv_chg = float(nv["Close"].iloc[-1] / nv["Close"].iloc[0] - 1.0) * 100
-            score += float(np.clip(nv_chg / 4.0, -4, 4))
-    except Exception:
-        pass
+        nvda = yf.Ticker("NVDA").history(period="6d")
+        if nvda is not None and not nvda.empty and len(nvda) >= 2:
+            nvda_chg = float(nvda["Close"].iloc[-1] / nvda["Close"].iloc[0] - 1.0) * 100.0
+            score += float(np.clip(nvda_chg / 4.0, -4.0, 4.0))
+    except Exception as e:
+        print("[WARN] NVDA fetch failed:", e)
 
-    # FX
+    # --- 為替（USDJPY） ---
     try:
         fx = yf.Ticker("JPY=X").history(period="6d")
         if fx is not None and not fx.empty and len(fx) >= 2:
-            fx_chg = float(fx["Close"].iloc[-1] / fx["Close"].iloc[0] - 1.0) * 100
-            score += float(np.clip(fx_chg / 4.0, -3, 3))
-    except Exception:
-        pass
+            fx_chg = float(fx["Close"].iloc[-1] / fx["Close"].iloc[0] - 1.0) * 100.0
+            # 円安方向（USDJPY上昇）は大型輸出に追い風
+            score += float(np.clip(fx_chg / 4.0, -3.0, 3.0))
+    except Exception as e:
+        print("[WARN] FX JPY=X fetch failed:", e)
 
     score = float(np.clip(round(score), 0, 100))
     info["score"] = int(score)
     if not info.get("comment"):
+        # コメントがなければざっくりコメントを付ける
         if score >= 70:
             info["comment"] = "リスクオン寄り（押し目＋強いテーマに資金集中）"
         elif score >= 50:
@@ -570,9 +597,9 @@ def enhance_market_score() -> Dict:
 
 
 # ============================================================
-# スクリーニング
+# スクリーニング（Top15 → 最終5）
 # ============================================================
-def run_screening(today: datetime.date, mkt_score: int, total_asset: float) -> List[Dict]:
+def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
     df = load_universe(UNIVERSE_PATH)
     if df is None:
         return []
@@ -586,36 +613,23 @@ def run_screening(today: datetime.date, mkt_score: int, total_asset: float) -> L
         ticker = str(row["ticker"]).strip()
         if not ticker:
             continue
+
+        # 決算前後 ±N日 は除外
         if in_earnings_window(row, today):
             continue
 
         name = str(row.get("name", ticker))
         sector = str(row.get("sector", row.get("industry_big", "不明")))
 
-        theme_raw = str(row.get("theme", "")).strip()
-        themes = parse_themes(theme_raw)
-        theme_score = calc_theme_score(themes)
-
         hist = fetch_history(ticker)
         if hist is None or len(hist) < 60:
-            continue
-
-        # 流動性フィルタ
-        try:
-            close = hist["Close"].astype(float)
-            vol = hist["Volume"].astype(float)
-            turnover = close * vol
-            if len(turnover) < 20:
-                continue
-            avg_turnover_20 = float(turnover.rolling(20).mean().iloc[-1])
-            if avg_turnover_20 < LIQ_MIN_TURNOVER:
-                continue
-        except Exception:
             continue
 
         base_score = score_stock(hist)
         if base_score is None or not np.isfinite(base_score):
             continue
+
+        # 地合い連動の最低ライン
         if base_score < min_score:
             continue
 
@@ -623,92 +637,60 @@ def run_screening(today: datetime.date, mkt_score: int, total_asset: float) -> L
             ticker=ticker,
             name=name,
             sector=sector,
-            themes=themes,
             hist=hist,
             score_raw=base_score,
             mkt_score=mkt_score,
             sector_strength=sector_strength,
-            theme_score=theme_score,
         )
         raw_candidates.append(info)
 
+    # TopN 抽出（スコア最終版でソート）
     raw_candidates.sort(key=lambda x: x["score_final"], reverse=True)
     topN = raw_candidates[:SCREENING_TOP_N]
 
+    # TopN から最終 5 銘柄
     final_list: List[Dict] = []
-    risk_amount = float(total_asset) * RISK_PER_TRADE
-
     for c in topN:
         close = c["hist"]["Close"].astype(float)
         entry = compute_entry_price(close, c["ma5"], c["ma20"], c["atr"])
+
+        # ATR / 直近高値までの距離を TP/SL に反映
         price = float(c["price"])
-        atr = float(c["atr"]) if c["atr"] is not None else 0.0
-        vola20 = c["vola20"]
-
-        atr_ratio = (c["atr"] / price) if (price > 0 and c["atr"] is not None and price > 0) else None
-
+        atr_ratio = (c["atr"] / price) if (price > 0 and c["atr"] is not None and c["atr"] > 0) else None
         if len(close) >= 20 and entry > 0:
             swing_high = float(close.tail(20).max())
             swing_upside = (swing_high / entry - 1.0) if swing_high > entry else None
         else:
             swing_upside = None
 
-        tp_pct, sl_pct = calc_candidate_tp_sl(vola20, mkt_score, atr_ratio, swing_upside)
+        tp_pct, sl_pct = calc_candidate_tp_sl(c["vola20"], mkt_score, atr_ratio, swing_upside)
         tp_price = entry * (1.0 + tp_pct)
         sl_price = entry * (1.0 + sl_pct)
 
-        rr = tp_pct / abs(sl_pct) if sl_pct < 0 else np.nan
-
-        # 想定ホールド（日数ラベル）
-        if vola20 < 0.015:
-            hold_days = "7〜12日"
-        elif vola20 < 0.03:
-            hold_days = "4〜8日"
-        else:
-            hold_days = "2〜5日"
-
-        entry_low, entry_high = compute_entry_band(entry, atr, price)
-
-        pos_shares = 0
-        pos_yen = 0.0
-        loss_yen = 0.0
-        gain_yen = 0.0
-        if entry > 0 and sl_pct < 0:
-            per_share_risk = entry * abs(sl_pct)
-            if per_share_risk > 0:
-                raw = int(risk_amount // per_share_risk)
-                pos_shares = (raw // 100) * 100
-                if pos_shares > 0:
-                    pos_yen = pos_shares * entry
-                    loss_yen = pos_shares * entry * abs(sl_pct)
-                    gain_yen = pos_shares * entry * tp_pct
-
         price_now = float(c["price"])
         gap_ratio = abs(price_now - entry) / price_now if price_now > 0 else 1.0
-        entry_type = "today" if gap_ratio <= 0.01 else "soon"
+
+        # 今日IN候補か、数日以内IN候補かを分類
+        if gap_ratio <= 0.01:
+            entry_type = "today"      # 今日から入ってOKゾーン
+        else:
+            entry_type = "soon"       # 数日以内に押し目を待つゾーン
 
         final_list.append(
             {
                 "ticker": c["ticker"],
                 "name": c["name"],
                 "sector": c["sector"],
-                "themes": c["themes"],
                 "score": c["score_final"],
                 "price": price_now,
                 "entry": entry,
-                "entry_low": entry_low,
-                "entry_high": entry_high,
                 "tp_pct": tp_pct,
                 "sl_pct": sl_pct,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
-                "rr": rr,
-                "hold_days": hold_days,
-                "pos_shares": pos_shares,
-                "pos_yen": pos_yen,
-                "loss_yen": loss_yen,
-                "gain_yen": gain_yen,
                 "entry_type": entry_type,
+                "vola20": c["vola20"],
+                "atr": c["atr"],
             }
         )
 
@@ -717,50 +699,72 @@ def run_screening(today: datetime.date, mkt_score: int, total_asset: float) -> L
 
 
 # ============================================================
-# ログ出力（検証用）
+# ホールド日数のざっくり推定（表示用）
 # ============================================================
-def save_screening_log(today_date: datetime.date, mkt_score: int, core_list: List[Dict]) -> None:
-    try:
-        if not core_list:
-            return
-        rows = []
-        for c in core_list:
-            rows.append(
-                {
-                    "date": today_date.isoformat(),
-                    "mkt_score": mkt_score,
-                    "ticker": c["ticker"],
-                    "name": c["name"],
-                    "sector": c["sector"],
-                    "themes": "|".join(c.get("themes", [])),
-                    "score": c["score"],
-                    "price": c["price"],
-                    "entry": c["entry"],
-                    "entry_low": c["entry_low"],
-                    "entry_high": c["entry_high"],
-                    "tp_pct": c["tp_pct"],
-                    "sl_pct": c["sl_pct"],
-                    "tp_price": c["tp_price"],
-                    "sl_price": c["sl_price"],
-                    "rr": c["rr"],
-                    "hold_days": c["hold_days"],
-                    "pos_shares": c["pos_shares"],
-                    "pos_yen": c["pos_yen"],
-                    "loss_yen": c["loss_yen"],
-                    "gain_yen": c["gain_yen"],
-                    "entry_type": c["entry_type"],
-                }
-            )
-        os.makedirs("logs", exist_ok=True)
-        fname = os.path.join("logs", f"screening_{today_date.strftime('%Y%m%d')}.csv")
-        df_log = pd.DataFrame(rows)
-        df_log.to_csv(fname, index=False)
-    except Exception as e:
-        print("[WARN] failed to save screening log:", e)
+def guess_holding_days(vola20: float, mkt_score: int) -> str:
+    """ボラと地合いから想定ホールド日数をざっくり決める（表示用）"""
+    v = abs(vola20) if np.isfinite(vola20) else 0.03
+
+    if v < 0.018:
+        return "7〜12日"
+    if v < 0.03:
+        return "4〜8日"
+    return "3〜6日"
 
 
 # ============================================================
-# レポート
+# ロット計算（Core / Sub 共通）
+# ============================================================
+def calc_position_size(
+    entry: float,
+    tp_pct: float,
+    sl_pct: float,
+    total_asset: float,
+    max_total_pos: float,
+    is_sub: bool,
+) -> Tuple[int, float, float, float]:
+    """
+    1トレードあたりの推奨株数と想定損失 / 利確額を計算。
+    - Core: RISK_PER_TRADE
+    - Sub : RISK_PER_TRADE * SUB_RISK_FACTOR
+    """
+    if not (np.isfinite(entry) and entry > 0):
+        return 0, 0.0, 0.0, 0.0
+    if not np.isfinite(sl_pct) or sl_pct >= 0:
+        return 0, 0.0, 0.0, 0.0
+    if not np.isfinite(tp_pct) or tp_pct <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    risk_per = RISK_PER_TRADE * (SUB_RISK_FACTOR if is_sub else 1.0)
+    risk_budget = float(total_asset) * risk_per
+    loss_per_share = entry * abs(sl_pct)
+
+    if loss_per_share <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    shares = int(risk_budget // loss_per_share)
+    if shares <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    # 1銘柄あたりの最大建玉（MAX_CORE_POSITIONS で均等割り）
+    max_notional_per_name = max_total_pos / max(MAX_CORE_POSITIONS, 1)
+    notional = shares * entry
+    if notional > max_notional_per_name and entry > 0:
+        shares = int(max_notional_per_name // entry)
+        notional = shares * entry
+
+    if shares <= 0:
+        return 0, 0.0, 0.0, 0.0
+
+    loss_amount = loss_per_share * shares
+    profit_per_share = entry * tp_pct
+    profit_amount = profit_per_share * shares
+
+    return shares, notional, loss_amount, profit_amount
+
+
+# ============================================================
+# レポート構築（Core / Sub モード対応）
 # ============================================================
 def build_report(
     today_str: str,
@@ -773,160 +777,257 @@ def build_report(
     mkt_comment = str(mkt.get("comment", ""))
 
     rec_lev, lev_comment = recommend_leverage(mkt_score)
-
     est_asset = total_asset if np.isfinite(total_asset) and total_asset > 0 else 2_000_000.0
     est_asset_int = int(round(est_asset))
     max_pos = calc_max_position(est_asset, rec_lev)
 
+    # セクター
     secs = top_sectors_5d()
     if secs:
-        sec_lines = [f"{i+1}. {n} ({chg:+.2f}%)" for i, (n, chg) in enumerate(secs)]
+        sec_lines = [
+            f"{i + 1}. {name} ({chg:+.2f}%)"
+            for i, (name, chg) in enumerate(secs[:5])
+        ]
         sec_text = "\n".join(sec_lines)
     else:
-        sec_text = "算出不可"
+        sec_text = "算出不可（データ不足）"
 
-    ev_lines = build_event_warnings(today_date)
-    if not ev_lines:
-        ev_lines = ["- 特筆すべきイベントなし（通常）"]
+    # イベント
+    event_lines = build_event_warnings(today_date)
+    if not event_lines:
+        event_lines = ["- 特筆すべきイベントなし（通常）"]
 
-    if any(line.startswith("⚠") for line in ev_lines):
-        if rec_lev > 1.3:
-            rec_lev = 1.3
-            lev_comment += " / 重要イベントのため本日のレバ上限1.3倍"
+    # スクリーニング（Top → 最終）
+    core_list = run_screening(today_date, mkt_score)
+    today_list = [c for c in core_list if c.get("entry_type") == "today"]
+    soon_list = [c for c in core_list if c.get("entry_type") == "soon"]
 
-    max_pos = calc_max_position(est_asset, rec_lev)
+    # モード判定
+    core_mode = len(today_list) > 0
 
-    core_list = run_screening(today_date, mkt_score, est_asset)
-    today_list = [c for c in core_list if c["entry_type"] == "today"]
-    soon_list = [c for c in core_list if c["entry_type"] == "soon"]
-
-    # ログ保存（あとで検証するため）
-    save_screening_log(today_date, mkt_score, core_list)
+    # 同時最大本命銘柄数（表示用）
+    max_core_positions = MAX_CORE_POSITIONS
 
     lines: List[str] = []
+
+    # --- ヘッダー / 結論 ---
     lines.append(f"📅 {today_str} stockbotTOM 日報")
     lines.append("")
     lines.append("◆ 今日の結論")
     lines.append(f"- 地合いスコア: {mkt_score}点 ({mkt_comment})")
     lines.append(f"- 推奨レバ: 約{rec_lev:.1f}倍（{lev_comment}）")
     lines.append(f"- 運用資産想定: 約{est_asset_int:,}円")
-    lines.append(f"- 同時最大本命銘柄数: {MAX_CORE_POSITIONS}銘柄")
+    lines.append(f"- 同時最大本命銘柄数: {max_core_positions}銘柄")
     lines.append("")
     lines.append("※寄り付きが INゾーン上限より +1.5%以上高い場合は、その日は見送り推奨")
     lines.append("")
 
+    # --- セクター ---
     lines.append("◆ 今日のTOPセクター（5日騰落）")
     lines.append(sec_text)
     lines.append("")
 
+    # --- イベント ---
     lines.append("◆ 今日のイベント・警戒")
-    for ev in ev_lines:
+    for ev in event_lines:
         lines.append(ev)
     lines.append("")
 
+    # --- Core候補 Aランク（今日IN） ---
     lines.append(f"◆ Core候補 Aランク（今日IN候補 最大{MAX_FINAL_STOCKS}）")
     if not today_list:
         lines.append("今日INできる本命候補なし")
     else:
         for c in today_list:
-            theme_str = ", ".join(c.get("themes", [])) if c.get("themes") else "-"
+            entry = float(c["entry"])
+            tp_pct = float(c["tp_pct"])
+            sl_pct = float(c["sl_pct"])
+            rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
+            vola20 = float(c.get("vola20", 0.03))
+            hold_text = guess_holding_days(vola20, mkt_score)
+
+            zone_low = entry * (1.0 - IN_ZONE_HALF_PCT)
+            zone_high = entry * (1.0 + IN_ZONE_HALF_PCT)
+
+            shares, notional, loss_amt, profit_amt = calc_position_size(
+                entry=entry,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                total_asset=est_asset,
+                max_total_pos=max_pos,
+                is_sub=False,
+            )
+
             lines.append(
-                f"- {c['ticker']} {c['name']} "
-                f"Score:{c['score']:.1f} 現値:{c['price']:.1f} "
-                f"[{c['sector']} / テーマ:{theme_str}]"
+                f"- {c['ticker']} {c['name']} Score:{c['score']:.1f} 現値:{c['price']:.1f} [{c['sector']}]"
             )
             lines.append(
-                f"    ・INゾーン: {c['entry_low']:.1f}〜{c['entry_high']:.1f}（中心{c['entry']:.1f}）"
+                f"    ・INゾーン: {zone_low:.1f}〜{zone_high:.1f}（中心{entry:.1f}）"
             )
             lines.append(
-                f"    ・利確:+{c['tp_pct']*100:.1f}%（{c['tp_price']:.1f}） 損切:{c['sl_pct']*100:.1f}%（{c['sl_price']:.1f}） RR:{c['rr']:.1f}R"
+                f"    ・利確:+{tp_pct*100:.1f}%（{entry*(1+tp_pct):.1f}） 損切:{sl_pct*100:.1f}%（{entry*(1+sl_pct):.1f}） RR:{rr:.1f}R"
             )
-            lines.append(
-                f"    ・想定ホールド: {c['hold_days']}"
-            )
-            if c["pos_shares"] > 0:
+            lines.append(f"    ・想定ホールド: {hold_text}")
+            if shares > 0:
                 lines.append(
-                    f"    ・推奨: {c['pos_shares']}株 ≒{int(c['pos_yen']):,}円 / "
-                    f"損失~{int(c['loss_yen']):,}円 利確~{int(c['gain_yen']):,}円"
+                    f"    ・推奨: {shares}株 ≒{notional:,.0f}円 / 損失~{loss_amt:,.0f}円 利確~{profit_amt:,.0f}円"
                 )
             lines.append("")
 
+    # --- Core候補 Aランク（数日以内IN） ---
     lines.append("◆ Core候補 Aランク（数日以内IN）")
     if not soon_list:
-        lines.append("数日以内IN候補なし")
+        lines.append("数日以内に狙う本命候補なし")
     else:
         for c in soon_list:
-            theme_str = ", ".join(c.get("themes", [])) if c.get("themes") else "-"
+            entry = float(c["entry"])
+            tp_pct = float(c["tp_pct"])
+            sl_pct = float(c["sl_pct"])
+            rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
+            vola20 = float(c.get("vola20", 0.03))
+            hold_text = guess_holding_days(vola20, mkt_score)
+
+            zone_low = entry * (1.0 - IN_ZONE_HALF_PCT)
+            zone_high = entry * (1.0 + IN_ZONE_HALF_PCT)
+
+            shares, notional, loss_amt, profit_amt = calc_position_size(
+                entry=entry,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                total_asset=est_asset,
+                max_total_pos=max_pos,
+                is_sub=False,
+            )
+
             lines.append(
-                f"- {c['ticker']} {c['name']} "
-                f"Score:{c['score']:.1f} 現値:{c['price']:.1f} "
-                f"[{c['sector']} / テーマ:{theme_str}]"
+                f"- {c['ticker']} {c['name']} Score:{c['score']:.1f} 現値:{c['price']:.1f} [{c['sector']}]"
             )
             lines.append(
-                f"    ・理想IN:{c['entry']:.1f} ゾーン:{c['entry_low']:.1f}〜{c['entry_high']:.1f}"
+                f"    ・理想IN: {entry:.1f} ゾーン:{zone_low:.1f}〜{zone_high:.1f}"
             )
             lines.append(
-                f"    ・利確:+{c['tp_pct']*100:.1f}% 損切:{c['sl_pct']*100:.1f}% RR:{c['rr']:.1f}R"
+                f"    ・利確:+{tp_pct*100:.1f}% 損切:{sl_pct*100:.1f}% RR:{rr:.1f}R"
             )
-            lines.append(
-                f"    ・想定ホールド: {c['hold_days']}"
-            )
-            if c["pos_shares"] > 0:
+            lines.append(f"    ・想定ホールド: {hold_text}")
+            if shares > 0:
                 lines.append(
-                    f"    ・推奨:{c['pos_shares']}株 ≒{int(c['pos_yen']):,}円 / "
-                    f"損失~{int(c['loss_yen']):,}円 利確~{int(c['gain_yen']):,}円"
+                    f"    ・推奨: {shares}株 ≒{notional:,.0f}円 / 損失~{loss_amt:,.0f}円 利確~{profit_amt:,.0f}円"
                 )
             lines.append("")
 
+    # --- Sub モード（Core Today が無い日のみ） ---
+    if not core_mode:
+        lines.append("◆ Sub候補（観察用・小ロット／利確+3%・損切-4%／Coreロットの10%目安）")
+        if not soon_list:
+            lines.append("今日はSubで触る価値のある銘柄も無し（完全ノートレ推奨）")
+        else:
+            sub_candidates = soon_list[:SUB_MAX_CANDIDATES]
+            for c in sub_candidates:
+                entry = float(c["entry"])
+                tp_pct = SUB_TP_PCT
+                sl_pct = SUB_SL_PCT
+                rr = tp_pct / abs(sl_pct)
+                zone_low = entry * (1.0 - IN_ZONE_HALF_PCT)
+                zone_high = entry * (1.0 + IN_ZONE_HALF_PCT)
+
+                shares, notional, loss_amt, profit_amt = calc_position_size(
+                    entry=entry,
+                    tp_pct=tp_pct,
+                    sl_pct=sl_pct,
+                    total_asset=est_asset,
+                    max_total_pos=max_pos,
+                    is_sub=True,
+                )
+
+                lines.append(
+                    f"- {c['ticker']} {c['name']} Score:{c['score']:.1f} 現値:{c['price']:.1f} [{c['sector']}]"
+                )
+                lines.append(
+                    f"    ・Sub IN目安: {entry:.1f} ゾーン:{zone_low:.1f}〜{zone_high:.1f}"
+                )
+                lines.append(
+                    f"    ・Sub利確:+{tp_pct*100:.1f}% 損切:{sl_pct*100:.1f}% RR:{rr:.1f}R 想定:1〜3日"
+                )
+                if shares > 0:
+                    lines.append(
+                        f"    ・Sub推奨: {shares}株 ≒{notional:,.0f}円 / 損失~{loss_amt:,.0f}円 利確~{profit_amt:,.0f}円"
+                    )
+                lines.append("")
+        lines.append("")
+
+    # --- 建て玉最大金額 ---
     lines.append("◆ 本日の建て玉最大金額")
     lines.append(f"- 推奨レバ: {rec_lev:.1f}倍 / MAX建て玉: 約{max_pos:,}円")
     lines.append("")
 
+    # --- ポジション分析 ---
     lines.append(f"📊 {today_str} ポジション分析")
     lines.append("")
+    lines.append("◆ ポジションサマリ")
     lines.append(pos_text.strip())
 
+    # ここまでがロング版
     long_report = "\n".join(lines)
 
+    # --- ショート（要約）版 ---
     short_lines: List[str] = []
     short_lines.append(f"📅 {today_str} stockbotTOM 要約")
     short_lines.append(f"- 地合い:{mkt_score} / レバ:{rec_lev:.1f}倍")
-    if core_list:
-        best = core_list[0]
-        theme_str = ", ".join(best.get("themes", [])) if best.get("themes") else "-"
+    short_lines.append(f"- MAX建て玉: 約{max_pos:,}円")
+
+    if core_mode and today_list:
+        best = today_list[0]
+        entry = float(best["entry"])
+        tp_pct = float(best["tp_pct"])
+        sl_pct = float(best["sl_pct"])
+        rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
         short_lines.append(
-            f"- 本命: {best['ticker']} {best['name']} "
-            f"Score:{best['score']:.1f} [{best['sector']} / テーマ:{theme_str}]"
+            f"- 本命: {best['ticker']} {best['name']} Score:{best['score']:.1f} [{best['sector']}]"
         )
         short_lines.append(
-            f"  IN:{best['entry']:.1f} RR:{best['rr']:.1f}R "
-            f"ロット:{best['pos_shares']}株 想定:{best['hold_days']}"
+            f"  IN:{entry:.1f} RR:{rr:.1f}R ロット:{'Core'} 想定:{guess_holding_days(float(best.get('vola20', 0.03)), mkt_score)}"
+        )
+    elif not core_mode and soon_list:
+        best = soon_list[0]
+        entry = float(best["entry"])
+        rr = SUB_TP_PCT / abs(SUB_SL_PCT)
+        short_lines.append(
+            f"- 本命候補（Sub日）: {best['ticker']} {best['name']} Score:{best['score']:.1f} [{best['sector']}]"
+        )
+        short_lines.append(
+            f"  Sub IN:{entry:.1f} RR:{rr:.1f}R ロット:Coreの10% 想定:1〜3日"
         )
     else:
-        short_lines.append("- 本命なし（今日は無理に攻めない日）")
-    short_lines.append(f"- MAX建て玉: 約{max_pos:,}円")
+        short_lines.append("- 本命候補なし（今日は完全ノートレ候補日）")
 
     short_report = "\n".join(short_lines)
 
+    # ロング版とショート版を両方返す（送信時に分割）
     return long_report + "\n\n-----\n\n" + short_report
 
 
 # ============================================================
-# LINE送信
+# LINE送信（分割対応）
 # ============================================================
 def send_line(text: str) -> None:
+    """
+    Cloudflare Worker 経由で LINE へ送信。
+    長文は 3900 文字ごとに分割して送る。
+    """
     if not WORKER_URL:
-        print("[WARN] WORKER_URL 未設定")
+        print("[WARN] WORKER_URL が未設定（print のみ）")
         print(text)
         return
-    chunk = 3900
-    parts = [text[i:i + chunk] for i in range(0, len(text), chunk)] or [""]
-    for ch in parts:
+
+    chunk_size = 3900
+    chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+
+    for ch in chunks:
         try:
             r = requests.post(WORKER_URL, json={"text": ch}, timeout=15)
-            print("[LINE]", r.status_code, r.text)
+            print("[LINE RESULT]", r.status_code, r.text)
         except Exception as e:
-            print("[LINE ERROR]", e)
+            print("[ERROR] LINE送信に失敗:", e)
             print(ch)
 
 
@@ -937,14 +1038,17 @@ def main() -> None:
     today_str = jst_today_str()
     today_date = jst_today_date()
 
+    # 地合い（元の calc_market_score に SOX / NVDA / 為替 等を上乗せ）
     mkt = enhance_market_score()
 
+    # ポジション（推定資産 / レバ等）
     pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset, _, _, _ = analyze_positions(pos_df)
+    pos_text, total_asset, total_pos, lev, risk_info = analyze_positions(pos_df)
+
     if not (np.isfinite(total_asset) and total_asset > 0):
         total_asset = 2_000_000.0
 
-    rep = build_report(
+    report = build_report(
         today_str=today_str,
         today_date=today_date,
         mkt=mkt,
@@ -952,8 +1056,11 @@ def main() -> None:
         pos_text=pos_text,
     )
 
-    print(rep)
-    send_line(rep)
+    # ログ出力
+    print(report)
+
+    # LINE 送信（自動分割）
+    send_line(report)
 
 
 if __name__ == "__main__":
