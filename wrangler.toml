@@ -1,13 +1,17 @@
+# Worker name
 name = "kgikbot"
-main = "src/index.js"
-compatibility_date = "2024-12-01"
 
+# Entrypoint
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Durable Object binding
 [durable_objects]
 bindings = [
-  { name = "TradeLogDO", class_name = "TradeLogDO" }
+  { name = "TRADE_LOG", class_name = "TradeLogDO" }
 ]
 
-[migrations]
+# Migration (初回作成)
 [[migrations]]
 tag = "v1"
 new_classes = ["TradeLogDO"]
