@@ -14,4 +14,4 @@ bindings = [
 # Migration (初回作成)
 [[migrations]]
 tag = "v1"
-new_classes = ["TradeLogDO"] 
+new_classes = ["TradeLogDO"]
