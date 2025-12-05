@@ -1,30 +1,48 @@
-name: stockbotTOM
+name: stockbotTOM Daily Report
 
 on:
   schedule:
-    # 毎日 8:00 JST
-    - cron: "0 23 * * *"
-    # 毎日 11:40 JST
-    - cron: "40 2 * * *"
+    # JST 08:27 (UTC 23:27)
+    - cron: "27 23 * * *"
+    # JST 08:30 (UTC 23:30)
+    - cron: "30 23 * * *"
   workflow_dispatch:
 
 jobs:
-  run-bot:
+  build_report:
+    if: github.event.schedule == '27 23 * * *'
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run bot
-        env:
-          WORKER_URL: ${{ secrets.WORKER_URL }}
-        run: python main.py
+      - name: Build Report
+        run: |
+          python main.py --mode build
+
+      - name: Save report
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report.txt
+
+  notify:
+    if: github.event.schedule == '30 23 * * *'
+    needs: build_report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: report
+
+      - name: Send to LINE
+        run: |
+          python main.py --mode notify
