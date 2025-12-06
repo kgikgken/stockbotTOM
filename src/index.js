@@ -1,43 +1,26 @@
-export class TradeLogDO {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    const pathname = url.pathname;
-
-    if (pathname === "/log" && request.method === "POST") {
-      const body = await request.json();
-      await this.state.storage.put(Date.now().toString(), body);
-      return new Response("OK", { status: 200 });
-    }
-
-    if (pathname === "/logs" && request.method === "GET") {
-      const logs = await this.state.storage.list();
-      return new Response(JSON.stringify(logs), {
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
-    return new Response("Not Found", { status: 404 });
-  }
-}
-
 export default {
   async fetch(request, env) {
-    const id = env.TRADE_LOG.idFromName("main");
-    const stub = env.TRADE_LOG.get(id);
+    try {
+      const { text } = await request.json();
 
-    const url = new URL(request.url);
-    if (url.pathname.startsWith("/log")) {
-      return stub.fetch(request);
-    }
-    if (url.pathname.startsWith("/logs")) {
-      return stub.fetch(request);
-    }
+      const res = await fetch(
+        "https://api.line.me/v2/bot/message/push",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${env.LINE_TOKEN}`
+          },
+          body: JSON.stringify({
+            to: env.LINE_USER_ID,
+            messages: [{ type: "text", text }]
+          })
+        }
+      );
 
-    return new Response("OK", { status: 200 });
+      return new Response("OK", { status: 200 });
+    } catch (e) {
+      return new Response("ERROR:" + e.message, { status: 500 });
+    }
   }
-};
+}
