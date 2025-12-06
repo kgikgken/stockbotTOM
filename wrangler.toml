@@ -2,11 +2,6 @@ name = "kgikbot"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
-[durable_objects]
-bindings = [
-  { name = "TRADE_LOG", class_name = "TradeLogDO" }
-]
-
-[migrations]
-tag = "v1"
-new_classes = ["TradeLogDO"]
+[vars]
+LINE_TOKEN = ""
+LINE_USER_ID = ""
