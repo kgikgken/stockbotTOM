@@ -1,22 +1,21 @@
-name: stockbotTOM Daily Report
+name: stockbotTOM Daily
 
 on:
   schedule:
-    # JST 08:27 (UTC 23:27)
-    - cron: "27 23 * * *"
-    # JST 08:30 (UTC 23:30)
-    - cron: "30 23 * * *"
+    # JST 08:15 → UTC 23:15（前日）
+    - cron: "15 23 * * *"
   workflow_dispatch:
 
 jobs:
-  build_report:
-    if: github.event.schedule == '27 23 * * *'
+  daily-report:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -24,25 +23,42 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Build Report
+      - name: Build report (NO_LINE_SEND=1)
+        env:
+          NO_LINE_SEND: "1"
         run: |
-          python main.py --mode build
+          python main.py > report.txt
 
-      - name: Save report
-        uses: actions/upload-artifact@v4
-        with:
-          name: report
-          path: report.txt
-
-  notify:
-    if: github.event.schedule == '30 23 * * *'
-    needs: build_report
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: report
+      # 定期実行（schedule）のときだけ 8:30 JST まで待つ
+      - name: Wait until 08:30 JST (23:30 UTC)
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          TARGET_HOUR=23
+          TARGET_MIN=30
+          now_ts=$(date -u +%s)
+          target_ts=$(date -u -d "today ${TARGET_HOUR}:${TARGET_MIN}" +%s)
+          sleep_sec=$(( target_ts - now_ts ))
+          echo "Now:   $(date -u)"
+          echo "Target $(date -u -d @${target_ts})"
+          if [ $sleep_sec -gt 0 ]; then
+            echo "Sleep ${sleep_sec} seconds..."
+            sleep $sleep_sec
+          else:
+            echo "Target time already passed, skip sleep."
+          fi
 
       - name: Send to LINE
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
         run: |
-          python main.py --mode notify
+          python - << 'PYCODE'
+          import os
+          from main import send_line
+          path = "report.txt"
+          if os.path.exists(path):
+              with open(path, "r", encoding="utf-8") as f:
+                  text = f.read()
+              send_line(text)
+          else:
+              print("[WARN] report.txt not found")
+          PYCODE
