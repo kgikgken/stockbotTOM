@@ -1,52 +1,14 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import os
 import requests
+import os
 
-
-# ======================================
-# Worker URL（GitHub Secrets: WORKER_URL）
-# ======================================
 WORKER_URL = os.getenv("WORKER_URL")
 
-
-# ======================================
-# LINE通知関数
-# ======================================
-def send_line(text: str) -> None:
-    if not WORKER_URL:
-        print("[WARN] WORKER_URL 未設定")
-        print(text)
-        return
+def send_line(text: str):
     try:
-        requests.post(
-            WORKER_URL,
-            json={"text": text},
-            timeout=10,
-        )
+        payload = {"text": text}
+        r = requests.post(WORKER_URL, json=payload, timeout=10)
+        r.raise_for_status()
+        return True
     except Exception as e:
-        print(f"[ERROR] send_line failed: {e}")
-        print(text)
-
-
-# ======================================
-# メイン処理
-# ======================================
-def main():
-    # ===========================
-    # ここにあなたの本体ロジックを入れる
-    # ===========================
-
-    # ↓ とりあえず仮
-    # final_text に「日報全文」を入れる
-    final_text = "TEST from main.py"
-
-    # ===========================
-    # LINE送信
-    # ===========================
-    send_line(final_text)
-
-
-if __name__ == "__main__":
-    main()
+        print("LINE send error:", e)
+        return False
