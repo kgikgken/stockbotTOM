@@ -1,8 +1,3 @@
 name = "stockbot-worker"
 main = "src/index.js"
 compatibility_date = "2025-12-07"
-
-# LINE_TOKEN / LINE_USER_ID は Cloudflare の Secrets で設定
-# 例）
-#   wrangler secret put LINE_TOKEN
-#   wrangler secret put LINE_USER_ID
