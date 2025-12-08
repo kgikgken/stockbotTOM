@@ -5,7 +5,22 @@ from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
-from utils.scoring import _add_indicators, calc_vola20, _last_val
+from utils.scoring import _add_indicators, _last_val
+
+
+# ============================================================
+# 20日ボラ計算（内部版）
+# ============================================================
+
+def _calc_vola20(hist: pd.DataFrame) -> float:
+    if hist is None or len(hist) < 21:
+        return np.nan
+    close = hist["Close"].astype(float)
+    ret = close.pct_change(fill_method=None)
+    try:
+        return float(ret.rolling(20).std().iloc[-1])
+    except Exception:
+        return np.nan
 
 
 # ============================================================
@@ -13,30 +28,21 @@ from utils.scoring import _add_indicators, calc_vola20, _last_val
 # ============================================================
 
 def _base_tp_sl_from_vola(vola: float) -> Tuple[float, float]:
-    """
-    ボラティリティ（20日標準偏差）から
-    ベースの TP/SL (%表記, +/−) を決める。
-    """
     if not np.isfinite(vola):
-        # データ不足 ⇒ 中庸
         return 0.09, -0.045
 
     v = float(abs(vola))
 
     if v < 0.015:
-        # 超低ボラ：リターンも小さいが騙しも少ない
         tp = 0.06
         sl = -0.03
     elif v < 0.03:
-        # 低〜中ボラ：理想ゾーン
         tp = 0.09
         sl = -0.045
     elif v < 0.06:
-        # やや高ボラ：取りに行くがリスクも増える
         tp = 0.12
         sl = -0.06
     else:
-        # 超高ボラ：TPは伸ばすがSLも厚め
         tp = 0.16
         sl = -0.085
 
@@ -48,10 +54,6 @@ def _base_tp_sl_from_vola(vola: float) -> Tuple[float, float]:
 # ============================================================
 
 def _market_multipliers(mkt_score: int) -> Tuple[float, float]:
-    """
-    地合いスコアから TP/SL の倍率を返す。
-    tp_mult > 1 ならTPを伸ばす、sl_mult < 1 なら損切りを浅く。
-    """
     s = int(mkt_score)
 
     if s >= 75:
@@ -68,16 +70,10 @@ def _market_multipliers(mkt_score: int) -> Tuple[float, float]:
 
 
 # ============================================================
-# 波の強さ（押し目完成度）を評価
+# 波の強さ（押し目完成度）
 # ============================================================
 
 def _wave_strength(df: pd.DataFrame) -> Tuple[float, float]:
-    """
-    押し目の完成度から
-      wave_tp_mult : TP側にかける倍率
-      wave_risk_mult : SL側にかける倍率
-    を返す。
-    """
     rsi = _last_val(df.get("rsi14"))
     off = _last_val(df.get("off_high_pct"))
     days = _last_val(df.get("days_since_high60"))
@@ -87,10 +83,10 @@ def _wave_strength(df: pd.DataFrame) -> Tuple[float, float]:
     tp_mult = 1.0
     risk_mult = 1.0
 
-    # --- RSI ---
+    # RSI
     if np.isfinite(rsi):
         if 32 <= rsi <= 45:
-            tp_mult += 0.18   # きれいな押し目
+            tp_mult += 0.18
             risk_mult -= 0.05
         elif 25 <= rsi < 32 or 45 < rsi <= 55:
             tp_mult += 0.08
@@ -98,18 +94,18 @@ def _wave_strength(df: pd.DataFrame) -> Tuple[float, float]:
             tp_mult -= 0.10
             risk_mult += 0.05
 
-    # --- 高値からの押し幅 ---
+    # 押し幅
     if np.isfinite(off):
         if -18 <= off <= -7:
             tp_mult += 0.15
             risk_mult -= 0.05
         elif -25 <= off < -18 or -7 < off <= 0:
             tp_mult += 0.05
-        elif off > 0 or off < -30:
+        else:
             tp_mult -= 0.10
             risk_mult += 0.05
 
-    # --- 日柄 ---
+    # 日柄
     if np.isfinite(days):
         if 3 <= days <= 12:
             tp_mult += 0.08
@@ -118,7 +114,7 @@ def _wave_strength(df: pd.DataFrame) -> Tuple[float, float]:
         elif days > 30:
             tp_mult -= 0.05
 
-    # --- トレンド方向（20MAの傾き） ---
+    # トレンド方向
     if np.isfinite(slope):
         if slope >= 0.006:
             tp_mult += 0.10
@@ -129,7 +125,7 @@ def _wave_strength(df: pd.DataFrame) -> Tuple[float, float]:
             tp_mult -= 0.12
             risk_mult += 0.08
 
-    # --- ヒゲ ---
+    # ヒゲ
     if np.isfinite(shadow):
         if shadow >= 0.6:
             tp_mult += 0.05
@@ -144,13 +140,10 @@ def _wave_strength(df: pd.DataFrame) -> Tuple[float, float]:
 
 
 # ============================================================
-# 流動性によるリスク補正
+# 流動性補正
 # ============================================================
 
 def _liquidity_risk_mult(df: pd.DataFrame) -> float:
-    """
-    出来高・売買代金が薄いほど SL を少し広げる。
-    """
     turnover20 = _last_val(df.get("turnover_avg20"))
 
     if not np.isfinite(turnover20):
@@ -159,51 +152,36 @@ def _liquidity_risk_mult(df: pd.DataFrame) -> float:
     t = float(turnover20)
 
     if t >= 5e9:
-        return 0.95   # 超高流動性 → 少しだけタイトでOK
+        return 0.95
     if t >= 1e9:
-        return 1.00   # 十分
+        return 1.00
     if t >= 3e8:
-        return 1.05   # やや薄い
-    return 1.12       # 薄商い → 余裕を持ったSL
+        return 1.05
+    return 1.12
 
 
 # ============================================================
-# 公開API：TP/SL/RR の計算
+# 公開API
 # ============================================================
 
 def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int) -> Dict[str, float]:
-    """
-    1銘柄分のヒストリカルデータから
-      - tp_pct : 利確目安（+◯％）
-      - sl_pct : 損切り目安（−◯％）
-      - rr     : 想定RR = TP幅 / |SL幅|
-    を返す。
-    """
     if hist is None or len(hist) < 40:
-        # データ不足時は無難な設定で返す（RRは低め）
         return {"tp_pct": 0.08, "sl_pct": -0.06, "rr": 1.33}
 
-    # インジケータ付与（scoring側と完全同一ロジック）
     df = _add_indicators(hist)
 
-    # ボラティリティ
-    vola20 = calc_vola20(hist)
+    vola20 = _calc_vola20(hist)
     base_tp, base_sl = _base_tp_sl_from_vola(vola20)
 
-    # 地合い補正
     mkt_tp_mult, mkt_sl_mult = _market_multipliers(mkt_score)
 
-    # 波の完成度
     wave_tp_mult, wave_risk_mult = _wave_strength(df)
 
-    # 流動性リスク
     liq_mult = _liquidity_risk_mult(df)
 
-    # ---- 合成 ----
     tp_pct = base_tp * mkt_tp_mult * wave_tp_mult
     sl_pct = base_sl * mkt_sl_mult * wave_risk_mult * liq_mult
 
-    # クリップ（やりすぎ防止）
     tp_pct = float(np.clip(tp_pct, 0.05, 0.25))
     sl_pct = float(np.clip(sl_pct, -0.12, -0.02))
 
