@@ -1,170 +1,132 @@
 from __future__ import annotations
-import pandas as pd
 import numpy as np
-import yfinance as yf
-
-
-# ============================================================
-# 安全価格取得
-# ============================================================
-def _safe_price(ticker: str):
-    """現在値を安全に取る"""
-    try:
-        df = yf.download(ticker, period="5d", interval="1d", progress=False)
-        if df is None or df.empty:
-            return np.nan
-        return float(df["Close"].iloc[-1])
-    except:
-        return np.nan
-
-
-# ============================================================
-# ボラティリティ分類
-# ============================================================
-def _classify_vola(vola: float) -> str:
-    if not np.isfinite(vola):
-        return "mid"
-    if vola < 0.02:
-        return "low"
-    if vola > 0.06:
-        return "high"
-    return "mid"
-
-
-def _calc_vola20(ticker: str):
-    try:
-        df = yf.download(ticker, period="60d", interval="1d", progress=False)
-        if df is None or df.empty:
-            return np.nan
-        close = df["Close"].astype(float)
-        ret = close.pct_change(fill_method=None)
-        vola20 = ret.rolling(20).std().iloc[-1]
-        return float(vola20)
-    except:
-        return np.nan
-
-
-# ============================================================
-# 保有銘柄のTP/SL計算
-# ============================================================
-def _tp_sl_for_position(cur_price: float, vola20: float):
-    """
-    Returns:
-      tp_pct, sl_pct, tp_price, sl_price
-    """
-
-    vc = _classify_vola(vola20)
-
-    # デフォルト
-    tp = 8.0
-    sl = 4.0
-
-    if vc == "low":
-        tp = 6.0
-        sl = 3.0
-    elif vc == "high":
-        tp = 12.0
-        sl = 6.0
-
-    tp_price = cur_price * (1 + tp / 100)
-    sl_price = cur_price * (1 - sl / 100)
-
-    return tp, sl, tp_price, sl_price
+import pandas as pd
+from typing import Tuple, Dict, List
 
 
 # ============================================================
 # positions.csv 読み込み
 # ============================================================
-def load_positions(path: str = "positions.csv") -> pd.DataFrame:
+def load_positions(path: str) -> pd.DataFrame:
+    """
+    positions.csv を読み込む。
+    無い or 空 → 空 DataFrame。
+    """
     try:
         df = pd.read_csv(path)
-        # 必須カラム保証
-        req = {"ticker", "size", "price"}
-        if not req.issubset(df.columns):
-            raise ValueError("positions.csv に必要な列がありません")
-        return df
-    except Exception as e:
-        print("[WARN] positions.csv 読み込み失敗:", e)
-        return pd.DataFrame(columns=["ticker", "size", "price"])
+    except Exception:
+        return pd.DataFrame()
+
+    # columns: ticker, shares, avg_price
+    # 足りない列は補完
+    for col in ["ticker", "shares", "avg_price"]:
+        if col not in df.columns:
+            df[col] = None
+
+    df["ticker"] = df["ticker"].astype(str)
+    return df
 
 
 # ============================================================
-# 保有銘柄のリスク評価
+# Yahooで現在価格に必要な ticker summary
 # ============================================================
-def _risk_level(vola: float) -> str:
-    if not np.isfinite(vola):
-        return "中立"
-    if vola < 0.02:
-        return "低リスク"
-    if vola > 0.06:
-        return "高リスク"
-    return "中リスク"
-
-
-# ============================================================
-# 保有ポジション分析（メイン）
-# ============================================================
-def analyze_positions(df: pd.DataFrame):
+def fetch_last_price(ticker: str) -> float:
     """
-    Return:
-      pos_text(str)
-      total_asset(float)
-      total_pos(float)
-      lev(float)
-      risk_info(list[dict])
+    現値取得（エラー時は 0.0）
     """
+    try:
+        import yfinance as yf
+        df = yf.Ticker(ticker).history(period="1d")
+        if df is None or df.empty:
+            return 0.0
+        return float(df["Close"].iloc[-1])
+    except Exception:
+        return 0.0
+
+
+# ============================================================
+# 全ポジションの評価額・合計資産
+# ============================================================
+def analyze_positions(df: pd.DataFrame) -> Tuple[str, float, float, float, Dict]:
+    """
+    ポジション情報から
+    - 日本語サマリ（LINE表示用テキスト）
+    - 総資産推定
+    - 総建玉
+    - レバレッジ
+    - リスク情報（dict）
+
+    を返す。
+    """
+    # ノーポジ：初期資産2Mで返す
     if df is None or df.empty:
-        return "（現在ポジションなし）", 0, 0, 0, []
+        text = "現在ポジションなし\n"
+        total_asset = 2_000_000.0
+        total_pos = 0.0
+        lev = 1.0
+        risk = {
+            "positions": [],
+            "cnt": 0,
+            "loss_risk": 0.0,
+            "gain_potential": 0.0,
+        }
+        return text, total_asset, total_pos, lev, risk
 
-    lines = []
-    total_pos = 0
-    total_asset = 0
-    risk_info = []
+    lines: List[str] = []
+    pos_values = []
 
-    for _, r in df.iterrows():
-        ticker = str(r["ticker"])
-        size = float(r["size"])
-        cost = float(r["price"])
+    for _, row in df.iterrows():
+        ticker = str(row["ticker"])
+        shares = float(row.get("shares", 0))
+        avg_price = float(row.get("avg_price", 0))
 
-        cur = _safe_price(ticker)
-        if not np.isfinite(cur):
+        if shares <= 0 or avg_price <= 0:
             continue
 
-        pnl_pct = (cur - cost) / cost * 100
-        vola20 = _calc_vola20(ticker)
-        risk = _risk_level(vola20)
+        cur = fetch_last_price(ticker)
+        if cur <= 0:
+            continue
 
-        # TP/SL
-        tp_pct, sl_pct, tp_price, sl_price = _tp_sl_for_position(cur, vola20)
-
-        # 評価額
-        pos_val = cur * size
-        total_pos += pos_val
-
-        # 推定総資産（含み損益込み）
-        total_asset += pos_val
+        pnl = (cur / avg_price - 1.0) * 100.0
+        val = cur * shares
+        pos_values.append(val)
 
         lines.append(
-            f"- {ticker}: 現値 {cur:.1f} / 取得 {cost:.1f} / 損益 {pnl_pct:.2f}%\n"
-            f"    ・利確目安: +{tp_pct:.1f}%（{tp_price:.1f}）\n"
-            f"    ・損切り目安: -{sl_pct:.1f}%（{sl_price:.1f}）\n"
-            f"    ・リスク: {risk}"
+            f"- {ticker}: 現値 {cur:.1f} / 取得 {avg_price:.1f} / 損益 {pnl:+.2f}%"
         )
 
-        risk_info.append({
-            "ticker": ticker,
-            "cur": cur,
-            "cost": cost,
-            "pnl_pct": pnl_pct,
-            "tp_pct": tp_pct,
-            "sl_pct": sl_pct,
-            "tp_price": tp_price,
-            "sl_price": sl_price,
-            "risk": risk
-        })
+    # もし全ポジが異常（取得0、現値0）ならノーポジ扱い
+    if not pos_values:
+        text = "現在ポジションなし\n"
+        total_asset = 3_000_000.0
+        total_pos = 0.0
+        lev = 1.0
+        risk = {
+            "positions": [],
+            "cnt": 0,
+            "loss_risk": 0.0,
+            "gain_potential": 0.0,
+        }
+        return text, total_asset, total_pos, lev, risk
 
-    # レバレッジ計算（超単純化版）
-    lev = total_pos / total_asset if total_asset > 0 else 0
+    # 総建玉 = 各ポジション評価額の合計
+    total_pos = float(np.sum(pos_values))
 
+    # 総資産（単純に建玉=資産と考える）
+    total_asset = total_pos
+
+    # レバレッジ: 現状建玉/資産（現状は1.0固定に近い）
+    lev = 1.0
+
+    # 基本テキスト
     text = "\n".join(lines)
-    return text, total_asset, total_pos, lev, risk_info
+
+    # 簡易リスク情報（Futureで使う）
+    risk = {
+        "positions": [],         # Phase2で詳細入れる
+        "cnt": len(pos_values),
+        "loss_risk": 0.0,
+        "gain_potential": 0.0,
+    }
+
+    return text, total_asset, total_pos, lev, risk
