@@ -239,25 +239,21 @@ def calc_max_position(total_asset: float, lev: float) -> int:
 
 
 # ============================================================
-# 動的な最低スコアライン（地合い連動 + A案スコアの下限）
+# 動的な最低スコアライン（地合い連動）
 # ============================================================
 def dynamic_min_score(mkt_score: int) -> float:
     """
     地合いが強いほど「少し緩く」、弱いほど「厳しく」フィルタする。
-    ただし A案スコア 80 未満は常に除外。
     """
     if mkt_score >= 70:
-        base = 72.0
-    elif mkt_score >= 60:
-        base = 75.0
-    elif mkt_score >= 50:
-        base = 78.0
-    elif mkt_score >= 40:
-        base = 80.0
-    else:
-        base = 82.0
-
-    return max(base, 80.0)
+        return 72.0
+    if mkt_score >= 60:
+        return 75.0
+    if mkt_score >= 50:
+        return 78.0
+    if mkt_score >= 40:
+        return 80.0
+    return 82.0
 
 
 # ============================================================
@@ -306,7 +302,7 @@ def score_candidate(
     atr = calc_atr(hist)
     vola20 = calc_volatility(close, 20)
 
-    # --- Quality（ベースは A案スコア） ---
+    # --- Quality（ベースは scoring.score_stock のACDE） ---
     quality_score = float(score_raw)
 
     # --- Setup（短期の形・テクニカル） ---
@@ -366,7 +362,6 @@ def score_candidate(
         regime_score += sector_strength.get(sector, 0.0)
 
     # --- 三階層を合成 ---
-    # Setup > Quality > Regime の順で効くように重みを設定
     wQ = 0.7
     wS = 1.0
     wR = 0.6
@@ -501,7 +496,7 @@ def enhance_market_score() -> Dict:
 
 
 # ============================================================
-# スクリーニング（Top10 → 最終3, RR>=2.0のみ）
+# スクリーニング（Top10 → 最終3）
 # ============================================================
 def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
     df = load_universe(UNIVERSE_PATH)
@@ -533,7 +528,7 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         if base_score is None or not np.isfinite(base_score):
             continue
 
-        # A案スコアの下限（80点未満は常に除外）
+        # 地合い連動の最低ライン
         if base_score < min_score:
             continue
 
@@ -552,7 +547,7 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
     raw_candidates.sort(key=lambda x: x["score_final"], reverse=True)
     top10 = raw_candidates[:SCREENING_TOP_N]
 
-    # Top10 から最終3銘柄（RR>=2.0 のみ）
+    # Top10 から最終3銘柄
     final_list: List[Dict] = []
     for c in top10:
         close = c["hist"]["Close"].astype(float)
@@ -570,13 +565,6 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         else:
             entry_type = "soon"       # 数日以内に押し目を待つゾーン
 
-        # RRフィルタ（2.0R 未満は除外）
-        rr = 0.0
-        if sl_pct < 0:
-            rr = tp_pct / abs(sl_pct)
-        if rr < 2.0:
-            continue
-
         final_list.append(
             {
                 "ticker": c["ticker"],
@@ -590,7 +578,6 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "entry_type": entry_type,
-                "rr": rr,
             }
         )
 
@@ -623,16 +610,16 @@ def build_report(
             f"{i + 1}. {name} ({chg:+.2f}%)"
             for i, (name, chg) in enumerate(secs)
         ]
+        sec_text = "\n".join(sec_lines)
     else:
-        sec_lines = ["算出不可（データ不足）"]
-    sec_text = "\n".join(sec_lines)
+        sec_text = "算出不可（データ不足）"
 
     # イベント
     event_lines = build_event_warnings(today_date)
     if not event_lines:
         event_lines = ["- 特筆すべきイベントなし（通常モード）"]
 
-    # スクリーニング（Top10 → 最終3, RR>=2.0）
+    # スクリーニング（Top10 → 最終3）
     core_list = run_screening(today_date, mkt_score)
     today_list = [c for c in core_list if c.get("entry_type") == "today"]
     soon_list = [c for c in core_list if c.get("entry_type") == "soon"]
@@ -667,7 +654,7 @@ def build_report(
     else:
         for c in today_list:
             lines.append(
-                f"- {c['ticker']} {c['name']}  Score:{c['score']:.1f} 現値:{c['price']:.1f} [RR:{c['rr']:.2f}R]"
+                f"- {c['ticker']} {c['name']}  Score:{c['score']:.1f} 現値:{c['price']:.1f}"
             )
             lines.append(f"    ・IN目安: {c['entry']:.1f}")
             lines.append(
@@ -679,13 +666,13 @@ def build_report(
             lines.append("")
 
     # --- Core候補 Aランク（数日以内IN） ---
-    lines.append("◆ Core候補 Aランク（数日以内の押し目待ち候補）")
+    lines.append(f"◆ Core候補 Aランク（数日以内の押し目待ち候補）")
     if not soon_list:
         lines.append("数日以内の押し目待ちAランク候補なし。")
     else:
         for c in soon_list:
             lines.append(
-                f"- {c['ticker']} {c['name']}  Score:{c['score']:.1f} 現値:{c['price']:.1f} [RR:{c['rr']:.2f}R]"
+                f"- {c['ticker']} {c['name']}  Score:{c['score']:.1f} 現値:{c['price']:.1f}"
             )
             lines.append(f"    ・理想IN目安: {c['entry']:.1f}")
             lines.append(
@@ -707,22 +694,6 @@ def build_report(
     lines.append("")
     lines.append("◆ ポジションサマリ")
     lines.append(pos_text.strip())
-
-    # --- 要約 ---
-    lines.append("")
-    lines.append(f"📅 {today_str} stockbotTOM 要約")
-    lines.append(f"- 地合い: {mkt_score}点 / レバ目安: {rec_lev:.1f}倍")
-    if core_list:
-        top = core_list[0]
-        lines.append(
-            f"- 本命: {top['ticker']} {top['name']}  Score:{top['score']:.1f} [RR:{top['rr']:.2f}R]"
-        )
-        lines.append(
-            f"  IN目安:{top['entry']:.1f} 利確:+{top['tp_pct']*100:.1f}% 損切り:{top['sl_pct']*100:.1f}%"
-        )
-    else:
-        lines.append("- 本命: 今日は明確な本命候補なし（待ちのターン）")
-    lines.append(f"- MAX建て玉: 約{max_pos:,}円")
 
     return "\n".join(lines)
 
