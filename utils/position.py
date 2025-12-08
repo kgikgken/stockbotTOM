@@ -1,132 +1,122 @@
 from __future__ import annotations
-import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, List
+import numpy as np
+import yfinance as yf
 
 
 # ============================================================
-# positions.csv 読み込み
+# Load positions
 # ============================================================
-def load_positions(path: str) -> pd.DataFrame:
+def load_positions(path: str = "positions.csv") -> pd.DataFrame:
     """
-    positions.csv を読み込む。
-    無い or 空 → 空 DataFrame。
+    positions.csv を読む
+    （なければ空のDataFrameを返す）
+
+    columns例：
+    ticker, shares, avg_price
     """
     try:
         df = pd.read_csv(path)
+        return df
     except Exception:
-        return pd.DataFrame()
-
-    # columns: ticker, shares, avg_price
-    # 足りない列は補完
-    for col in ["ticker", "shares", "avg_price"]:
-        if col not in df.columns:
-            df[col] = None
-
-    df["ticker"] = df["ticker"].astype(str)
-    return df
+        # ファイルなし or 読めない場合
+        cols = ["ticker", "shares", "avg_price"]
+        return pd.DataFrame(columns=cols)
 
 
 # ============================================================
-# Yahooで現在価格に必要な ticker summary
+# 現値取得（yfinance）
 # ============================================================
-def fetch_last_price(ticker: str) -> float:
-    """
-    現値取得（エラー時は 0.0）
-    """
+def _fetch_price(ticker: str) -> float:
     try:
-        import yfinance as yf
-        df = yf.Ticker(ticker).history(period="1d")
+        df = yf.download(ticker, period="5d", interval="1d", progress=False)
         if df is None or df.empty:
-            return 0.0
-        return float(df["Close"].iloc[-1])
+            return np.nan
+        close = df["Close"].astype(float)
+        return float(close.iloc[-1])
     except Exception:
-        return 0.0
+        return np.nan
 
 
 # ============================================================
-# 全ポジションの評価額・合計資産
+# ボラ20（RRなどで使用）
 # ============================================================
-def analyze_positions(df: pd.DataFrame) -> Tuple[str, float, float, float, Dict]:
-    """
-    ポジション情報から
-    - 日本語サマリ（LINE表示用テキスト）
-    - 総資産推定
-    - 総建玉
-    - レバレッジ
-    - リスク情報（dict）
+def _fetch_vola20(ticker: str) -> float:
+    try:
+        df = yf.download(ticker, period="60d", interval="1d", progress=False)
+        if df is None or df.empty or len(df) < 20:
+            return np.nan
+        close = df["Close"].astype(float)
+        ret = close.pct_change(fill_method=None)
+        return float(ret.rolling(20).std().iloc[-1])
+    except Exception:
+        return np.nan
 
-    を返す。
+
+# ============================================================
+# Analyze positions
+# ============================================================
+def analyze_positions(df: pd.DataFrame):
     """
-    # ノーポジ：初期資産2Mで返す
+    現在のポジションをまとめて返す
+
+    戻り値：
+      pos_text(str)        → 位置情報をLine表示用に整形
+      total_asset(float)   → 総資産（推定）
+      total_pos(float)     → 建玉合計
+      lev(float)           → レバレッジ
+      risk_info(dict)      → 拡張用
+
+    ※ ノーポジションでも動作する
+    """
     if df is None or df.empty:
-        text = "現在ポジションなし\n"
-        total_asset = 2_000_000.0
-        total_pos = 0.0
-        lev = 1.0
-        risk = {
-            "positions": [],
-            "cnt": 0,
-            "loss_risk": 0.0,
-            "gain_potential": 0.0,
-        }
-        return text, total_asset, total_pos, lev, risk
+        pos_text = "- ノーポジション（休む日）"
+        # ※ 資産推定は main 側で決めるので None に返す
+        return pos_text, np.nan, 0.0, 1.0, {}
 
-    lines: List[str] = []
-    pos_values = []
+    lines = []
+    total_pos = 0.0
 
+    # 詳細情報計算
     for _, row in df.iterrows():
-        ticker = str(row["ticker"])
+        ticker = str(row.get("ticker", "")).strip()
         shares = float(row.get("shares", 0))
         avg_price = float(row.get("avg_price", 0))
 
-        if shares <= 0 or avg_price <= 0:
+        if not ticker or shares <= 0:
             continue
 
-        cur = fetch_last_price(ticker)
-        if cur <= 0:
+        cur = _fetch_price(ticker)
+        if not np.isfinite(cur):
             continue
 
-        pnl = (cur / avg_price - 1.0) * 100.0
-        val = cur * shares
-        pos_values.append(val)
+        pnl_pct = ((cur / avg_price) - 1.0) * 100.0
+        pnl_pct = round(pnl_pct, 2)
+
+        # 推定RR情報（現状は参考値 → Phase2で本格化）
+        vola = _fetch_vola20(ticker)
+        # baseline: tp=+8%, sl=-4%
+        tp = avg_price * 1.08
+        sl = avg_price * 0.96
+
+        value = cur * shares
+        total_pos += value
 
         lines.append(
-            f"- {ticker}: 現値 {cur:.1f} / 取得 {avg_price:.1f} / 損益 {pnl:+.2f}%"
+            f"- {ticker}: 現値 {cur:.1f} / 取得 {avg_price:.1f} / 損益 {pnl_pct:.2f}%\n"
+            f"    ・利確目安: +8.0%（{tp:.1f}）\n"
+            f"    ・損切り目安: -4.0%（{sl:.1f}）"
         )
 
-    # もし全ポジが異常（取得0、現値0）ならノーポジ扱い
-    if not pos_values:
-        text = "現在ポジションなし\n"
-        total_asset = 3_000_000.0
-        total_pos = 0.0
-        lev = 1.0
-        risk = {
-            "positions": [],
-            "cnt": 0,
-            "loss_risk": 0.0,
-            "gain_potential": 0.0,
-        }
-        return text, total_asset, total_pos, lev, risk
+    if not lines:
+        pos_text = "- ノーポジション（休む日）"
+        return pos_text, np.nan, 0.0, 1.0, {}
 
-    # 総建玉 = 各ポジション評価額の合計
-    total_pos = float(np.sum(pos_values))
+    pos_text = "\n".join(lines)
 
-    # 総資産（単純に建玉=資産と考える）
-    total_asset = total_pos
+    # 総資産推定（現金を含む前提 → 現状は株価でのみ計算）
+    # Phase2では 現金残高 / レバ情報を追加可能
+    total_asset = total_pos  # conservative
+    lev = 1.0  # 現状はレバを固定（Phase2で動的）
 
-    # レバレッジ: 現状建玉/資産（現状は1.0固定に近い）
-    lev = 1.0
-
-    # 基本テキスト
-    text = "\n".join(lines)
-
-    # 簡易リスク情報（Futureで使う）
-    risk = {
-        "positions": [],         # Phase2で詳細入れる
-        "cnt": len(pos_values),
-        "loss_risk": 0.0,
-        "gain_potential": 0.0,
-    }
-
-    return text, total_asset, total_pos, lev, risk
+    return pos_text, total_asset, total_pos, lev, {}
