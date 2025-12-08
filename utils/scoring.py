@@ -1,9 +1,5 @@
-# utils/scoring.py
-# ============================================================
-# 銘柄スコアリング（Coreスコア: 0〜100）
-# ============================================================
-
 from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
@@ -14,7 +10,7 @@ import pandas as pd
 def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     hist（yfinanceのhistory）を受け取り、
-    スコアに使う指標を全部載せる。
+    スコア & IN判定に使う指標を全部載せる。
     """
     df = df.copy()
 
@@ -34,7 +30,7 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
+    rs = avg_gain / avg_loss
     df["rsi14"] = 100 - (100 / (1 + rs))
 
     # 20日ボラ（リターンの標準偏差）
@@ -45,6 +41,7 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(close) >= 60:
         rolling_high = close.rolling(60).max()
         df["off_high_pct"] = (close - rolling_high) / rolling_high * 100
+
         tail = close.tail(60)
         idx = int(np.argmax(tail.values))
         days_since_high60 = (len(tail) - 1) - idx
@@ -80,9 +77,13 @@ def _last_val(series: pd.Series) -> float:
 
 
 # ============================================================
-# スコア（0〜100）を計算
+# スコア（0〜100）を計算：Quality Core
 # ============================================================
 def _trend_score(df: pd.DataFrame) -> float:
+    """
+    トレンド方向・傾き・高値からの位置
+    最大 20 点
+    """
     close = df["Close"].astype(float)
     ma20 = df["ma20"]
     ma50 = df["ma50"]
@@ -124,6 +125,10 @@ def _trend_score(df: pd.DataFrame) -> float:
 
 
 def _pullback_score(df: pd.DataFrame) -> float:
+    """
+    押し目の質（RSI / 下落率 / 日柄 / ヒゲ）
+    最大 20 点
+    """
     rsi = _last_val(df["rsi14"])
     off = _last_val(df["off_high_pct"])
     days = _last_val(df["days_since_high60"])
@@ -131,7 +136,7 @@ def _pullback_score(df: pd.DataFrame) -> float:
 
     sc = 0.0
 
-    # RSI
+    # RSI（売られすぎ〜適正押し）
     if np.isfinite(rsi):
         if 30 <= rsi <= 45:
             sc += 7
@@ -149,7 +154,7 @@ def _pullback_score(df: pd.DataFrame) -> float:
         else:
             sc += 1
 
-    # 日柄
+    # 日柄（2〜10日調整が理想）
     if np.isfinite(days):
         if 2 <= days <= 10:
             sc += 4
@@ -167,11 +172,15 @@ def _pullback_score(df: pd.DataFrame) -> float:
 
 
 def _liquidity_score(df: pd.DataFrame) -> float:
+    """
+    流動性 & ボラの適正さ
+    最大 20 点
+    """
     t = _last_val(df["turnover_avg20"])
     v = _last_val(df["vola20"])
     sc = 0.0
 
-    # 流動性
+    # 流動性（20日平均売買代金）
     if np.isfinite(t):
         if t >= 10e8:
             sc += 16
@@ -188,14 +197,15 @@ def _liquidity_score(df: pd.DataFrame) -> float:
     return float(np.clip(sc, 0, 20))
 
 
-# ============================================================
-# Public API
-# ============================================================
 def score_stock(hist: pd.DataFrame) -> float | None:
     """
-    銘柄のCoreスコア（0〜100）
-    Aランク: score >= 80
-    Bランク: 70 <= score < 80
+    銘柄の Core スコア（0〜100）
+    - Aランク: score >= 80
+    - Bランク: 70 <= score < 80
+
+    main.py 側で：
+      - 地合い / セクター / Momentum / RR などを上乗せ
+      - 最終の候補抽出・RRフィルタ（>=1.8R）を実施
     """
     if hist is None or len(hist) < 60:
         return None
@@ -212,3 +222,104 @@ def score_stock(hist: pd.DataFrame) -> float | None:
 
     score = float(raw / 60.0 * 100.0)  # 0〜100にスケール
     return float(np.clip(score, 0, 100))
+
+
+# ============================================================
+# IN目安 & TP/SL 補助（今後の拡張用）
+# ============================================================
+def calc_vola20(hist: pd.DataFrame) -> float:
+    """
+    20日ボラ（標準偏差）だけ単体で欲しいとき用。
+    """
+    if hist is None or len(hist) < 21:
+        return np.nan
+    close = hist["Close"].astype(float)
+    ret = close.pct_change(fill_method=None)
+    vola20 = ret.rolling(20).std().iloc[-1]
+    try:
+        return float(vola20)
+    except Exception:
+        return np.nan
+
+
+def _classify_vola(vola: float) -> str:
+    if not np.isfinite(vola):
+        return "mid"
+    if vola < 0.02:
+        return "low"
+    if vola > 0.06:
+        return "high"
+    return "mid"
+
+
+def calc_inout_for_stock(hist: pd.DataFrame):
+    """
+    INランク + 利確/損切り目安（％）
+    （※ 今は使っていないが、将来の詳細レポート用に残しておく）
+
+    戻り値:
+      in_rank: "強IN" / "通常IN" / "弱めIN" / "様子見"
+      tp_pct: 利確目安（+◯％）
+      sl_pct: 損切り目安（-◯％）
+    """
+    if hist is None or len(hist) < 40:
+        return "様子見", 8.0, 4.0
+
+    df = _add_indicators(hist)
+
+    close_last = _last_val(df["Close"])
+    ma20_last = _last_val(df["ma20"])
+    rsi_last = _last_val(df["rsi14"])
+    off_last = _last_val(df["off_high_pct"])
+    vola = calc_vola20(hist)
+    vola_class = _classify_vola(vola)
+
+    # --- ベースINランク ---
+    rank = "様子見"
+
+    if (
+        np.isfinite(rsi_last)
+        and np.isfinite(ma20_last)
+        and np.isfinite(close_last)
+        and np.isfinite(off_last)
+    ):
+        # 理想押し目
+        if 30 <= rsi_last <= 45 and -18 <= off_last <= -5 and close_last >= ma20_last * 0.97:
+            rank = "強IN"
+        # 普通の押し目 or トレンド押し
+        elif 40 <= rsi_last <= 60 and -15 <= off_last <= 5 and close_last >= ma20_last * 0.99:
+            rank = "通常IN"
+        # 少し無理する押し目
+        elif 25 <= rsi_last < 30 or 60 < rsi_last <= 70:
+            rank = "弱めIN"
+        else:
+            rank = "様子見"
+    else:
+        rank = "様子見"
+
+    # --- TP/SLベース（％表記） ---
+    tp = 8.0   # +8%
+    sl = 4.0   # -4%
+
+    if vola_class == "low":
+        tp = 6.0
+        sl = 3.0
+    elif vola_class == "high":
+        tp = 12.0
+        sl = 6.0
+
+    # ランクに応じた微調整
+    if rank == "強IN":
+        tp *= 1.1    # ちょい伸ばす
+        sl *= 0.9    # ちょい浅く
+    elif rank == "弱めIN":
+        tp *= 0.9
+        sl *= 0.9    # 損切りも少し浅く
+    elif rank == "様子見":
+        tp *= 0.8
+        sl *= 0.8
+
+    tp = float(np.clip(tp, 4.0, 15.0))
+    sl = float(np.clip(sl, 2.0, 8.0))
+
+    return rank, tp, sl
