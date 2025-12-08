@@ -1,24 +1,72 @@
 from __future__ import annotations
-from datetime import datetime, timezone, timedelta
+
+from datetime import datetime, timedelta, timezone
 
 
-def jst_now() -> datetime:
-    """
-    現在時刻を JST で返す。
-    """
-    return datetime.now(timezone(timedelta(hours=9)))
-
-
+# ============================================================
+# JST日付文字列（例: "2025-12-05"）
+# ============================================================
 def jst_today_str() -> str:
     """
-    今日の日付(YYYY-MM-DD) を JST 基準で返す。
-    例: "2025-12-08"
+    Japan Standard Time ベースの「YYYY-MM-DD」文字列を返す。
     """
-    return jst_now().strftime("%Y-%m-%d")
+    dt = datetime.now(timezone(timedelta(hours=9)))
+    return dt.strftime("%Y-%m-%d")
 
 
+# ============================================================
+# JST日付（dateオブジェクト）
+# ============================================================
 def jst_today_date():
     """
-    今日の日付を date 型で返す。
+    JSTベースの date オブジェクトを返す。
     """
-    return jst_now().date()
+    dt = datetime.now(timezone(timedelta(hours=9)))
+    return dt.date()
+
+
+# ============================================================
+# 安全なfloat化（NoneやNaN対応）
+# ============================================================
+def safe_float(v, default=0.0) -> float:
+    """
+    NaNやNoneが来ても安全にfloatに変換する。
+    """
+    try:
+        f = float(v)
+        if f != f:  # NaNチェック
+            return default
+        return f
+    except Exception:
+        return default
+
+
+# ============================================================
+# INTフォーマット（例: 1234567 → "1,234,567"）
+# ============================================================
+def fmt_int(v) -> str:
+    """
+    金額や株数などINTをカンマ区切りで返す。
+    """
+    try:
+        return f"{int(v):,}"
+    except Exception:
+        return "-"
+
+
+# ============================================================
+# %表示（例: 0.053 → "+5.3%"）
+# ============================================================
+def fmt_pct(v) -> str:
+    """
+    0.0123 → "+1.2%"
+    -0.045 → "-4.5%"
+    None/NaN → "-"
+    """
+    try:
+        f = float(v)
+        if f != f:  # NaN
+            return "-"
+        return f"{f*100:+.1f}%"
+    except Exception:
+        return "-"
