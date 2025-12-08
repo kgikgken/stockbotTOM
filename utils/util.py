@@ -1,103 +1,112 @@
 from __future__ import annotations
 
+"""
+共通ユーティリティ
+
+※ここは「依存される側」なので慎重に。
+　副作用ゼロ・日付関連・軽量関数だけ置く。
+"""
+
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 
 # ============================================================
-# JST
+# JST 今日の日付（文字列）
 # ============================================================
-JST = timezone(timedelta(hours=9))
+def jst_now() -> datetime:
+    """JST の現在時刻"""
+    return datetime.now(timezone(timedelta(hours=9)))
 
 
-# ============================================================
-# 今日の日付 (YYYY-MM-DD)
-# ============================================================
 def jst_today_str() -> str:
     """
-    例: "2025-12-08"
-    日報タイトルやLINE通知の日付用。
-    Cloudflare/GitHub ActionsはUTCのため必須。
+    📅 2025-12-08 みたいな形式
+    ※日報タイトルで使う
     """
-    return datetime.now(JST).date().strftime("%Y-%m-%d")
+    d = jst_now()
+    return d.strftime("%Y-%m-%d")
 
 
-def jst_today_datetime() -> datetime:
-    """
-    JSTの現在日時を返す (datetime)
-    """
-    return datetime.now(JST)
+def jst_today_date():
+    """date オブジェクト（後で地合い補正などで使う）"""
+    return jst_now().date()
 
 
 # ============================================================
-# フォーマットヘルパー
+# ENV 読み取り（安全ラッパー）
 # ============================================================
-def fmt_price(v: float, digits: int = 1) -> str:
+def env(name: str, default: str = "") -> str:
     """
-    数値を小数付きで整形
-    digits=1 → 1381.0
+    環境変数読み取り（None 時は default）
+    ※Worker／Github Actions 両対応
+    """
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip()
+
+
+# ============================================================
+# 数値 utilities
+# ============================================================
+def clamp(v: float, lo: float, hi: float) -> float:
+    """lo <= v <= hi に収める"""
+    try:
+        return max(lo, min(hi, float(v)))
+    except Exception:
+        return lo
+
+
+def to_int(v: float, default: int = 0) -> int:
+    """安全に int 化"""
+    try:
+        return int(round(v))
+    except Exception:
+        return default
+
+
+# ============================================================
+# フォーマット utilities
+# ============================================================
+def fmt_percent(x: float) -> str:
+    """
+    0.085 → '+8.5%'
+    -0.022 → '-2.2%'
     """
     try:
-        return f"{float(v):.{digits}f}"
+        pct = float(x) * 100
+        if pct >= 0:
+            return f"+{pct:.1f}%"
+        return f"{pct:.1f}%"
     except Exception:
-        return "-"
+        return "+0.0%"
 
 
-def fmt_int(v: float) -> str:
+def fmt_price(x: float) -> str:
+    """価格を小数1桁に統一"""
+    try:
+        return f"{float(x):.1f}"
+    except Exception:
+        return "0.0"
+
+
+# ============================================================
+# RR 判定
+# ============================================================
+def rr_comment(rr: float) -> str:
     """
-    数値を整数フォーマット
+    RR の定性的評価（LINEの説明用）
     """
     try:
-        return f"{int(round(v)):,}"
+        r = float(rr)
     except Exception:
-        return "-"
-
-
-def fmt_pct(v: float, digits: int = 1) -> str:
-    """
-    0.1234 → "+12.3%"
-    -0.055 → "-5.5%"
-    """
-    try:
-        return f"{v*100:+.{digits}f}%"
-    except Exception:
-        return "-"
-
-
-# ============================================================
-# 環境変数
-# ============================================================
-def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
-    """
-    GitHub Actions / Cloudflare Worker の環境変数取得
-    テスト時も default が使えるようにしてある。
-    """
-    return os.getenv(name, default)
-
-
-# ============================================================
-# LINE送信用の安全チェック
-# ============================================================
-def safe_text(text: str) -> str:
-    """
-    LINE用テキストで危険な制御文字や None を安全化。
-    None → ""
-    """
-    if text is None:
         return ""
-    return str(text).replace("\x00", "")
 
-
-# ============================================================
-# デバッグ用ログ
-# ============================================================
-def log(msg: str) -> None:
-    """
-    GitHub Actions / Cloudflare のログに出す。
-    ローカルだと print
-    """
-    try:
-        print(msg, flush=True)
-    except Exception:
-        pass
+    if r >= 3.0:
+        return "RR非常に高い（本命波）"
+    if r >= 2.0:
+        return "RR高い（狙い目）"
+    if r >= 1.5:
+        return "RR普通（状況次第）"
+    return "RR低い（除外推奨）"
