@@ -30,6 +30,8 @@ SCREENING_TOP_N = 10
 MAX_FINAL_STOCKS = 3
 EARNINGS_EXCLUDE_DAYS = 3
 
+SWAP_RR_DIFF_THRESHOLD = 0.8  # 新規候補とのRR差がこれ以上なら乗り換え候補
+
 
 # ============================================================
 # 日付関連
@@ -145,8 +147,6 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
     else:
         min_score = 82.0
 
-    sector_strength = dict(top_sectors_5d())
-
     cands: List[Dict] = []
 
     for _, row in df.iterrows():
@@ -202,15 +202,73 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
             "entry_type": entry_type
         })
 
-    cands.sort(key=lambda x: x["rr_value"], reverse=True)
+    # RR優先、同一RRならスコア順
+    cands.sort(key=lambda x: (x["rr_value"], x["score"]), reverse=True)
     return cands[:MAX_FINAL_STOCKS]
+
+
+# ============================================================
+# RRスワップ候補
+# ============================================================
+def find_swap_candidates(
+    pos_df: Optional[pd.DataFrame],
+    mkt_score: int,
+    core_list: List[Dict]
+) -> List[Dict]:
+    if pos_df is None or pos_df.empty:
+        return []
+
+    if not core_list:
+        return []
+
+    results: List[Dict] = []
+
+    for _, row in pos_df.iterrows():
+        ticker = str(row.get("ticker", "")).strip()
+        if not ticker:
+            continue
+
+        hist = fetch_history(ticker)
+        if hist is None or len(hist) < 60:
+            continue
+
+        rr_pos_info = compute_tp_sl_rr(hist, mkt_score)
+        rr_pos = float(rr_pos_info.get("rr", 0.0))
+
+        best_new = None
+        best_diff = 0.0
+
+        for c in core_list:
+            rr_new = float(c.get("rr_value", 0.0))
+            diff = rr_new - rr_pos
+            if diff > best_diff:
+                best_diff = diff
+                best_new = c
+
+        if best_new is not None and best_diff >= SWAP_RR_DIFF_THRESHOLD:
+            results.append({
+                "from_ticker": ticker,
+                "from_rr": rr_pos,
+                "to_ticker": best_new["ticker"],
+                "to_name": best_new["name"],
+                "to_rr": float(best_new["rr_value"]),
+                "diff": best_diff
+            })
+
+    return results
 
 
 # ============================================================
 # Report
 # ============================================================
-def build_report(today_str: str, today: datetime.date, mkt: Dict,
-                 total_asset: float, pos_text: str) -> str:
+def build_report(
+    today_str: str,
+    today: datetime.date,
+    mkt: Dict,
+    total_asset: float,
+    pos_text: str,
+    pos_df: Optional[pd.DataFrame],
+) -> str:
     ms = int(mkt.get("score", 50))
     comment = str(mkt.get("comment", ""))
 
@@ -241,33 +299,53 @@ def build_report(today_str: str, today: datetime.date, mkt: Dict,
         ev = ["- 特になし"]
 
     core = run_screening(today, ms)
-    today_list = [c for c in core if c["entry_type"] == "today"]
-    soon_list = [c for c in core if c["entry_type"] == "soon"]
+    swap_list = find_swap_candidates(pos_df, ms, core)
 
     out: List[str] = []
     out.append(f"📅 {today_str} stockbotTOM 日報\n")
+
+    # 結論
     out.append("◆ 今日の結論")
     out.append(f"- 地合い: {ms}点 ({comment})")
     out.append(f"- レバ: {lev:.1f}倍（{note}）")
     out.append(f"- MAX建玉: 約{max_pos:,}円\n")
 
+    # セクター簡略
     out.append("📈 セクター（5日）")
     out.append(sec_text + "\n")
 
+    # イベント
     out.append("⚠ イベント")
     for e in ev:
         out.append(e)
     out.append("")
 
-    out.append("🏆 Core候補（最大3銘柄）")
+    # Core候補
+    out.append(f"🏆 Core候補（最大{MAX_FINAL_STOCKS}銘柄）")
     if not core:
         out.append("なし\n")
     else:
         for c in core:
-            out.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
+            out.append(f"- {c['ticker']}.T {c['name']} [{c['sector']}]")
             out.append(f"Score:{c['score']:.1f} RR:{c['rr']}")
-            out.append(f"IN:{c['entry']:.1f} TP:{c['tp_pct']*100:.1f}% SL:{c['sl_pct']*100:.1f}%\n")
+            out.append(
+                f"IN:{c['entry']:.1f} TP:{c['tp_pct']*100:.1f}% SL:{c['sl_pct']*100:.1f}%"
+            )
+            out.append("")
 
+    # スワップ候補
+    out.append("🔄 ポジション入れ替え候補（RR差ベース）")
+    if not swap_list:
+        out.append("- 明確な入れ替え候補なし\n")
+    else:
+        for s in swap_list:
+            out.append(
+                f"- {s['from_ticker']} (現RR:{s['from_rr']:.2f}R) → "
+                f"{s['to_ticker']} {s['to_name']} (新RR:{s['to_rr']:.2f}R, 差:+{s['diff']:.2f}R)"
+            )
+        out.append("")
+
+    # ポジション
     out.append("📊 ポジション")
     out.append(pos_text.strip())
     return "\n".join(out)
@@ -303,7 +381,7 @@ def main() -> None:
     if not (np.isfinite(total_asset) and total_asset > 0):
         total_asset = 2_000_000
 
-    report = build_report(today_str, today, mkt, total_asset, pos_text)
+    report = build_report(today_str, today, mkt, total_asset, pos_text, pos_df)
     print(report)
     send_line(report)
 
