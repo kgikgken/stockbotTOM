@@ -302,7 +302,7 @@ def score_candidate(
     atr = calc_atr(hist)
     vola20 = calc_volatility(close, 20)
 
-    # --- Quality（ベースは scoring.score_stock のACDE） ---
+    # --- Quality（ベースは ACDE） ---
     quality_score = float(score_raw)
 
     # --- Setup（短期の形・テクニカル） ---
@@ -362,6 +362,7 @@ def score_candidate(
         regime_score += sector_strength.get(sector, 0.0)
 
     # --- 三階層を合成 ---
+    # Setup > Quality > Regime の順で効くように重みを設定
     wQ = 0.7
     wS = 1.0
     wR = 0.6
@@ -528,7 +529,7 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         if base_score is None or not np.isfinite(base_score):
             continue
 
-        # 地合い連動の最低ライン
+        # 地合い連動の最低ライン（昔の「75 固定」から改善）
         if base_score < min_score:
             continue
 
