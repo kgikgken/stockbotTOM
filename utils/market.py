@@ -1,109 +1,80 @@
 from __future__ import annotations
-import numpy as np
-import pandas as pd
 import yfinance as yf
+import numpy as np
 
 
 # ============================================================
-# 地合いスコア（0〜100）
+# 基本の市場スコア
 # ============================================================
 def calc_market_score() -> dict:
     """
-    日本株スイング向けの「地合いスコア（0〜100）」とコメントを返す。
-    目的：IN/OUTのタイミング & レバレッジ判断
-
-    評価軸：
-    1. TOPIXの短期〜中期トレンド
-    2. RSI（過熱・売られ過ぎ）
-    3. 20日ボラ
-    4. 5日騰落
+    日経平均・TOPIXの5日リターンからベース市場スコアを計算
+    返す dict: {"score": int, "comment": str}
     """
 
-    try:
-        data = yf.Ticker("^TOPX").history(period="120d")
-        if data is None or data.empty:
-            return {"score": 50, "comment": "データ不足（中立）"}
-    except Exception:
-        return {"score": 50, "comment": "データ取得失敗（中立）"}
+    def five_day_chg(symbol: str) -> float:
+        try:
+            df = yf.Ticker(symbol).history(period="5d")
+            if df is None or df.empty:
+                return 0.0
+            return float(df["Close"].iloc[-1] / df["Close"].iloc[0] - 1.0) * 100.0
+        except Exception:
+            return 0.0
 
-    close = data["Close"].astype(float)
+    nk = five_day_chg("^N225")
+    tp = five_day_chg("^TOPX")
 
-    # --- MA ---
-    ma5 = close.rolling(5).mean().iloc[-1]
-    ma20 = close.rolling(20).mean().iloc[-1]
-    ma60 = close.rolling(60).mean().iloc[-1]
+    base = 50.0
+    base += np.clip((nk + tp) / 2.0, -20, 20) * 1.0
 
-    # --- RSI ---
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
-    rsi = (100 - (100 / (1 + rs))).iloc[-1]
+    score = int(np.clip(round(base), 0, 100))
 
-    # --- 20日ボラ ---
-    vola20 = close.pct_change().rolling(20).std().iloc[-1]
-
-    # --- 5日騰落 ---
-    chg5 = (close.iloc[-1] / close.iloc[-6] - 1.0) * 100.0
-
-    score = 50.0
-
-    # MAの並び（強さ）
-    if ma5 > ma20 > ma60:
-        score += 20
-    elif ma5 > ma20:
-        score += 15
-    elif ma20 > ma60:
-        score += 7
-    else:
-        score -= 10
-
-    # RSI（中庸が最高）
-    if 42 <= rsi <= 58:
-        score += 15
-    elif 35 <= rsi <= 65:
-        score += 7
-    else:
-        score -= 8
-
-    # ボラ（低〜適度が良い）
-    if vola20 < 0.012:
-        score -= 4  # ボラ小さすぎ=値幅出ない
-    elif vola20 < 0.03:
-        score += 8
-    elif vola20 < 0.055:
-        score += 2
-    else:
-        score -= 10
-
-    # 5日騰落（地合いの短期強さ）
-    if chg5 > 3:
-        score += 7
-    elif chg5 > 0:
-        score += 3
-    else:
-        score -= 5
-
-    score = float(np.clip(round(score), 0, 100))
-
-    # コメント生成
     if score >= 70:
-        comment = "強め（押し目＋一部ブレイク可）"
+        comment = "地合い強め"
     elif score >= 60:
-        comment = "やや強め（押し目メイン）"
+        comment = "やや強め"
     elif score >= 50:
-        comment = "普通（押し目）"
+        comment = "中立"
     elif score >= 40:
-        comment = "守り（小ロット）"
+        comment = "弱め"
     else:
-        comment = "弱い（最小ロット・様子見）"
+        comment = "弱い"
 
-    return {
-        "score": score,
-        "comment": comment,
-        "rsi": float(rsi),
-        "chg5": float(chg5),
-        "vola20": float(vola20),
-    }
+    return {"score": score, "comment": comment}
+
+
+# ============================================================
+# 半導体情報を加味した強化スコア
+# ============================================================
+def enhance_market_score() -> dict:
+    """
+    日本株の実需を反映するため、calc_market_scoreに
+    ・SOX指数（5日）
+    ・NVDA（5日）
+    をブーストとして追加する
+    """
+
+    mkt = calc_market_score()
+    score = float(mkt.get("score", 50))
+
+    # --- SOX ---
+    try:
+        sox = yf.Ticker("^SOX").history(period="5d")
+        if sox is not None and not sox.empty:
+            sox_chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100.0
+            score += np.clip(sox_chg / 2.0, -5.0, 5.0)
+    except Exception:
+        pass
+
+    # --- NVDA ---
+    try:
+        nvda = yf.Ticker("NVDA").history(period="5d")
+        if nvda is not None and not nvda.empty:
+            nvda_chg = float(nvda["Close"].iloc[-1] / nvda["Close"].iloc[0] - 1.0) * 100.0
+            score += np.clip(nvda_chg / 3.0, -4.0, 4.0)
+    except Exception:
+        pass
+
+    score = int(np.clip(round(score), 0, 100))
+    mkt["score"] = score
+    return mkt
