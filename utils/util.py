@@ -1,146 +1,103 @@
-# utils/util.py
-# ============================================================
-# 共通ユーティリティ
-# ============================================================
-
 from __future__ import annotations
+
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 
 # ============================================================
-# JST 関連
+# JST
 # ============================================================
 JST = timezone(timedelta(hours=9))
 
 
-def jst_now() -> datetime:
-    """JST の現在時刻（datetime）"""
+# ============================================================
+# 今日の日付 (YYYY-MM-DD)
+# ============================================================
+def jst_today_str() -> str:
+    """
+    例: "2025-12-08"
+    日報タイトルやLINE通知の日付用。
+    Cloudflare/GitHub ActionsはUTCのため必須。
+    """
+    return datetime.now(JST).date().strftime("%Y-%m-%d")
+
+
+def jst_today_datetime() -> datetime:
+    """
+    JSTの現在日時を返す (datetime)
+    """
     return datetime.now(JST)
 
 
-def jst_today_date() -> datetime.date:
-    """JST の今日の日付（date）"""
-    return jst_now().date()
-
-
-def jst_today_str(fmt: str = "%Y-%m-%d") -> str:
-    """JST 今日の日付を文字列で返す"""
-    return jst_now().strftime(fmt)
-
-
-def jst_time_str(fmt: str = "%H:%M:%S") -> str:
-    """JST 時刻の文字列"""
-    return jst_now().strftime(fmt)
-
-
 # ============================================================
-# 日付ユーティリティ
+# フォーマットヘルパー
 # ============================================================
-def days_between(d1: datetime.date, d2: datetime.date) -> int:
-    """日付の差（絶対値）"""
+def fmt_price(v: float, digits: int = 1) -> str:
+    """
+    数値を小数付きで整形
+    digits=1 → 1381.0
+    """
     try:
-        return abs((d1 - d2).days)
+        return f"{float(v):.{digits}f}"
     except Exception:
-        return 9999
+        return "-"
 
 
-def parse_date(date_str: str, fmt: str = "%Y-%m-%d") -> Optional[datetime.date]:
-    """安全な日付変換"""
+def fmt_int(v: float) -> str:
+    """
+    数値を整数フォーマット
+    """
     try:
-        return datetime.strptime(date_str, fmt).date()
+        return f"{int(round(v)):,}"
     except Exception:
-        return None
+        return "-"
+
+
+def fmt_pct(v: float, digits: int = 1) -> str:
+    """
+    0.1234 → "+12.3%"
+    -0.055 → "-5.5%"
+    """
+    try:
+        return f"{v*100:+.{digits}f}%"
+    except Exception:
+        return "-"
 
 
 # ============================================================
 # 環境変数
 # ============================================================
-def env(key: str, default: str = "") -> str:
-    """環境変数取得（空なら default）"""
-    v = os.getenv(key, "")
-    return v if v else default
-
-
-# ============================================================
-# 安全な数値変換
-# ============================================================
-def to_float(v, default: float = 0.0) -> float:
-    try:
-        x = float(v)
-        if not (x == x):  # NaN
-            return default
-        return x
-    except Exception:
-        return default
-
-
-def to_int(v, default: int = 0) -> int:
-    try:
-        return int(float(v))
-    except Exception:
-        return default
-
-
-# ============================================================
-# フォーマット系
-# ============================================================
-def fmt_num(v: float, decimals: int = 1) -> str:
-    try:
-        return f"{v:.{decimals}f}"
-    except Exception:
-        return f"{v}"
-
-
-def fmt_pct(v: float, decimals: int = 1) -> str:
-    """0.08 → +8.0%"""
-    try:
-        return f"{v*100:+.{decimals}f}%"
-    except Exception:
-        return "-"
-
-
-def fmt_yen(v: float) -> str:
-    """金額を3桁区切り"""
-    try:
-        return f"{int(round(v)):,}円"
-    except Exception:
-        return "-"
-
-
-# ============================================================
-# Core：RR計算（Rベース）
-# ============================================================
-def calc_rr(tp_pct: float, sl_pct: float) -> float:
+def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     """
-    RR = 期待利益 / 期待損失 = TP% / |SL%|
-    R基準に統一
+    GitHub Actions / Cloudflare Worker の環境変数取得
+    テスト時も default が使えるようにしてある。
+    """
+    return os.getenv(name, default)
+
+
+# ============================================================
+# LINE送信用の安全チェック
+# ============================================================
+def safe_text(text: str) -> str:
+    """
+    LINE用テキストで危険な制御文字や None を安全化。
+    None → ""
+    """
+    if text is None:
+        return ""
+    return str(text).replace("\x00", "")
+
+
+# ============================================================
+# デバッグ用ログ
+# ============================================================
+def log(msg: str) -> None:
+    """
+    GitHub Actions / Cloudflare のログに出す。
+    ローカルだと print
     """
     try:
-        if sl_pct >= 0:
-            return 0.0
-        return float(tp_pct / abs(sl_pct))
-    except Exception:
-        return 0.0
-
-
-# ============================================================
-# テキスト整形
-# ============================================================
-def indent(text: str, spaces: int = 4) -> str:
-    prefix = " " * spaces
-    return "\n".join(prefix + line for line in text.splitlines())
-
-
-# ============================================================
-# 安全ログ
-# ============================================================
-def safe_print(*args, **kwargs):
-    """
-    GitHub Actions で化けないように安全出力
-    """
-    try:
-        print(*args, **kwargs, flush=True)
+        print(msg, flush=True)
     except Exception:
         pass
