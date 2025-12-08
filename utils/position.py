@@ -1,108 +1,133 @@
-# utils/position.py
-# ============================================================
-# ポジション管理 & 資産評価
-# ============================================================
-
 from __future__ import annotations
-import pandas as pd
+
+import os
 import numpy as np
-import yfinance as yf
+import pandas as pd
+from typing import Tuple, List, Dict
 
 
 # ============================================================
-# 価格取得（安全版）
-# ============================================================
-def _fetch_price(ticker: str) -> float:
-    """
-    現値を取得（5日履歴）で終値を返す。
-    板落ちやAPI死んでもNoneを返さずNaNで安全処理。
-    """
-    try:
-        df = yf.download(ticker, period="5d", interval="1d", progress=False)
-        if df is None or df.empty:
-            return np.nan
-        price = df["Close"].iloc[-1]
-        try:
-            return float(price)
-        except Exception:
-            return np.nan
-    except Exception:
-        return np.nan
-
-
-# ============================================================
-# positions.csv 読み込み
+# CSV読み込み
 # ============================================================
 def load_positions(path: str) -> pd.DataFrame:
     """
-    positions.csv を読み込んで返す。
-    空ファイルでもOK（ノーポジ扱い）。
+    positions.csv を読み込む。
+    なければ空 DataFrame を返す。
+    必須列:
+      ticker, avg_price, qty
+    任意列:
+      tp_pct, sl_pct
     """
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["ticker", "avg_price", "qty"])
+
     try:
         df = pd.read_csv(path)
-        if df is None or df.empty:
-            return pd.DataFrame(columns=["ticker", "shares", "price"])
-        # 型を安全に
-        df["ticker"] = df["ticker"].astype(str)
-        df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0).astype(int)
-        df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0).astype(float)
-        return df
     except Exception:
-        return pd.DataFrame(columns=["ticker", "shares", "price"])
+        return pd.DataFrame(columns=["ticker", "avg_price", "qty"])
+
+    # 型安全化
+    df["ticker"] = df.get("ticker", "").astype(str)
+    df["avg_price"] = pd.to_numeric(df.get("avg_price", 0), errors="coerce")
+    df["qty"] = pd.to_numeric(df.get("qty", 0), errors="coerce")
+
+    # TP/SL（無い場合は None）
+    df["tp_pct"] = pd.to_numeric(df.get("tp_pct", np.nan), errors="coerce")
+    df["sl_pct"] = pd.to_numeric(df.get("sl_pct", np.nan), errors="coerce")
+
+    # 無効行 drop
+    df = df.dropna(subset=["avg_price", "qty"], how="any")
+    return df.reset_index(drop=True)
 
 
 # ============================================================
 # ポジション分析
 # ============================================================
-def analyze_positions(df: pd.DataFrame):
+def _fetch_price(ticker: str) -> float:
     """
-    ポジションを解析して:
-        ① 報告文（text）
-        ② 総資産（評価額ベース）
-        ③ 総建玉
-        ④ レバ（推定）
-        ⑤ リスク情報
-    を返す。
+    ticker の現在値を返す。
+    yfinance を避けて main 側から hist の終値を受ける想定だったが、
+    ここは簡易に yf を直読みしてもOK。
+    将来 main で渡す場合は、この関数を削除。
+    """
+    import yfinance as yf
+    try:
+        hist = yf.Ticker(ticker).history(period="2d")
+        if hist is None or len(hist) == 0:
+            return np.nan
+        c = float(hist["Close"].iloc[-1])
+        return float(c)
+    except Exception:
+        return np.nan
+
+
+def analyze_positions(df: pd.DataFrame) -> Tuple[str, float, float, float, Dict]:
+    """
+    ポジションを解析してまとめを返す。
 
     戻り値:
-        (text, total_asset, total_pos, lev, risk_info)
+      pos_text:  テキスト（LINE貼り付け用）
+      total_asset: 総資産（現金＋評価額）
+      total_pos: 建玉総額
+      lev: レバレッジ
+      risk_info: dict（将来用）
     """
+    if df is None or len(df) == 0:
+        # ノーポジション
+        text = "ノーポジション"
+        return text, 2_000_000.0, 0.0, 1.0, {"pos": []}
 
-    if df is None or df.empty:
-        return "ノーポジション", 2_000_000.0, 0.0, 1.0, {}
-
-    lines = []
+    lines: List[str] = []
     total_pos = 0.0
-    total_asset = 0.0
+    total_pl = 0.0
+    detail = []
 
     for _, row in df.iterrows():
         ticker = str(row["ticker"])
-        shares = int(row["shares"])
-        price_in = float(row["price"])
+        avg = float(row["avg_price"])
+        qty = float(row["qty"])
+        tp_pct = row.get("tp_pct", np.nan)
+        sl_pct = row.get("sl_pct", np.nan)
 
-        price_now = _fetch_price(ticker)
-        if not np.isfinite(price_now):
+        now = _fetch_price(ticker)
+        if not np.isfinite(now):
             continue
 
-        pos_val = price_now * shares
-        pnl = (price_now - price_in) / price_in if price_in > 0 else 0.0
-        pnl_pct = pnl * 100.0
+        value = now * qty
+        pos_pl = (now - avg) * qty
+        pl_pct = (now / avg - 1.0) * 100.0
 
-        total_pos += pos_val
-        total_asset += pos_val
+        total_pos += value
+        total_pl += pos_pl
 
-        lines.append(
-            f"- {ticker}: 現値 {price_now:.1f} / 取得 {price_in:.1f} / 損益 {pnl_pct:+.2f}%"
-        )
+        # テキスト
+        line = f"- {ticker}: {now:.1f} / {avg:.1f} / 損益 {pl_pct:+.2f}%"
+        if np.isfinite(tp_pct) and np.isfinite(sl_pct):
+            tp_price = avg * (1.0 + tp_pct)
+            sl_price = avg * (1.0 + sl_pct)
+            line += f"\n    TP:{tp_price:.1f} SL:{sl_price:.1f}"
+        lines.append(line)
 
-    if total_asset <= 0:
-        total_asset = 2_000_000.0
+        detail.append({
+            "ticker": ticker,
+            "avg": avg,
+            "qty": qty,
+            "now": now,
+            "pl_pct": pl_pct,
+            "value": value,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+        })
 
-    # 建玉 = total_pos / total_asset
-    lev = total_pos / total_asset if total_asset > 0 else 1.0
+    # 総資産 = assumed cash + 評価損益
+    est_cash = 2_000_000.0
+    total_asset = est_cash + total_pl
 
-    if not lines:
-        return "ノーポジション", 2_000_000.0, 0.0, 1.0, {}
+    # レバレッジ
+    if total_asset > 0:
+        lev = total_pos / total_asset
+    else:
+        lev = 1.0
 
     text = "\n".join(lines)
-    return text, float(total_asset), float(total_pos), float(lev), {}
+    return text, float(total_asset), float(total_pos), float(lev), {"pos": detail}
