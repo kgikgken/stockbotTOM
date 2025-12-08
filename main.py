@@ -1,5 +1,6 @@
-import requests
+
 import os
+import requests
 
 WORKER_URL = os.getenv("WORKER_URL")
 
@@ -12,3 +13,11 @@ def send_line(text: str):
     except Exception as e:
         print("LINE send error:", e)
         return False
+
+def main():
+    # generate your real report here
+    report_text = "test from GitHub Actions"
+    send_line(report_text)
+
+if __name__ == "__main__":
+    main()
