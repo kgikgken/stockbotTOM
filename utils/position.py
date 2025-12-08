@@ -1,133 +1,156 @@
 from __future__ import annotations
 
 import os
+from typing import Tuple, Dict, List
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
-from typing import Tuple, List, Dict
+import yfinance as yf
+
+from utils.rr import compute_tp_sl_rr
 
 
 # ============================================================
-# CSV読み込み
+# CSV 読み込み
 # ============================================================
 def load_positions(path: str) -> pd.DataFrame:
     """
-    positions.csv を読み込む。
-    なければ空 DataFrame を返す。
+    positions.csv 読み込み
     必須列:
-      ticker, avg_price, qty
+      ticker, size, entry_price
     任意列:
-      tp_pct, sl_pct
+      note
     """
     if not os.path.exists(path):
-        return pd.DataFrame(columns=["ticker", "avg_price", "qty"])
+        return pd.DataFrame(columns=["ticker", "size", "entry_price"])
 
     try:
         df = pd.read_csv(path)
     except Exception:
-        return pd.DataFrame(columns=["ticker", "avg_price", "qty"])
+        return pd.DataFrame(columns=["ticker", "size", "entry_price"])
 
-    # 型安全化
-    df["ticker"] = df.get("ticker", "").astype(str)
-    df["avg_price"] = pd.to_numeric(df.get("avg_price", 0), errors="coerce")
-    df["qty"] = pd.to_numeric(df.get("qty", 0), errors="coerce")
+    # 必須列チェック
+    for col in ["ticker", "size", "entry_price"]:
+        if col not in df.columns:
+            return pd.DataFrame(columns=["ticker", "size", "entry_price"])
 
-    # TP/SL（無い場合は None）
-    df["tp_pct"] = pd.to_numeric(df.get("tp_pct", np.nan), errors="coerce")
-    df["sl_pct"] = pd.to_numeric(df.get("sl_pct", np.nan), errors="coerce")
-
-    # 無効行 drop
-    df = df.dropna(subset=["avg_price", "qty"], how="any")
-    return df.reset_index(drop=True)
+    return df
 
 
 # ============================================================
-# ポジション分析
+# 現値取得
 # ============================================================
-def _fetch_price(ticker: str) -> float:
-    """
-    ticker の現在値を返す。
-    yfinance を避けて main 側から hist の終値を受ける想定だったが、
-    ここは簡易に yf を直読みしてもOK。
-    将来 main で渡す場合は、この関数を削除。
-    """
-    import yfinance as yf
+def fetch_price(ticker: str) -> float:
     try:
-        hist = yf.Ticker(ticker).history(period="2d")
-        if hist is None or len(hist) == 0:
+        df = yf.download(ticker, period="5d", interval="1d", progress=False)
+        if df is None or df.empty:
             return np.nan
-        c = float(hist["Close"].iloc[-1])
-        return float(c)
+        return float(df["Close"].iloc[-1])
     except Exception:
         return np.nan
 
 
-def analyze_positions(df: pd.DataFrame) -> Tuple[str, float, float, float, Dict]:
-    """
-    ポジションを解析してまとめを返す。
+# ============================================================
+# 60日ヒストリー（RR計算用）
+# ============================================================
+def fetch_hist(ticker: str) -> pd.DataFrame | None:
+    try:
+        df = yf.download(ticker, period="60d", interval="1d", progress=False)
+        if df is None or df.empty:
+            return None
+        return df
+    except Exception:
+        return None
 
-    戻り値:
-      pos_text:  テキスト（LINE貼り付け用）
-      total_asset: 総資産（現金＋評価額）
-      total_pos: 建玉総額
-      lev: レバレッジ
-      risk_info: dict（将来用）
+
+# ============================================================
+# RR計算
+# ============================================================
+def analyze_positions(
+    df: pd.DataFrame,
+    mkt_score: int = 50
+) -> Tuple[str, float, float, float, List[Dict]]:
     """
+    positions.csv を解析し、
+    - ポジション要約テキスト
+    - 推定資産（評価額 + 現金）
+    - 総ポジション額
+    - 推定レバレッジ
+    - 詳細RR情報
+    を返す。
+    """
+
+    # 例外：ノーポジ
     if df is None or len(df) == 0:
-        # ノーポジション
         text = "ノーポジション"
-        return text, 2_000_000.0, 0.0, 1.0, {"pos": []}
+        return text, 2_000_000.0, 0.0, 0.0, []
 
-    lines: List[str] = []
-    total_pos = 0.0
-    total_pl = 0.0
-    detail = []
+    details: List[Dict] = []
+    total_value = 0.0
 
+    # 現在価格ベース計算
     for _, row in df.iterrows():
-        ticker = str(row["ticker"])
-        avg = float(row["avg_price"])
-        qty = float(row["qty"])
-        tp_pct = row.get("tp_pct", np.nan)
-        sl_pct = row.get("sl_pct", np.nan)
+        ticker = str(row["ticker"]).strip()
+        size = float(row["size"])
+        entry = float(row["entry_price"])
 
-        now = _fetch_price(ticker)
-        if not np.isfinite(now):
+        price = fetch_price(ticker)
+        if not np.isfinite(price):
             continue
 
-        value = now * qty
-        pos_pl = (now - avg) * qty
-        pl_pct = (now / avg - 1.0) * 100.0
+        # 評価額
+        pos_val = price * size
+        total_value += pos_val
 
-        total_pos += value
-        total_pl += pos_pl
+        # TP/SL/RR算出
+        hist = fetch_hist(ticker)
+        tp_pct, sl_pct, rr = compute_tp_sl_rr(hist, mkt_score)
 
-        # テキスト
-        line = f"- {ticker}: {now:.1f} / {avg:.1f} / 損益 {pl_pct:+.2f}%"
-        if np.isfinite(tp_pct) and np.isfinite(sl_pct):
-            tp_price = avg * (1.0 + tp_pct)
-            sl_price = avg * (1.0 + sl_pct)
-            line += f"\n    TP:{tp_price:.1f} SL:{sl_price:.1f}"
-        lines.append(line)
+        tp_price = entry * (1.0 + tp_pct)
+        sl_price = entry * (1.0 + sl_pct)
 
-        detail.append({
-            "ticker": ticker,
-            "avg": avg,
-            "qty": qty,
-            "now": now,
-            "pl_pct": pl_pct,
-            "value": value,
-            "tp_pct": tp_pct,
-            "sl_pct": sl_pct,
-        })
+        # RR（現値ベース）
+        if price > 0 and sl_price < price:
+            rr_now = (tp_price - price) / (price - sl_price)
+        else:
+            rr_now = rr  # fallback
 
-    # 総資産 = assumed cash + 評価損益
-    est_cash = 2_000_000.0
-    total_asset = est_cash + total_pl
+        details.append(
+            {
+                "ticker": ticker,
+                "size": size,
+                "entry": entry,
+                "price": price,
+                "tp_pct": tp_pct,
+                "sl_pct": sl_pct,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+                "rr": float(rr_now),
+            }
+        )
 
-    # レバレッジ
-    if total_asset > 0:
-        lev = total_pos / total_asset
-    else:
-        lev = 1.0
+    # 推定資産：現金 + 評価額
+    # → 現金は仮定（今は必要最小限のモデル）
+    cash = 500_000.0  # 後でこれを正確に入れる
+    total_asset = total_value + cash
 
-    text = "\n".join(lines)
-    return text, float(total_asset), float(total_pos), float(lev), {"pos": detail}
+    # 総ポジション
+    total_pos = total_value
+
+    # レバレッジ: 総ポジション / 現金
+    lev = total_pos / cash if cash > 0 else 1.0
+
+    # LINE用テキスト
+    lines = []
+    for d in details:
+        lines.append(
+            f"- {d['ticker']}: 現値 {d['price']:.1f} / IN {d['entry']:.1f}"
+        )
+        lines.append(
+            f"    RR:{d['rr']:.2f}R  TP:{d['tp_price']:.1f}  SL:{d['sl_price']:.1f}"
+        )
+        lines.append("")
+
+    text = "\n".join(lines).strip()
+    return text, total_asset, total_pos, lev, details
