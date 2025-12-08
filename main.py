@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,7 +18,7 @@ from utils.rr import compute_tp_sl_rr
 
 
 # ============================================================
-# 基本設定
+# 設定
 # ============================================================
 UNIVERSE_PATH = "universe_jpx.csv"
 POSITIONS_PATH = "positions.csv"
@@ -28,17 +27,19 @@ WORKER_URL = os.getenv("WORKER_URL")
 
 SCREENING_TOP_N = 10
 MAX_FINAL_STOCKS = 3
-
 EARNINGS_EXCLUDE_DAYS = 3
 
 
 # ============================================================
-# 共通ユーティリティ
+# JST
 # ============================================================
 def jst_today_date() -> datetime.date:
     return datetime.now(timezone(timedelta(hours=9))).date()
 
 
+# ============================================================
+# イベント
+# ============================================================
 def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
     if not os.path.exists(path):
         return []
@@ -48,12 +49,12 @@ def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
         return []
 
     events = []
-    for _, r in df.iterrows():
-        d = str(r.get("date", "")).strip()
-        label = str(r.get("label", "")).strip()
-        kind = str(r.get("kind", "")).strip()
-        if d and label:
-            events.append({"date": d, "label": label, "kind": kind})
+    for _, row in df.iterrows():
+        date_str = str(row.get("date", "")).strip()
+        label = str(row.get("label", "")).strip()
+        if not date_str or not label:
+            continue
+        events.append({"date": date_str, "label": label})
     return events
 
 
@@ -73,7 +74,7 @@ def build_event_warnings(today: datetime.date) -> List[str]:
                 when = "本日"
             else:
                 when = "直近"
-            warns.append(f"⚠ {ev['label']}（{when}）: ロット注意")
+            warns.append(f"⚠ {ev['label']}（{when}）: サイズ注意")
     return warns
 
 
@@ -88,13 +89,18 @@ def load_universe(path: str) -> Optional[pd.DataFrame]:
     except Exception:
         return None
 
+    if "ticker" not in df.columns:
+        return None
+
     df["ticker"] = df["ticker"].astype(str)
+
     if "earnings_date" in df.columns:
         df["earnings_date_parsed"] = pd.to_datetime(
             df["earnings_date"], errors="coerce"
         ).dt.date
     else:
         df["earnings_date_parsed"] = pd.NaT
+
     return df
 
 
@@ -102,16 +108,9 @@ def in_earnings_window(row: pd.Series, today: datetime.date) -> bool:
     d = row.get("earnings_date_parsed")
     if d is None or pd.isna(d):
         return False
-    try:
-        delta = abs((d - today).days)
-        return delta <= EARNINGS_EXCLUDE_DAYS
-    except Exception:
-        return False
+    return abs((d - today).days) <= EARNINGS_EXCLUDE_DAYS
 
 
-# ============================================================
-# Data fetch
-# ============================================================
 def fetch_history(ticker: str, period: str = "130d") -> Optional[pd.DataFrame]:
     for _ in range(2):
         try:
@@ -119,13 +118,25 @@ def fetch_history(ticker: str, period: str = "130d") -> Optional[pd.DataFrame]:
             if df is not None and not df.empty:
                 return df
         except Exception:
-            time.sleep(1.0)
+            time.sleep(1)
     return None
 
 
 # ============================================================
-# ダイナミック最低スコア
+# 地合い
 # ============================================================
+def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
+    if mkt_score >= 70:
+        return 1.8, "強気（押し目＋一部ブレイク）"
+    if mkt_score >= 60:
+        return 1.5, "やや強気（押し目）"
+    if mkt_score >= 50:
+        return 1.3, "中立（押し目のみ）"
+    if mkt_score >= 40:
+        return 1.1, "弱含み（ロット控えめ）"
+    return 1.0, "守り"
+
+
 def dynamic_min_score(mkt_score: int) -> float:
     if mkt_score >= 70:
         return 72
@@ -138,55 +149,12 @@ def dynamic_min_score(mkt_score: int) -> float:
     return 82
 
 
-# ============================================================
-# レバ計算
-# ============================================================
-def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
-    if mkt_score >= 70:
-        return 1.8, "強め"
-    if mkt_score >= 60:
-        return 1.5, "やや強め"
-    if mkt_score >= 50:
-        return 1.3, "標準"
-    if mkt_score >= 40:
-        return 1.1, "やや守り"
-    return 1.0, "守り"
-
-
 def calc_max_position(total_asset: float, lev: float) -> int:
     return int(round(total_asset * lev))
 
 
 # ============================================================
-# 市場スコア拡張(SOX/NVDA)
-# ============================================================
-def enhance_market_score() -> Dict:
-    mkt = calc_market_score()
-    score = float(mkt.get("score", 50))
-
-    try:
-        sox = yf.Ticker("^SOX").history(period="5d")
-        if sox is not None and not sox.empty:
-            sox_chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100
-            score += np.clip(sox_chg / 2.0, -5, 5)
-    except Exception:
-        pass
-
-    try:
-        nvda = yf.Ticker("NVDA").history(period="5d")
-        if nvda is not None and not nvda.empty:
-            nvda_chg = float(nvda["Close"].iloc[-1] / nvda["Close"].iloc[0] - 1.0) * 100
-            score += np.clip(nvda_chg / 3.0, -4, 4)
-    except Exception:
-        pass
-
-    score = float(np.clip(round(score), 0, 100))
-    mkt["score"] = int(score)
-    return mkt
-
-
-# ============================================================
-# Screening
+# スクリーニング
 # ============================================================
 def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
     df = load_universe(UNIVERSE_PATH)
@@ -194,8 +162,8 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
         return []
 
     min_score = dynamic_min_score(mkt_score)
-    raw_list = []
 
+    raw = []
     for _, row in df.iterrows():
         ticker = str(row["ticker"]).strip()
         if not ticker:
@@ -205,94 +173,78 @@ def run_screening(today: datetime.date, mkt_score: int) -> List[Dict]:
             continue
 
         name = str(row.get("name", ticker))
-        sector = str(row.get("sector", row.get("industry_big", "不明")))
 
         hist = fetch_history(ticker)
         if hist is None or len(hist) < 60:
             continue
 
         base_score = score_stock(hist)
-        if base_score is None or not np.isfinite(base_score):
+        if base_score is None or base_score < min_score:
             continue
 
-        if base_score < min_score:
+        # RR計算
+        tp_pct, sl_pct, rr_val = compute_tp_sl_rr(hist, mkt_score)
+        if rr_val < 1.5:
             continue
 
-        tp_pct, sl_pct, rr = compute_tp_sl_rr(hist, mkt_score)
-        if rr < 1.50:
-            continue
+        close = float(hist["Close"].iloc[-1])
+        entry = close * 0.995  # 簡易: 現値近辺
 
-        price = float(hist["Close"].iloc[-1])
-        entry = price * 0.995
-        tp_price = entry * (1.0 + tp_pct)
-        sl_price = entry * (1.0 + sl_pct)
+        raw.append({
+            "ticker": ticker,
+            "name": name,
+            "score": base_score,
+            "price": close,
+            "entry": entry,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+            "rr": rr_val,
+        })
 
-        raw_list.append(
-            {
-                "ticker": ticker,
-                "name": name,
-                "sector": sector,
-                "price": price,
-                "score": base_score,
-                "entry": entry,
-                "tp_pct": tp_pct,
-                "sl_pct": sl_pct,
-                "tp_price": tp_price,
-                "sl_price": sl_price,
-                "rr": rr,
-            }
-        )
-
-    raw_list.sort(key=lambda x: (x["rr"], x["score"]), reverse=True)
-    return raw_list[:MAX_FINAL_STOCKS]
+    raw.sort(key=lambda x: x["score"], reverse=True)
+    return raw[:MAX_FINAL_STOCKS]
 
 
 # ============================================================
 # レポート
 # ============================================================
-def build_report(today_str: str, today_date: datetime.date, mkt: Dict, total_asset: float, pos_text: str) -> str:
-    mkt_score = int(mkt.get("score", 50))
-    mkt_comment = str(mkt.get("comment", ""))
+def build_report(today_str: str, today_date: datetime.date,
+                 mkt_score: int, mkt_comment: str,
+                 total_asset: float, pos_text: str) -> str:
 
-    lev, lev_comment = recommend_leverage(mkt_score)
-    est_asset = total_asset if total_asset > 0 else 2_000_000
-    max_pos = calc_max_position(est_asset, lev)
+    rec_lev, lev_comment = recommend_leverage(mkt_score)
+    est = int(round(total_asset))
+    max_pos = calc_max_position(total_asset, rec_lev)
+    warns = build_event_warnings(today_date)
 
-    secs = top_sectors_5d()
-    if secs:
-        sec_text = "\n".join([f"{i+1}. {n} ({c:+.2f}%)" for i, (n, c) in enumerate(secs)])
-    else:
-        sec_text = "データ不足"
-
-    event_lines = build_event_warnings(today_date)
-    if not event_lines:
-        event_lines = ["- 特筆すべきイベントなし"]
-
-    core_list = run_screening(today_date, mkt_score)
+    core = run_screening(today_date, mkt_score)
 
     lines = []
-    lines.append(f"📅 {today_str} stockbotTOM 日報\n")
+    lines.append(f"📅 {today_str} stockbotTOM 日報")
+    lines.append("")
     lines.append("◆ 今日の結論")
-    lines.append(f"- 地合い: {mkt_score}点")
-    lines.append(f"- コメント: {mkt_comment}")
-    lines.append(f"- 推奨レバ: {lev:.1f}倍（{lev_comment}）")
-    lines.append(f"- MAX建玉: 約{max_pos:,}円\n")
-
-    lines.append("📈 セクター（5日）")
-    lines.append(sec_text + "\n")
-
-    lines.append("⚠ イベント")
-    lines.extend(event_lines)
+    lines.append(f"- 地合い: {mkt_score}点（{mkt_comment}）")
+    lines.append(f"- レバ: {rec_lev:.1f}倍（{lev_comment}）")
+    lines.append(f"- MAX建玉: 約{max_pos:,}円")
     lines.append("")
 
-    lines.append(f"🏆 Core候補（最大{MAX_FINAL_STOCKS}銘柄）")
-    if not core_list:
-        lines.append("- レベル相当の候補なし\n")
+    lines.append("⚠ イベント")
+    if not warns:
+        lines.append("- 特筆すべきイベントなし")
     else:
-        for c in core_list:
-            lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
+        for ev in warns:
+            lines.append(ev)
+    lines.append("")
+
+    lines.append(f"🏆 Core候補（最大{MAX_FINAL_STOCKS}）")
+    if not core:
+        lines.append("該当なし")
+    else:
+        for c in core:
+            lines.append(f"- {c['ticker']} {c['name']}")
             lines.append(f"Score:{c['score']:.1f} RR:{c['rr']:.2f}R")
-            lines.append(f"IN:{c['entry']:.1f} TP:+{c['tp_pct']*100:.1f}% SL:{c['sl_pct']*100:.1f}%\n")
+            lines.append(f"IN:{c['entry']:.1f} TP:+{c['tp_pct']*100:.1f}% SL:{c['sl_pct']*100:.1f}%")
+            lines.append("")
 
     lines.append("📊 ポジション")
     lines.append(pos_text.strip())
@@ -301,39 +253,40 @@ def build_report(today_str: str, today_date: datetime.date, mkt: Dict, total_ass
 
 
 # ============================================================
-# LINE送信
+# LINE send
 # ============================================================
-def send_line(text: str) -> None:
+def send_line(text: str):
     if not WORKER_URL:
-        print("[WARN] WORKER_URL未設定")
         print(text)
         return
-
-    chunk = 3800
-    for i in range(0, len(text), chunk):
-        ch = text[i:i+chunk]
+    chunks = [text[i:i+3800] for i in range(0, len(text), 3800)]
+    for ch in chunks:
         try:
-            r = requests.post(WORKER_URL, json={"text": ch}, timeout=10)
-            print("[LINE]", r.status_code)
-        except Exception as e:
-            print("[ERROR LINE]", e)
+            requests.post(WORKER_URL, json={"text": ch}, timeout=15)
+        except Exception:
+            print(ch)
 
 
 # ============================================================
-# Entry
+# main
 # ============================================================
-def main() -> None:
+def main():
     today_str = jst_today_str()
     today_date = jst_today_date()
 
-    mkt = enhance_market_score()
+    m = calc_market_score()
+    mkt_score = int(m.get("score", 50))
+    mkt_comment = str(m.get("comment", ""))
 
     pos_df = load_positions(POSITIONS_PATH)
     pos_text, total_asset, *_ = analyze_positions(pos_df)
-    if total_asset <= 0 or not np.isfinite(total_asset):
-        total_asset = 2_000_000
+    if not np.isfinite(total_asset) or total_asset <= 0:
+        total_asset = 2_000_000.0
 
-    report = build_report(today_str, today_date, mkt, total_asset, pos_text)
+    report = build_report(today_str, today_date,
+                          mkt_score, mkt_comment,
+                          total_asset, pos_text)
+
     print(report)
     send_line(report)
 
