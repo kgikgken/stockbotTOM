@@ -1,124 +1,77 @@
+from __future__ import annotations
+
 import yfinance as yf
 import numpy as np
-from datetime import datetime, timedelta, timezone
 
 
 # ============================================================
-# JST 日付文字列
+# TOPIX + 日経 + マザーズで「実需に近い地合い」を判定
 # ============================================================
 
-JST = timezone(timedelta(hours=9))
-
-def jst_today_str() -> str:
-    """今日の日付を JST で YYYY-MM-DD 形式で返す"""
-    return datetime.now(JST).strftime("%Y-%m-%d")
-
-
-# ============================================================
-# 安全な価格取得
-# ============================================================
-
-def safe_price(ticker: str):
-    """値取得失敗時は None を返す"""
+def fetch_index_change(symbol: str, period: str = "5d") -> float:
+    """
+    指数の5日騰落（%）を返す
+    例: +2.35 % → 2.35
+    """
     try:
-        data = yf.Ticker(ticker).history(period="1d")
-        if len(data) == 0:
-            return None
-        return float(data["Close"].iloc[-1])
-    except:
-        return None
+        df = yf.Ticker(symbol).history(period=period)
+        if df is None or df.empty:
+            return 0.0
+        first = float(df["Close"].iloc[0])
+        last = float(df["Close"].iloc[-1])
+        if first <= 0:
+            return 0.0
+        return (last / first - 1.0) * 100.0
+    except Exception:
+        return 0.0
 
-
-# ============================================================
-# 地合いスコアを計算する
-# ============================================================
 
 def calc_market_score() -> dict:
     """
     地合いスコア（0〜100）
-    内訳スコア付き
+    TOPIX、日経、マザーズを合成し、
+    “スイング視点”の地合いを1値にする。
     """
 
-    score = 50  # 基準（中立）
+    # — 指数の変化率（5日）
+    topix = fetch_index_change("^TOPX")    # TOPIX
+    nikkei = fetch_index_change("^N225")   # 日経平均
+    mothers = fetch_index_change("^MOTHERS")  # マザーズ
 
-    # ============================
-    # ① 日経先物（日中） 
-    # ============================
-    nk = safe_price("^N225")
-    if nk:
-        if nk > 30000:
-            score += 5
-        if nk > 34000:
-            score += 8
-        if nk < 28000:
-            score -= 5
+    # — 配分（経験則）
+    # TOPIX: 現物需給、日本企業の地合い
+    # 日経: 先物要因、海外
+    # Mothers: 成長系感応度
+    raw = (
+        topix * 0.45 +
+        nikkei * 0.35 +
+        mothers * 0.20
+    )
 
-    # ============================
-    # ② NASDAQ先物
-    # ============================
-    try:
-        nd_hist = yf.Ticker("^NDX").history(period="5d")
-        if len(nd_hist) >= 2:
-            pct = (nd_hist["Close"].iloc[-1] - nd_hist["Close"].iloc[-2]) / nd_hist["Close"].iloc[-2]
-            if pct > 0.005:
-                score += 6
-            elif pct < -0.005:
-                score -= 8
-    except:
-        pass
+    # — スコア化（平均0くらいを50点）
+    # 生の変化率 → 50点を中立として変換
+    # +5% ≒ 65点 / +10% ≒ 80点
+    score = 50 + raw * 3.0
+    score = float(np.clip(score, 0, 100))
 
-    # ============================
-    # ③ USDJPY（リスクオン/オフ）
-    # ============================
-    usd = safe_price("JPY=X")
-    if usd:
-        if usd > 150:
-            score -= 8   # 円安すぎ → 日本株マイナス
-        elif usd > 147:
-            score -= 4
-        elif usd < 145:
-            score += 4   # 円高 → グロース有利
-
-    # ============================
-    # ④ VIX（恐怖指数）
-    # ============================
-    vix = safe_price("^VIX")
-    if vix:
-        if vix < 15:
-            score += 6
-        elif vix < 20:
-            score += 2
-        elif vix > 22:
-            score -= 6
-        elif vix > 30:
-            score -= 10
-
-    # ============================
-    # ⑤ 米10年金利
-    # ============================
-    us10y = safe_price("^TNX")
-    if us10y:
-        if us10y > 4.5:
-            score -= 5
-        elif us10y < 4.0:
-            score += 5
-
-    # スコア範囲固定
-    score = int(np.clip(score, 0, 100))
-
-    # コメント作成
-    if score >= 70:
-        comment = "強い地合い（攻め寄り）"
-    elif score >= 55:
-        comment = "やや強め（押し目狙い◯）"
-    elif score >= 45:
-        comment = "中立（慎重に）"
-    elif score >= 35:
-        comment = "やや弱め（ロット控えめ）"
+    # — コメント（心理誘導）
+    if score >= 80:
+        comment = "強い。押し目＋ブレイク両方可"
+    elif score >= 70:
+        comment = "強め。押し目中心に攻め"
+    elif score >= 60:
+        comment = "やや強め。押し目狙い"
+    elif score >= 50:
+        comment = "普通。押し目が適正"
+    elif score >= 40:
+        comment = "弱め。サイズ抑える"
     else:
-        comment = "弱い地合い（無理IN禁止）"
+        comment = "弱い。守り優先"
 
     return {
-        "score": score,
-        "comment": comment
+        "score": int(round(score)),
+        "comment": comment,
+        "topix_5d": round(topix, 2),
+        "nikkei_5d": round(nikkei, 2),
+        "mothers_5d": round(mothers, 2),
     }
