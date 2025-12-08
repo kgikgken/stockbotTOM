@@ -13,6 +13,7 @@ from utils.market import calc_market_score
 from utils.sector import top_sectors_5d
 from utils.position import load_positions, analyze_positions, compute_positions_rr
 from utils import rr
+from utils.scoring import score_stock
 from utils.util import jst_today_str
 
 
@@ -268,7 +269,7 @@ def run_screening(today, mkt_score: int) -> List[Dict]:
         if hist is None or len(hist) < 60:
             continue
 
-        base_score = rr.score_stock(hist)
+        base_score = score_stock(hist)
         if base_score is None or not np.isfinite(base_score):
             continue
 
