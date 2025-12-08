@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +23,6 @@ jobs:
 
       - name: Run script
         env:
-          LINE_TOKEN: ${{ secrets.LINE_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
         run: |
           python main.py
