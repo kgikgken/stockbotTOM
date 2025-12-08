@@ -12,6 +12,10 @@ import pandas as pd
 # 内部ヘルパー：インジケータ計算
 # ============================================================
 def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    hist（yfinanceのhistory）を受け取り、
+    スコアに使う指標を全部載せる。
+    """
     df = df.copy()
 
     close = df["Close"].astype(float)
@@ -30,7 +34,7 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
+    rs = avg_gain / (avg_loss + 1e-9)
     df["rsi14"] = 100 - (100 / (1 + rs))
 
     # 20日ボラ（リターンの標準偏差）
@@ -95,9 +99,9 @@ def _trend_score(df: pd.DataFrame) -> float:
         if s_last >= 0.01:
             sc += 8
         elif s_last > 0:
-            sc += 4 + (s_last / 0.01) * 4
+            sc += 4 + (s_last / 0.01) * 4  # 0〜0.01の間を線形
         else:
-            sc += max(0.0, 4 + s_last * 50)
+            sc += max(0.0, 4 + s_last * 50)  # -0.08でほぼ0
 
     # MAの並び
     if np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last):
@@ -108,13 +112,13 @@ def _trend_score(df: pd.DataFrame) -> float:
         elif ma20_last > ma50_last:
             sc += 2
 
-    # 高値からの位置
+    # 高値からの位置（浅すぎる押しを少し評価）
     off = _last_val(df["off_high_pct"])
     if np.isfinite(off):
         if off >= -5:
             sc += 4
         elif off >= -15:
-            sc += 4 - abs(off + 5) * 0.2
+            sc += 4 - abs(off + 5) * 0.2  # -5〜-15で減点
 
     return float(np.clip(sc, 0, 20))
 
@@ -174,7 +178,7 @@ def _liquidity_score(df: pd.DataFrame) -> float:
         elif t >= 1e8:
             sc += 16 * (t - 1e8) / 9e8
 
-    # ボラ
+    # ボラ（極端でなければ加点）
     if np.isfinite(v):
         if v < 0.02:
             sc += 4
@@ -190,8 +194,8 @@ def _liquidity_score(df: pd.DataFrame) -> float:
 def score_stock(hist: pd.DataFrame) -> float | None:
     """
     銘柄のCoreスコア（0〜100）
-    Aランク: score ≥ 80
-    Bランク: 70 ≤ score < 80
+    Aランク: score >= 80
+    Bランク: 70 <= score < 80
     """
     if hist is None or len(hist) < 60:
         return None
