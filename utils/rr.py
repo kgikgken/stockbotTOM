@@ -1,331 +1,180 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
 
 
 # ============================================================
-# ヘルパー
+# 内部ヘルパー
 # ============================================================
-def _last(series: pd.Series, default: float = np.nan) -> float:
+
+def _safe_last(series: pd.Series, default: float = np.nan) -> float:
     if series is None or len(series) == 0:
         return float(default)
     v = series.iloc[-1]
     try:
-        return float(v)
+        v = float(v)
     except Exception:
         return float(default)
+    if not np.isfinite(v):
+        return float(default)
+    return v
 
 
-def _safe_pct_change(close: pd.Series, window: int = 20) -> pd.Series:
-    # yfinance の仕様変更対策で fill_method=None を明示
-    return close.pct_change(fill_method=None)
+def _calc_vola20(close: pd.Series) -> float:
+    if close is None or len(close) < 21:
+        return float("nan")
+    ret = close.pct_change(fill_method=None)
+    v = ret.rolling(20).std().iloc[-1]
+    try:
+        v = float(v)
+    except Exception:
+        return float("nan")
+    if not np.isfinite(v):
+        return float("nan")
+    return v
 
 
-# ============================================================
-# インジケータ計算
-# ============================================================
-def _add_indicators(hist: pd.DataFrame) -> pd.DataFrame:
-    df = hist.copy()
-
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    open_ = df["Open"].astype(float)
-    vol = df["Volume"].astype(float)
-
-    # MA
-    df["ma5"] = close.rolling(5).mean()
-    df["ma20"] = close.rolling(20).mean()
-    df["ma60"] = close.rolling(60).mean()
-
-    # RSI14
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / (avg_loss.replace(0, np.nan))
-    df["rsi14"] = 100 - (100 / (1 + rs))
-
-    # ボラ20
-    ret = _safe_pct_change(close, 20)
-    df["vola20"] = ret.rolling(20).std()
-
-    # ATR14
-    prev_close = close.shift(1)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df["atr14"] = tr.rolling(14).mean()
-
-    # 60日高値からの位置
-    if len(close) >= 60:
-        rolling_high = close.rolling(60).max()
-        df["off_high_pct"] = (close - rolling_high) / rolling_high * 100.0
-    else:
-        df["off_high_pct"] = np.nan
-
-    # 下ヒゲ比率
-    rng = high - low
-    lower_shadow = np.where(close >= open_, close - low, open_ - low)
-    df["lower_shadow_ratio"] = np.where(rng > 0, lower_shadow / rng, 0.0)
-
-    # 流動性
-    df["turnover"] = close * vol
-    df["turnover_avg20"] = df["turnover"].rolling(20).mean()
-
-    return df
+def _calc_rsi14(close: pd.Series) -> float:
+    if close is None or len(close) <= 15:
+        return float("nan")
+    diff = close.diff()
+    up = diff.clip(lower=0)
+    down = -diff.clip(upper=0)
+    gain = up.rolling(14).mean()
+    loss = down.rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    v = rsi.iloc[-1]
+    try:
+        v = float(v)
+    except Exception:
+        return float("nan")
+    if not np.isfinite(v):
+        return float("nan")
+    return v
 
 
-# ============================================================
-# 各コンポーネント
-# ============================================================
-def _compute_entry_price(df: pd.DataFrame) -> float:
+def _calc_off_high_pct(close: pd.Series) -> float:
+    """60日高値からの位置（％）"""
+    if close is None or len(close) < 60:
+        return float("nan")
+    tail = close.tail(60)
+    rolling_high = float(tail.max())
+    last = float(tail.iloc[-1])
+    if rolling_high <= 0:
+        return float("nan")
+    return (last / rolling_high - 1.0) * 100.0
+
+
+def _base_tp_sl_from_vola(vola: float) -> Tuple[float, float]:
     """
-    3〜10日スイング用のIN価格（安全寄り）
-    - ベースはMA20
-    - 強トレンドでは少し上寄せ
-    - 直近安値を極端に割らない
-    """
-    close = df["Close"].astype(float)
-    price = _last(close)
-    ma5 = _last(df["ma5"], default=price)
-    ma20 = _last(df["ma20"], default=price)
-    atr = _last(df["atr14"], default=0.0)
-
-    if not np.isfinite(price) or price <= 0:
-        return 0.0
-
-    # 基本は MA20 付近
-    entry = ma20 if np.isfinite(ma20) and ma20 > 0 else price
-
-    # ATR で少し下にずらす（押し目を待つ）
-    if np.isfinite(atr) and atr > 0:
-        entry = entry - atr * 0.4
-
-    # 強い上昇トレンドなら少し上寄せ（深追いしすぎない）
-    if price > ma5 > ma20:
-        entry = ma20 + (ma5 - ma20) * 0.35
-
-    # 現値より上になってしまったら、現値少し下に補正
-    if entry > price:
-        entry = price * 0.995
-
-    # 直近安値より極端に下には置かない
-    tail = close.tail(10)
-    if len(tail) > 0:
-        last_low = float(tail.min())
-        if entry < last_low * 0.97:
-            entry = last_low * 0.97
-
-    return float(round(entry, 1))
-
-
-def _base_tp_sl_from_vola(vola20: float) -> (float, float):
-    """
-    ボラからベースのTP/SLを決める（ハイブリッド用）
+    ボラからTP/SLの素を決める（％）
     戻り値: (tp_pct, sl_pct<0)
     """
-    v = abs(vola20) if np.isfinite(vola20) else 0.025
+    if not np.isfinite(vola):
+        # データ不足時のデフォルト
+        return 10.0, -4.0
 
-    if v < 0.015:
-        tp = 0.06
-        sl = -0.03
-    elif v < 0.03:
-        tp = 0.08
-        sl = -0.04
-    elif v < 0.05:
-        tp = 0.10
-        sl = -0.05
-    else:
-        tp = 0.12
-        sl = -0.06
-
-    return float(tp), float(sl)
+    # ざっくり：ボラ小さい → tpもslも小さめ
+    if vola < 0.015:
+        return 7.0, -3.0
+    if vola < 0.03:
+        return 10.0, -4.0
+    if vola < 0.06:
+        return 13.0, -5.0
+    # 超ボラ高
+    return 18.0, -7.0
 
 
-def _adjust_by_market(tp: float, sl: float, mkt_score: int) -> (float, float):
+def _completion_factor(
+    rsi: float,
+    off_high: float,
+    mkt_score: int,
+    vola: float,
+) -> float:
     """
-    地合いでTP/SLを調整
+    波が「ちゃんと予定通り完成するか」の係数。
+    0.6〜1.3 の間にクリップ。
     """
-    t, s = tp, sl
+    f = 1.0
 
-    if mkt_score >= 70:
-        t *= 1.15
-        s *= 0.9
-    elif mkt_score >= 60:
-        t *= 1.05
-    elif mkt_score >= 50:
-        # 中立
-        pass
-    elif mkt_score >= 40:
-        t *= 0.9
-        s *= 0.9
-    else:
-        t *= 0.8
-        s *= 0.85
-
-    return float(t), float(s)
-
-
-def _pullback_factor(df: pd.DataFrame) -> float:
-    """
-    押し目完成度 0.7〜1.4（C = ハイブリッド）
-    """
-    rsi = _last(df["rsi14"])
-    off = _last(df["off_high_pct"])
-    ma20 = _last(df["ma20"])
-    price = _last(df["Close"])
-    shadow = _last(df["lower_shadow_ratio"])
-
-    if not np.isfinite(price) or price <= 0:
-        return 1.0
-
-    score = 0.0
-
-    # RSI
+    # RSI：程よい押し目は完成しやすい
     if np.isfinite(rsi):
-        if 35 <= rsi <= 50:
-            score += 35.0
-        elif 30 <= rsi < 35 or 50 < rsi <= 55:
-            score += 22.0
-        elif 25 <= rsi < 30 or 55 < rsi <= 60:
-            score += 10.0
-        else:
-            score += 4.0
+        if 35 <= rsi <= 55:
+            f += 0.15
+        elif 30 <= rsi < 35 or 55 < rsi <= 60:
+            f += 0.05
+        elif rsi < 25 or rsi > 70:
+            f -= 0.15
 
-    # 高値からの押し
-    if np.isfinite(off):
-        if -18 <= off <= -5:
-            score += 35.0
-        elif -25 <= off < -18 or -5 < off <= 5:
-            score += 20.0
-        else:
-            score += 8.0
+    # 高値からの下げ幅
+    if np.isfinite(off_high):
+        # -20〜-5% の押しは完成しやすい
+        if -20 <= off_high <= -5:
+            f += 0.15
+        # 高値更新直後や深すぎる押しは失敗しやすい
+        elif off_high > 5 or off_high < -30:
+            f -= 0.1
 
-    # MA20 との距離
-    if np.isfinite(ma20) and ma20 > 0:
-        d = (price - ma20) / ma20
-        if -0.03 <= d <= 0.02:
-            score += 20.0
-        elif -0.06 <= d < -0.03 or 0.02 < d <= 0.05:
-            score += 10.0
-        else:
-            score += 3.0
+    # 地合い
+    if mkt_score >= 70:
+        f += 0.1
+    elif mkt_score < 45:
+        f -= 0.15
 
-    # 下ヒゲ
-    if np.isfinite(shadow):
-        if shadow >= 0.5:
-            score += 10.0
-        elif shadow >= 0.3:
-            score += 5.0
-        else:
-            score += 1.0
+    # ボラ：高すぎるとブレやすい / 低すぎてもダマシが増える
+    if np.isfinite(vola):
+        if vola > 0.06:
+            f -= 0.1
+        elif vola < 0.015:
+            f += 0.05
 
-    # 0〜100 → 0.7〜1.4
-    score = float(np.clip(score, 0.0, 100.0))
-    factor = 0.7 + 0.7 * (score / 100.0)
-    return float(np.clip(factor, 0.7, 1.4))
-
-
-def _liquidity_factor(df: pd.DataFrame) -> float:
-    """
-    板厚・流動性による補正 0.8〜1.1
-    """
-    t = _last(df["turnover_avg20"])
-
-    if not np.isfinite(t) or t <= 0:
-        return 0.9
-
-    if t >= 3e9:
-        f = 1.10
-    elif t >= 1e9:
-        f = 1.05
-    elif t >= 2e8:
-        f = 1.00
-    elif t >= 1e8:
-        f = 0.90
-    else:
-        f = 0.80
-
-    return float(f)
-
-
-def _risk_adjust_sl(base_sl: float, pull_factor: float) -> float:
-    """
-    押し目の質で損切りを上下する（浅く / 深く）
-    """
-    s = base_sl
-
-    if pull_factor >= 1.15:
-        s *= 0.85  # いい押し目 → 損切浅く
-    elif pull_factor <= 0.85:
-        s *= 1.20  # 中途半端な押し目 → 損切り深め（外されにくく）
-    else:
-        # そのまま
-        pass
-
-    return float(s)
+    f = float(np.clip(f, 0.6, 1.3))
+    return f
 
 
 # ============================================================
-# メイン：RR計算
+# 公開API
 # ============================================================
-def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int) -> Dict[str, float]:
+
+def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int) -> Tuple[float, float, float]:
     """
-    RRハイブリッド版
+    TP/SL/RR を決める中枢ロジック（％・R）
+
     戻り値:
-      {
-        "entry": entry_price,
-        "tp_pct": tp_pct,   # +0.10 → +10%
-        "sl_pct": sl_pct,   # -0.04 → -4%
-        "rr": rr_value      # TP/|SL|
-      }
+      tp_pct: 利確目安（+◯％）
+      sl_pct: 損切り目安（-◯％）
+      rr:     期待RR（◯R）
     """
     if hist is None or len(hist) < 40:
-        return {"entry": 0.0, "tp_pct": 0.08, "sl_pct": -0.04, "rr": 2.0}
+        # データが少ない銘柄は標準パラメータ
+        return 8.0, -4.0, 2.0
 
-    df = _add_indicators(hist)
+    close = hist["Close"].astype(float)
 
-    close = df["Close"].astype(float)
-    price = _last(close)
-    vola20 = _last(df["vola20"], default=0.025)
+    vola = _calc_vola20(close)
+    rsi = _calc_rsi14(close)
+    off_high = _calc_off_high_pct(close)
 
-    # Entry
-    entry = _compute_entry_price(df)
-    if entry <= 0 and np.isfinite(price) and price > 0:
-        entry = price
+    tp_pct, sl_pct = _base_tp_sl_from_vola(vola)
+    if sl_pct >= 0:
+        sl_pct = -4.0
 
-    # Base TP/SL
-    tp_base, sl_base = _base_tp_sl_from_vola(vola20)
-    tp_mkt, sl_mkt = _adjust_by_market(tp_base, sl_base, int(mkt_score))
+    rr_raw = tp_pct / abs(sl_pct) if abs(sl_pct) > 1e-9 else 2.0
 
-    # Factors
-    f_pull = _pullback_factor(df)
-    f_liq = _liquidity_factor(df)
+    cfac = _completion_factor(
+        rsi=rsi,
+        off_high=off_high,
+        mkt_score=int(mkt_score),
+        vola=vola,
+    )
 
-    # Apply factors
-    tp = tp_mkt * f_pull * f_liq
-    sl = _risk_adjust_sl(sl_mkt, f_pull)
+    rr = rr_raw * cfac
 
-    # 安全バンド
-    tp = float(np.clip(tp, 0.05, 0.20))
-    sl = float(np.clip(sl, -0.08, -0.02))
+    # 軽くクリップ（あまりにバカでかいRRは信用しない）
+    rr = float(np.clip(rr, 1.0, 5.0))
 
-    # RR
-    if not (np.isfinite(tp) and np.isfinite(sl) and sl < 0):
-        rr = 1.5
-    else:
-        rr = float(tp / abs(sl))
-        rr = float(np.clip(rr, 0.8, 4.0))
-
-    return {
-        "entry": float(entry),
-        "tp_pct": tp,
-        "sl_pct": sl,
-        "rr": rr,
-    }
+    return float(tp_pct), float(sl_pct), float(round(rr, 2))
