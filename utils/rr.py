@@ -1,59 +1,102 @@
+from __future__ import annotations
 import numpy as np
 
-# ==============================================
-# 直近終値
-# ==============================================
-def _last_val(series):
+
+def _last(series):
     try:
         return float(series.iloc[-1])
     except Exception:
         return np.nan
 
 
-# ==============================================
-# 20日ボラ（ATRもどき）
-# ==============================================
-def calc_vola20(close):
+def _vola20(close):
     try:
         r = np.log(close / close.shift(1))
-        return float(np.nanstd(r.tail(20)))
+        v = float(np.nanstd(r.tail(20)))
+        return v if np.isfinite(v) else np.nan
     except Exception:
         return np.nan
 
 
+def _base_tp_sl(vola):
+    if not np.isfinite(vola):
+        return 0.06, -0.03
+
+    if vola < 0.015:
+        return 0.06, -0.03
+    elif vola < 0.03:
+        return 0.08, -0.04
+    else:
+        return 0.12, -0.06
+
+
+def _mkt_adjust(tp, sl, mkt_score):
+    ms = int(mkt_score)
+
+    if ms >= 70:
+        tp *= 1.08
+    elif ms >= 60:
+        tp *= 1.04
+    elif ms >= 50:
+        tp *= 1.00
+    elif ms >= 40:
+        tp *= 0.93
+        sl = max(sl, -0.03)
+    else:
+        tp *= 0.88
+        sl = max(sl, -0.03)
+
+    return float(tp), float(sl)
+
+
+def _pullback_coef(hist):
+    close = hist["Close"].astype(float)
+    rsi = close.diff().clip(lower=0).rolling(14).mean() / \
+          (-close.diff().clip(upper=0).rolling(14).mean() + 1e-9)
+    rsi = 100 - 100 / (1 + rsi)
+    r_last = float(rsi.iloc[-1]) if np.isfinite(rsi.iloc[-1]) else 50.0
+
+    if len(close) >= 60:
+        high = float(close.tail(60).max())
+        off = (float(close.iloc[-1]) - high) / high
+    else:
+        off = 0.0
+
+    if 30 <= r_last <= 45 and -0.18 <= off <= -0.05:
+        coef = 1.3
+    elif 40 <= r_last <= 60 and -0.15 <= off <= 0.03:
+        coef = 1.1
+    elif r_last < 30 or r_last > 70:
+        coef = 0.7
+    else:
+        coef = 1.0
+
+    return float(coef)
+
+
+def _entry_price(hist):
+    return _last(hist["Close"])
+
+
 # ==============================================
-# compute_rr (export)
+# export
 # ==============================================
-def compute_rr(hist, mkt_score):
-    """
-    出力: dict
-      rr:         R倍数
-      entry:      エントリー価格
-      tp_pct:     利確%（= profit target）
-      sl_pct:     損切り%（= stop loss）
-    """
+def compute_tp_sl_rr(hist, mkt_score):
     close = hist["Close"]
-    entry = _last_val(close)
-    if not np.isfinite(entry):
-        return dict(rr=0.0, entry=0.0, tp_pct=0.0, sl_pct=0.0)
+    entry = _entry_price(hist)
 
-    vola = calc_vola20(close)
-    if not np.isfinite(vola) or vola <= 0:
-        vola = 0.02
+    vola = _vola20(close)
+    tp, sl = _base_tp_sl(vola)
+    tp, sl = _mkt_adjust(tp, sl, mkt_score)
 
-    # ================
-    # RRロジック
-    # ================
-    # stop = 1 ATR
-    stop_pct = 1.0 * vola
-    # target = 3 ATR
-    target_pct = 3.0 * vola
+    coef = _pullback_coef(hist)
+    tp *= coef
 
-    rr = target_pct / stop_pct if stop_pct > 0 else 0.0
+    rr = tp / abs(sl) if abs(sl) > 1e-9 else 0.0
 
-    return dict(
-        rr=float(rr),
-        entry=float(entry),
-        tp_pct=float(target_pct),
-        sl_pct=float(-stop_pct),
-    )
+    return {
+        "entry": float(entry),
+        "tp_pct": float(tp),
+        "sl_pct": float(sl),
+        "rr": float(rr),
+    }
