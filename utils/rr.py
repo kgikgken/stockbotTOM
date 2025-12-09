@@ -1,5 +1,8 @@
 import numpy as np
 
+# ==============================================
+# 直近終値
+# ==============================================
 def _last_val(series):
     try:
         return float(series.iloc[-1])
@@ -7,6 +10,9 @@ def _last_val(series):
         return np.nan
 
 
+# ==============================================
+# 20日ボラ（ATRもどき）
+# ==============================================
 def calc_vola20(close):
     try:
         r = np.log(close / close.shift(1))
@@ -15,17 +21,17 @@ def calc_vola20(close):
         return np.nan
 
 
-def _mkt_adjust(tp, sl, mkt_score: float):
-    ms = float(mkt_score)
-    # 中立=0とみなす
-    # 想定: 0~100
-    # 50を中立点
-    bias = (ms - 50.0) / 50.0  # -1 ~ +1
-    adj = 1.0 + 0.3 * bias     # 0.7 ~ 1.3
-    return tp * adj, sl * adj
-
-
-def compute_tp_sl_rr(hist, mkt_score: float):
+# ==============================================
+# compute_rr (main.py が呼ぶ関数)
+# ==============================================
+def compute_rr(hist, mkt_score):
+    """
+    出力: dict
+      rr:         R倍数
+      entry:      エントリー価格
+      tp_pct:     利確%（= profit target）
+      sl_pct:     損切り%（= stop loss）
+    """
     close = hist["Close"]
     entry = _last_val(close)
     if not np.isfinite(entry):
@@ -35,15 +41,16 @@ def compute_tp_sl_rr(hist, mkt_score: float):
     if not np.isfinite(vola) or vola <= 0:
         vola = 0.02
 
-    base_sl = 1.0 * vola
-    base_tp = 3.0 * vola
+    # stop = 1 ATR
+    stop_pct = 1.0 * vola
+    # target = 3 ATR
+    target_pct = 3.0 * vola
 
-    tp, sl = _mkt_adjust(base_tp, base_sl, mkt_score)
-    rr = tp / sl if sl > 0 else 0.0
+    rr = target_pct / stop_pct if stop_pct > 0 else 0.0
 
     return dict(
         rr=float(rr),
         entry=float(entry),
-        tp_pct=float(tp),
-        sl_pct=float(-sl),
+        tp_pct=float(target_pct),
+        sl_pct=float(-stop_pct),
     )
