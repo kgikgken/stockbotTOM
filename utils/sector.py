@@ -7,9 +7,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# 1セクターあたり何銘柄を見るか（重くなりすぎないよう制限）
-MAX_TICKERS_PER_SECTOR = 20
 UNIVERSE_PATH = "universe_jpx.csv"
+MAX_TICKERS_PER_SECTOR = 20
 
 
 def _fetch_change_5d(ticker: str) -> float:
@@ -17,19 +16,17 @@ def _fetch_change_5d(ticker: str) -> float:
     try:
         df = yf.Ticker(ticker).history(period="6d")
         if df is None or len(df) < 5:
-            return np.nan
+            return float("nan")
         close = df["Close"].astype(float)
         return float((close.iloc[-1] / close.iloc[0] - 1.0) * 100.0)
     except Exception:
-        return np.nan
+        return float("nan")
 
 
 def top_sectors_5d() -> List[Tuple[str, float]]:
     """
-    universe_jpx.csv を見て、各セクターの代表銘柄を拾い、
-    5日騰落率を算出 → 上位順に返す。
-
-    戻り値: [("銀行業", 3.4), ("電気機器", 1.9), ...]
+    universe_jpx.csv を見てセクターの5日騰落率を計算し、上位順に返す。
+    戻り値: [(sector_name, change_pct), ...]
     """
     if not os.path.exists(UNIVERSE_PATH):
         return []
