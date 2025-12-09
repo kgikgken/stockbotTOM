@@ -1,11 +1,9 @@
 from __future__ import annotations
-import yfinance as yf
+
 import numpy as np
+import yfinance as yf
 
 
-# ============================================================
-# 基本の市場スコア
-# ============================================================
 def calc_market_score() -> dict:
     """
     日経平均・TOPIXの5日リターンからベース市場スコアを計算
@@ -43,21 +41,17 @@ def calc_market_score() -> dict:
     return {"score": score, "comment": comment}
 
 
-# ============================================================
-# 半導体情報を加味した強化スコア
-# ============================================================
 def enhance_market_score() -> dict:
     """
-    日本株の実需を反映するため、calc_market_scoreに
+    calc_market_score に
     ・SOX指数（5日）
     ・NVDA（5日）
-    をブーストとして追加する
+    をブーストとして追加
     """
-
     mkt = calc_market_score()
     score = float(mkt.get("score", 50))
 
-    # --- SOX ---
+    # SOX
     try:
         sox = yf.Ticker("^SOX").history(period="5d")
         if sox is not None and not sox.empty:
@@ -66,7 +60,7 @@ def enhance_market_score() -> dict:
     except Exception:
         pass
 
-    # --- NVDA ---
+    # NVDA
     try:
         nvda = yf.Ticker("NVDA").history(period="5d")
         if nvda is not None and not nvda.empty:
