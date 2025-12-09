@@ -12,23 +12,17 @@ import pandas as pd
 # ============================================================
 
 def jst_now() -> datetime:
-    """
-    JST 現在時刻
-    """
+    """JST 現在時刻"""
     return datetime.now(timezone(timedelta(hours=9)))
 
 
 def jst_today_str() -> str:
-    """
-    今日の日付文字列 (YYYY-MM-DD JST)
-    """
+    """今日の日付文字列 (YYYY-MM-DD JST)"""
     return jst_now().strftime("%Y-%m-%d")
 
 
 def jst_today_date() -> datetime.date:
-    """
-    今日の date (JST)
-    """
+    """今日の date (JST)"""
     return jst_now().date()
 
 
@@ -51,9 +45,7 @@ def safe_float(x, default: float = np.nan) -> float:
 # ============================================================
 
 def ensure_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """
-    None や invalid の場合でも空DF返す
-    """
+    """None や invalid の場合でも空DF返す"""
     if df is None:
         return pd.DataFrame()
     try:
@@ -69,9 +61,7 @@ def ensure_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
 # ============================================================
 
 def mean_valid(values, default=np.nan) -> float:
-    """
-    NaNなど無視して平均
-    """
+    """NaNなど無視して平均"""
     try:
         arr = [float(x) for x in values if np.isfinite(float(x))]
         if len(arr) == 0:
