@@ -137,7 +137,7 @@ def main():
     today_str = jst_today_str()
 
     mkt_score = calc_market_score()
-    pos_df = load_positions()
+    pos_df = load_positions("positions.csv")
     pos_text, total_asset = analyze_positions(pos_df)
 
     report = build_report(today_str, today, mkt_score, pos_text)
