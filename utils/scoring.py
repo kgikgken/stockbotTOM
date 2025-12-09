@@ -1,11 +1,10 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
 
-# ======================================
-# helper
-# ======================================
-def _last_val(series):
+def _last_val(series: pd.Series) -> float:
     try:
         return float(series.iloc[-1])
     except Exception:
@@ -43,23 +42,19 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ======================================
-# score
-# ======================================
 def score_stock(ticker: str, hist: pd.DataFrame, uni_row) -> float:
     """
-    ticker = 1332.T
-    hist   = yfinance history()
-    uni_row = universe row (sector, industry)
+    Coreスコア（0〜100）
     """
     if hist is None or len(hist) < 60:
         return 0.0
 
     df = _add_indicators(hist)
 
-    # Trend
-    slope = _last_val(df["ma20"].pct_change(fill_method=None))
     score = 0.0
+
+    # Trend（20MAの傾き）
+    slope = _last_val(df["ma20"].pct_change(fill_method=None))
     if np.isfinite(slope) and slope > 0:
         score += 10
     elif np.isfinite(slope):
@@ -72,7 +67,7 @@ def score_stock(ticker: str, hist: pd.DataFrame, uni_row) -> float:
     elif 20 <= rsi < 30 or 50 < rsi <= 60:
         score += 3
 
-    # off high
+    # 高値からの押し
     off = _last_val(df["off_high_pct"])
     if np.isfinite(off):
         if -15 <= off <= 5:
@@ -80,8 +75,10 @@ def score_stock(ticker: str, hist: pd.DataFrame, uni_row) -> float:
         elif -25 <= off < -15:
             score += 2
 
-    # volume/turnover
-    t = _last_val(df["Close"]) * _last_val(df["Volume"])
+    # 流動性（単純売買代金）
+    price = _last_val(df["Close"])
+    vol = _last_val(df["Volume"])
+    t = price * vol
     if np.isfinite(t):
         if t >= 1e8:
             score += 10
