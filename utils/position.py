@@ -16,7 +16,7 @@ def analyze_positions(df: pd.DataFrame):
     - 総資産推定
     を返す
 
-    必ず (text, asset) の 2値で return する
+    戻り値: (text, asset)
     """
     if df is None or len(df) == 0:
         text = "ノーポジション"
@@ -28,11 +28,11 @@ def analyze_positions(df: pd.DataFrame):
 
     for _, row in df.iterrows():
         ticker = row.get("ticker", "")
-        entry = float(row.get("entry_price", 0))
-        qty = float(row.get("quantity", 0))
-        price = float(row.get("current_price", entry))
-        pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0
+        entry = float(row.get("entry_price", 0) or 0)
+        qty = float(row.get("quantity", 0) or 0)
+        price = float(row.get("current_price", entry) or entry)
 
+        pnl_pct = (price - entry) / entry * 100 if entry > 0 else 0.0
         value = qty * price
         total += value
 
@@ -41,6 +41,6 @@ def analyze_positions(df: pd.DataFrame):
     text = "\n".join(lines) if lines else "ノーポジション"
 
     if total <= 0:
-        total = 2_000_000
+        total = 3_000_000
 
     return text, float(total)
