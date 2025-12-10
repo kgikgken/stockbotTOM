@@ -1,16 +1,13 @@
 from __future__ import annotations
-
-from typing import Optional
-
 import numpy as np
 import pandas as pd
 
 
-def _last_val(series: pd.Series) -> float:
+def _last(series: pd.Series) -> float:
     try:
         return float(series.iloc[-1])
     except Exception:
-        return float("nan")
+        return np.nan
 
 
 def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -19,12 +16,12 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = df["Close"].astype(float)
     high = df["High"].astype(float)
     low = df["Low"].astype(float)
-    open_ = df["Open"].astype(float)
     vol = df["Volume"].astype(float)
 
-    # 移動平均
+    # MA
     df["ma20"] = close.rolling(20).mean()
     df["ma50"] = close.rolling(50).mean()
+    df["ma100"] = close.rolling(100).mean()
 
     # RSI14
     delta = close.diff()
@@ -32,76 +29,104 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss
+    rs = avg_gain / (avg_loss + 1e-9)
     df["rsi14"] = 100 - (100 / (1 + rs))
 
     # 60日高値からの位置
     if len(close) >= 60:
         rolling_high = close.rolling(60).max()
-        df["off_high_pct"] = (close - rolling_high) / rolling_high * 100.0
+        df["off_high_pct"] = (close - rolling_high) / rolling_high * 100
     else:
         df["off_high_pct"] = np.nan
+
+    # 20日ボラ
+    ret = close.pct_change(fill_method=None)
+    df["vola20"] = ret.rolling(20).std()
 
     # 出来高・売買代金
     df["turnover"] = close * vol
     df["turnover_avg20"] = df["turnover"].rolling(20).mean()
 
-    # ボラ（20日）
-    ret = close.pct_change(fill_method=None)
-    df["vola20"] = ret.rolling(20).std()
-
     return df
 
 
-def score_stock(ticker: str, hist: pd.DataFrame, uni_row: Optional[pd.Series] = None) -> float:
+def score_stock(ticker: str, hist: pd.DataFrame, uni_row) -> float | None:
     """
-    銘柄のCoreスコア（0〜100）。
-    trend / pullback / liquidity をミックス。
+    0〜100 の Quality スコア
+    - トレンド
+    - 押し目位置
+    - 流動性
     """
     if hist is None or len(hist) < 60:
-        return 0.0
+        return None
 
     df = _add_indicators(hist)
 
     score = 0.0
 
-    # Trend: 20MAの傾き
-    slope = _last_val(df["ma20"].pct_change(fill_method=None))
-    if np.isfinite(slope):
-        if slope > 0:
-            score += 10.0
-        else:
-            score += max(0.0, 10.0 + slope * 80.0)  # 緩やかな下げは少しだけ減点
+    # トレンド
+    ma20 = df["ma20"]
+    ma50 = df["ma50"]
+    ma100 = df["ma100"]
 
-    # Pullback: RSI + 高値からの押し
-    rsi = _last_val(df["rsi14"])
-    off = _last_val(df["off_high_pct"])
+    c_last = _last(df["Close"])
+    ma20_last = _last(ma20)
+    ma50_last = _last(ma50)
+    ma100_last = _last(ma100)
+
+    if np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last):
+        if c_last > ma20_last > ma50_last:
+            score += 18
+        elif c_last > ma20_last and ma20_last > ma100_last:
+            score += 14
+        elif ma20_last > ma50_last:
+            score += 8
+        else:
+            score += 3
+
+    # RSI
+    rsi = _last(df["rsi14"])
     if np.isfinite(rsi):
-        if 30 <= rsi <= 45:
-            score += 8.0
-        elif 20 <= rsi < 30 or 45 < rsi <= 60:
-            score += 4.0
+        if 35 <= rsi <= 60:
+            score += 14
+        elif 30 <= rsi < 35 or 60 < rsi <= 65:
+            score += 7
+        else:
+            score += 2
+
+    # 高値からの押し目
+    off = _last(df["off_high_pct"])
     if np.isfinite(off):
         if -18 <= off <= -5:
-            score += 8.0
-        elif -25 <= off < -18:
-            score += 4.0
+            score += 16
+        elif -30 <= off < -18:
+            score += 10
+        elif -5 < off <= 5:
+            score += 6
+        else:
+            score += 2
 
-    # Liquidity: 売買代金
-    t = _last_val(df["turnover_avg20"])
-    if np.isfinite(t):
-        if t >= 1e8:
-            score += 12.0
-        elif t >= 2e7:
-            score += 12.0 * (t - 2e7) / (1e8 - 2e7)
+    # 流動性
+    t20 = _last(df["turnover_avg20"])
+    if np.isfinite(t20):
+        if t20 >= 5e8:
+            score += 18
+        elif t20 >= 1e8:
+            score += 10 + 8 * (t20 - 1e8) / (4e8)
+        elif t20 >= 5e7:
+            score += 6
+        else:
+            score += 1
 
-    # Volatility penalty: 極端な低ボラ/高ボラは少し減点
-    vola = _last_val(df["vola20"])
-    if np.isfinite(vola):
-        if vola < 0.01:
-            score -= 2.0
-        elif vola > 0.06:
-            score -= 3.0
+    # ボラ（極端すぎないこと）
+    v20 = _last(df["vola20"])
+    if np.isfinite(v20):
+        if 0.015 <= v20 <= 0.06:
+            score += 14
+        elif 0.01 <= v20 < 0.015 or 0.06 < v20 <= 0.08:
+            score += 8
+        else:
+            score += 3
 
-    score = float(np.clip(score, 0.0, 100.0))
+    score = float(np.clip(score, 0, 100))
     return score
