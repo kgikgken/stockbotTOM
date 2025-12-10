@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import os
 from typing import List, Tuple
 
@@ -14,17 +15,14 @@ def _fetch_change_5d(ticker: str) -> float:
     try:
         df = yf.Ticker(ticker).history(period="6d")
         if df is None or len(df) < 5:
-            return np.nan
+            return float("nan")
         close = df["Close"].astype(float)
         return float((close.iloc[-1] / close.iloc[0] - 1.0) * 100.0)
     except Exception:
-        return np.nan
+        return float("nan")
 
 
 def top_sectors_5d() -> List[Tuple[str, float]]:
-    """
-    return: [("情報・通信業", +3.4), ...]
-    """
     if not os.path.exists(UNIVERSE_PATH):
         return []
 
@@ -46,14 +44,13 @@ def top_sectors_5d() -> List[Tuple[str, float]]:
         tickers = sub["ticker"].astype(str).tolist()
         if not tickers:
             continue
-
         tickers = tickers[:MAX_TICKERS_PER_SECTOR]
+
         chgs = []
         for t in tickers:
-            c = _fetch_change_5d(t)
-            if np.isfinite(c):
-                chgs.append(c)
-
+            chg = _fetch_change_5d(t)
+            if np.isfinite(chg):
+                chgs.append(chg)
         if chgs:
             avg_chg = float(np.mean(chgs))
             sectors.append((name, avg_chg))
