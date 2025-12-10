@@ -15,11 +15,11 @@ def _fetch_change_5d(ticker: str) -> float:
     try:
         df = yf.Ticker(ticker).history(period="6d")
         if df is None or len(df) < 5:
-            return float("nan")
+            return np.nan
         close = df["Close"].astype(float)
         return float((close.iloc[-1] / close.iloc[0] - 1.0) * 100.0)
     except Exception:
-        return float("nan")
+        return np.nan
 
 
 def top_sectors_5d() -> List[Tuple[str, float]]:
@@ -44,6 +44,7 @@ def top_sectors_5d() -> List[Tuple[str, float]]:
         tickers = sub["ticker"].astype(str).tolist()
         if not tickers:
             continue
+
         tickers = tickers[:MAX_TICKERS_PER_SECTOR]
 
         chgs = []
@@ -51,6 +52,7 @@ def top_sectors_5d() -> List[Tuple[str, float]]:
             chg = _fetch_change_5d(t)
             if np.isfinite(chg):
                 chgs.append(chg)
+
         if chgs:
             avg_chg = float(np.mean(chgs))
             sectors.append((name, avg_chg))
