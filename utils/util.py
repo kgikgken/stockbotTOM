@@ -18,7 +18,7 @@ def jst_today_str() -> str:
     return jst_now().strftime("%Y-%m-%d")
 
 
-def jst_today_date() -> datetime.date:
+def jst_today_date():
     return jst_now().date()
 
 
@@ -35,6 +35,9 @@ def safe_float(x, default: float = np.nan) -> float:
         return float(default)
 
 
+# ============================================================
+# DataFrame安全ラップ
+# ============================================================
 def ensure_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if df is None:
         return pd.DataFrame()
@@ -43,6 +46,9 @@ def ensure_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+# ============================================================
+# 有効値平均
+# ============================================================
 def mean_valid(values, default=np.nan) -> float:
     try:
         arr = [float(x) for x in values if np.isfinite(float(x))]
