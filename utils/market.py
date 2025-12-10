@@ -1,7 +1,6 @@
 from __future__ import annotations
-
-import numpy as np
 import yfinance as yf
+import numpy as np
 
 
 def _five_day_chg(symbol: str) -> float:
@@ -16,14 +15,13 @@ def _five_day_chg(symbol: str) -> float:
 
 def calc_market_score() -> dict:
     """
-    日経平均・TOPIXの5日リターンからベース市場スコアを計算。
-    戻り値: {"score": int, "comment": str}
+    日経平均・TOPIX の 5日リターンから 0〜100 のスコア
     """
     nk = _five_day_chg("^N225")
     tp = _five_day_chg("^TOPX")
 
     base = 50.0
-    base += np.clip((nk + tp) / 2.0, -20.0, 20.0) * 1.0
+    base += np.clip((nk + tp) / 2.0, -20.0, 20.0)
 
     score = int(np.clip(round(base), 0, 100))
 
@@ -43,28 +41,25 @@ def calc_market_score() -> dict:
 
 def enhance_market_score() -> dict:
     """
-    calc_market_scoreに
-    ・SOX指数
-    ・NVDA
-    の5日リターンをブーストとして追加。
+    calc_market_score に SOX / NVDA を少しだけ上乗せ
     """
     mkt = calc_market_score()
     score = float(mkt.get("score", 50))
 
     # SOX
     try:
-        df_sox = yf.Ticker("^SOX").history(period="5d")
-        if df_sox is not None and not df_sox.empty:
-            sox_chg = float(df_sox["Close"].iloc[-1] / df_sox["Close"].iloc[0] - 1.0) * 100.0
+        sox = yf.Ticker("^SOX").history(period="5d")
+        if sox is not None and not sox.empty:
+            sox_chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100.0
             score += np.clip(sox_chg / 2.0, -5.0, 5.0)
     except Exception:
         pass
 
     # NVDA
     try:
-        df_nvda = yf.Ticker("NVDA").history(period="5d")
-        if df_nvda is not None and not df_nvda.empty:
-            nvda_chg = float(df_nvda["Close"].iloc[-1] / df_nvda["Close"].iloc[0] - 1.0) * 100.0
+        nvda = yf.Ticker("NVDA").history(period="5d")
+        if nvda is not None and not nvda.empty:
+            nvda_chg = float(nvda["Close"].iloc[-1] / nvda["Close"].iloc[0] - 1.0) * 100.0
             score += np.clip(nvda_chg / 3.0, -4.0, 4.0)
     except Exception:
         pass
