@@ -1,24 +1,23 @@
 from __future__ import annotations
+
 import os
-from typing import List, Tuple
+from typing import List, Dict
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# 1セクターあたり何銘柄を見るか（重くなりすぎないよう制限）
-MAX_TICKERS_PER_SECTOR = 20
-
 UNIVERSE_PATH = "universe_jpx.csv"
+MAX_TICKERS_PER_SECTOR = 20
 
 
 def _fetch_change_5d(ticker: str) -> float:
     """
-    ticker の5日騰落率（％）
+    単純な 5日騰落率（%）
     """
     try:
         df = yf.Ticker(ticker).history(period="6d")
-        if df is None or len(df) < 5:
+        if df is None or df.empty or len(df) < 5:
             return np.nan
         close = df["Close"].astype(float)
         return float((close.iloc[-1] / close.iloc[0] - 1.0) * 100.0)
@@ -26,13 +25,12 @@ def _fetch_change_5d(ticker: str) -> float:
         return np.nan
 
 
-def top_sectors_5d() -> List[Tuple[str, float]]:
+def top_sectors_5d() -> List[Dict[str, float]]:
     """
-    universe_jpx.csv を見て、各セクターの代表銘柄を拾い、
-    5日騰落率を算出 → 上位順に返す。
+    universe_jpx.csv からセクターごとの代表銘柄を取り、
+    5日騰落率の平均を計算して上位順に返す。
 
-    戻り値例:
-        [("銀行業", 3.4), ("電気機器", 1.9), ...]
+    戻り値: [{"sector": str, "chg": float}, ...]
     """
     if not os.path.exists(UNIVERSE_PATH):
         return []
@@ -42,24 +40,19 @@ def top_sectors_5d() -> List[Tuple[str, float]]:
     except Exception:
         return []
 
-    if "sector" in df.columns:
-        sec_col = "sector"
-    elif "industry_big" in df.columns:
-        sec_col = "industry_big"
-    else:
+    if "sector" not in df.columns:
         return []
 
-    sectors: List[Tuple[str, float]] = []
+    ticker_col = "ticker" if "ticker" in df.columns else "code"
 
-    for name, sub in df.groupby(sec_col):
-        tickers = sub.get("ticker") or sub.get("code")
-        if tickers is None:
-            continue
+    sectors: List[Dict[str, float]] = []
 
-        tickers = tickers.astype(str).tolist()
+    for sec_name, sub in df.groupby("sector"):
+        tickers = sub[ticker_col].astype(str).unique().tolist()
         if not tickers:
             continue
 
+        # 多すぎると重いので制限
         tickers = tickers[:MAX_TICKERS_PER_SECTOR]
 
         chgs = []
@@ -70,7 +63,7 @@ def top_sectors_5d() -> List[Tuple[str, float]]:
 
         if chgs:
             avg_chg = float(np.mean(chgs))
-            sectors.append((name, avg_chg))
+            sectors.append({"sector": sec_name, "chg": avg_chg})
 
-    sectors.sort(key=lambda x: x[1], reverse=True)
+    sectors.sort(key=lambda x: x["chg"], reverse=True)
     return sectors
