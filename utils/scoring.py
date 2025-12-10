@@ -4,16 +4,24 @@ import pandas as pd
 
 
 # ============================================================
-# 内部ヘルパ
+# 内部ヘルパー
 # ============================================================
+
 def _last_val(series: pd.Series) -> float:
+    if series is None or len(series) == 0:
+        return np.nan
+    v = series.iloc[-1]
     try:
-        return float(series.iloc[-1])
+        return float(v)
     except Exception:
         return np.nan
 
 
 def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    yfinance の history を受け取り、
+    スコア&IN判定に使う指標を全部載せる。
+    """
     df = df.copy()
 
     close = df["Close"].astype(float)
@@ -22,7 +30,8 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     open_ = df["Open"].astype(float)
     vol = df["Volume"].astype(float)
 
-    # MA
+    # 移動平均
+    df["ma5"] = close.rolling(5).mean()
     df["ma20"] = close.rolling(20).mean()
     df["ma50"] = close.rolling(50).mean()
 
@@ -32,10 +41,10 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
+    rs = avg_gain / avg_loss
     df["rsi14"] = 100 - (100 / (1 + rs))
 
-    # 20日ボラ
+    # 20日ボラ（リターンの標準偏差）
     ret = close.pct_change(fill_method=None)
     df["vola20"] = ret.rolling(20).std()
 
@@ -43,24 +52,10 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(close) >= 60:
         rolling_high = close.rolling(60).max()
         df["off_high_pct"] = (close - rolling_high) / rolling_high * 100
-        tail = close.tail(60)
-        idx = int(np.argmax(tail.values))
-        days_since_high60 = (len(tail) - 1) - idx
-        df["days_since_high60"] = np.nan
-        df.loc[df.index[-1], "days_since_high60"] = float(days_since_high60)
     else:
         df["off_high_pct"] = np.nan
-        df["days_since_high60"] = np.nan
 
-    # トレンド傾き
-    df["trend_slope20"] = df["ma20"].pct_change(fill_method=None)
-
-    # 下ヒゲ率
-    rng = high - low
-    lower_shadow = np.where(close >= open_, close - low, open_ - low)
-    df["lower_shadow_ratio"] = np.where(rng > 0, lower_shadow / rng, 0.0)
-
-    # 売買代金
+    # 出来高・売買代金
     df["turnover"] = close * vol
     df["turnover_avg20"] = df["turnover"].rolling(20).mean()
 
@@ -68,30 +63,30 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# スコア 0〜100
+# Core Score 0〜100
 # ============================================================
+
 def _trend_score(df: pd.DataFrame) -> float:
     close = df["Close"].astype(float)
     ma20 = df["ma20"]
     ma50 = df["ma50"]
-    slope = df["trend_slope20"]
 
     sc = 0.0
-    s_last = _last_val(slope)
     c_last = _last_val(close)
     ma20_last = _last_val(ma20)
     ma50_last = _last_val(ma50)
 
-    # 傾き
-    if np.isfinite(s_last):
-        if s_last >= 0.01:
+    # MAの傾き
+    slope = _last_val(ma20.pct_change(fill_method=None))
+    if np.isfinite(slope):
+        if slope >= 0.01:
             sc += 8
-        elif s_last > 0:
-            sc += 4 + (s_last / 0.01) * 4
+        elif slope > 0:
+            sc += 4 + (slope / 0.01) * 4
         else:
-            sc += max(0.0, 4 + s_last * 50)
+            sc += max(0.0, 4 + slope * 50)  # -0.08 でほぼ0
 
-    # MA並び
+    # MAの並び
     if np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last):
         if c_last > ma20_last > ma50_last:
             sc += 8
@@ -100,13 +95,15 @@ def _trend_score(df: pd.DataFrame) -> float:
         elif ma20_last > ma50_last:
             sc += 2
 
-    # 高値からの位置（浅い押し目評価）
+    # 高値からの位置（押し目過ぎも少し減点）
     off = _last_val(df["off_high_pct"])
     if np.isfinite(off):
-        if off >= -5:
+        if -5 <= off <= 0:
             sc += 4
-        elif off >= -15:
-            sc += 4 - abs(off + 5) * 0.2
+        elif -15 <= off < -5:
+            sc += 3
+        elif -25 <= off < -15:
+            sc += 1
 
     return float(np.clip(sc, 0, 20))
 
@@ -114,42 +111,24 @@ def _trend_score(df: pd.DataFrame) -> float:
 def _pullback_score(df: pd.DataFrame) -> float:
     rsi = _last_val(df["rsi14"])
     off = _last_val(df["off_high_pct"])
-    days = _last_val(df["days_since_high60"])
-    shadow = _last_val(df["lower_shadow_ratio"])
 
     sc = 0.0
 
     # RSI
     if np.isfinite(rsi):
         if 30 <= rsi <= 45:
-            sc += 7
-        elif 20 <= rsi < 30 or 45 < rsi <= 55:
+            sc += 8
+        elif 45 < rsi <= 60:
             sc += 4
-        else:
-            sc += 1
+        elif 20 <= rsi < 30:
+            sc += 3
 
     # 高値からの下落率
     if np.isfinite(off):
-        if -12 <= off <= -5:
-            sc += 6
-        elif -20 <= off < -12:
-            sc += 3
-        else:
-            sc += 1
-
-    # 日柄
-    if np.isfinite(days):
-        if 2 <= days <= 10:
+        if -18 <= off <= -5:
+            sc += 8
+        elif -25 <= off < -18:
             sc += 4
-        elif 1 <= days < 2 or 10 < days <= 20:
-            sc += 2
-
-    # 下ヒゲ
-    if np.isfinite(shadow):
-        if shadow >= 0.5:
-            sc += 3
-        elif shadow >= 0.3:
-            sc += 1
 
     return float(np.clip(sc, 0, 20))
 
@@ -166,17 +145,18 @@ def _liquidity_score(df: pd.DataFrame) -> float:
         elif t >= 1e8:
             sc += 16 * (t - 1e8) / 9e8
 
-    # ボラ
+    # ボラ（極端でなければ加点）
     if np.isfinite(v):
-        if v < 0.02:
+        if 0.015 <= v <= 0.06:
             sc += 4
-        elif v < 0.06:
-            sc += 4 * (0.06 - v) / 0.04
 
     return float(np.clip(sc, 0, 20))
 
 
 def score_stock(hist: pd.DataFrame) -> float | None:
+    """
+    Coreスコア（0〜100）
+    """
     if hist is None or len(hist) < 60:
         return None
 
@@ -195,8 +175,9 @@ def score_stock(hist: pd.DataFrame) -> float | None:
 
 
 # ============================================================
-# INランク & TP/SL（％）
+# INランク ＆ TP/SL（％）
 # ============================================================
+
 def calc_vola20(hist: pd.DataFrame) -> float:
     if hist is None or len(hist) < 21:
         return np.nan
@@ -221,13 +202,15 @@ def _classify_vola(vola: float) -> str:
 
 def calc_inout_for_stock(hist: pd.DataFrame):
     """
+    INランク + 利確/損切り目安（％）
+
     戻り値:
       in_rank: "強IN" / "通常IN" / "弱めIN" / "様子見"
-      tp_pct: 利確目安（+◯％の数値）
-      sl_pct: 損切り目安（-◯％の絶対値。表示側でマイナスを付ける）
+      tp_pct: 利確目安（+◯％）
+      sl_pct: 損切り目安（-◯％）
     """
     if hist is None or len(hist) < 40:
-        return "様子見", 8.0, 4.0
+        return "様子見", 6.0, -3.0
 
     df = _add_indicators(hist)
 
@@ -238,7 +221,7 @@ def calc_inout_for_stock(hist: pd.DataFrame):
     vola = calc_vola20(hist)
     vola_class = _classify_vola(vola)
 
-    # --- INランク ---
+    # --- ベースINランク ---
     rank = "様子見"
 
     if (
@@ -250,10 +233,10 @@ def calc_inout_for_stock(hist: pd.DataFrame):
         # 理想押し目
         if 30 <= rsi_last <= 45 and -18 <= off_last <= -5 and close_last >= ma20_last * 0.97:
             rank = "強IN"
-        # 通常押し目
+        # 普通の押し目 or トレンド押し
         elif 40 <= rsi_last <= 60 and -15 <= off_last <= 5 and close_last >= ma20_last * 0.99:
             rank = "通常IN"
-        # 少し無理な押し目
+        # 少し無理する押し目
         elif 25 <= rsi_last < 30 or 60 < rsi_last <= 70:
             rank = "弱めIN"
         else:
@@ -261,20 +244,20 @@ def calc_inout_for_stock(hist: pd.DataFrame):
     else:
         rank = "様子見"
 
-    # --- TP/SLベース（％） ---
-    tp = 8.0
-    sl = 4.0
+    # --- TP/SLベース（％表記） ---
+    tp = 8.0   # +8%
+    sl = -4.0  # -4%
 
     if vola_class == "low":
         tp = 6.0
-        sl = 3.0
+        sl = -3.0
     elif vola_class == "high":
         tp = 12.0
-        sl = 6.0
+        sl = -6.0
 
-    # ランクで微調整
+    # ランクに応じた微調整
     if rank == "強IN":
-        tp *= 1.1
+        tp *= 1.2
         sl *= 0.9
     elif rank == "弱めIN":
         tp *= 0.9
@@ -284,6 +267,6 @@ def calc_inout_for_stock(hist: pd.DataFrame):
         sl *= 0.8
 
     tp = float(np.clip(tp, 4.0, 20.0))
-    sl = float(np.clip(sl, 2.0, 10.0))
+    sl = float(np.clip(sl, -10.0, -2.0))
 
     return rank, tp, sl
