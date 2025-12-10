@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .scoring import calc_inout_for_stock
+
 
 def _last_val(series: pd.Series) -> float:
     try:
@@ -11,74 +13,44 @@ def _last_val(series: pd.Series) -> float:
         return np.nan
 
 
-def calc_vola20(close: pd.Series) -> float:
-    try:
-        r = np.log(close / close.shift(1))
-        v = float(np.nanstd(r.tail(20)))
-        if not np.isfinite(v):
-            return np.nan
-        return v
-    except Exception:
-        return np.nan
-
-
-def rr_min_by_market(mkt_score: int) -> float:
-    if mkt_score >= 70:
-        return 1.8
-    if mkt_score >= 60:
-        return 2.0
-    if mkt_score >= 50:
-        return 2.2
-    if mkt_score >= 40:
-        return 2.5
-    return 3.0
-
-
-def compute_rr(hist: pd.DataFrame, mkt_score: int, in_rank: str | None = None) -> dict:
+def compute_rr(hist: pd.DataFrame, mkt_score: int) -> dict:
     """
-    出力: dict
-      rr:     R倍数
-      entry:  エントリー価格
-      tp_pct: 利確% (0.10 = +10%)
-      sl_pct: 損切% (-0.04 = -4%)
+    戻り値:
+      rr:      R倍数
+      entry:   エントリー価格（現値ベース）
+      tp_pct:  利確%（0.15 → +15%）
+      sl_pct:  損切り%（0.05 → -5%）
+      in_rank: "強IN" / "通常IN" / "弱めIN" / "様子見"
     """
     close = hist["Close"].astype(float)
     entry = _last_val(close)
     if not np.isfinite(entry) or entry <= 0:
-        return dict(rr=0.0, entry=0.0, tp_pct=0.0, sl_pct=0.0)
+        return dict(rr=0.0, entry=0.0, tp_pct=0.0, sl_pct=0.0, in_rank="様子見")
 
-    vola = calc_vola20(close)
-    if not np.isfinite(vola) or vola <= 0:
-        vola = 0.02
+    # INランク & TP/SL（％）
+    in_rank, tp_pct, sl_pct = calc_inout_for_stock(hist)  # tp/sl は %（絶対値）
 
-    # ベース: ATR型
-    stop_pct = vola * 1.5
-    tp_pct = vola * 4.0
-
-    # 地合い補正
+    # 地合いでTP/SL微調整
+    # 強い地合い → TP少し伸ばす
     if mkt_score >= 70:
         tp_pct *= 1.2
-    elif mkt_score < 45:
+    elif mkt_score <= 40:
         tp_pct *= 0.9
-        stop_pct *= 0.9
+        sl_pct *= 0.9
 
-    # INランク補正
-    if in_rank == "強IN":
-        tp_pct *= 1.1
-        stop_pct *= 0.9
-    elif in_rank == "弱めIN":
-        tp_pct *= 0.9
-        stop_pct *= 0.9
+    # % → 小数
+    tp_frac = float(tp_pct) / 100.0
+    sl_frac = float(sl_pct) / 100.0
 
-    # クリップ
-    tp_pct = float(np.clip(tp_pct, 0.06, 0.30))
-    stop_pct = float(np.clip(stop_pct, 0.02, 0.12))
+    rr = tp_frac / sl_frac if sl_frac > 0 else 0.0
 
-    rr = tp_pct / stop_pct if stop_pct > 0 else 0.0
+    # 上限・下限クリップ
+    rr = float(np.clip(rr, 0.0, 6.0))
 
     return dict(
-        rr=float(rr),
+        rr=rr,
         entry=float(entry),
-        tp_pct=float(tp_pct),
-        sl_pct=float(-stop_pct),
+        tp_pct=tp_frac,
+        sl_pct=sl_frac,
+        in_rank=in_rank,
     )
