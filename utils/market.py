@@ -5,7 +5,7 @@ import yfinance as yf
 
 
 # ============================================================
-# 基本の市場スコア
+# ベース市場スコア（日経・TOPIX）
 # ============================================================
 def _five_day_chg(symbol: str) -> float:
     try:
@@ -18,10 +18,6 @@ def _five_day_chg(symbol: str) -> float:
 
 
 def calc_market_score() -> dict:
-    """
-    日経平均・TOPIXの5日リターンからベース市場スコアを計算
-    返す dict: {"score": int, "comment": str}
-    """
     nk = _five_day_chg("^N225")
     tp = _five_day_chg("^TOPX")
 
@@ -48,9 +44,6 @@ def calc_market_score() -> dict:
 # 半導体情報を加味した強化スコア
 # ============================================================
 def enhance_market_score() -> dict:
-    """
-    calc_market_scoreに SOX と NVDA の5日リターンをブーストとして追加
-    """
     mkt = calc_market_score()
     score = float(mkt.get("score", 50))
 
