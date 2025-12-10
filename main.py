@@ -1,42 +1,40 @@
 from __future__ import annotations
 
 import os
-import time
-from datetime import datetime, timedelta, timezone, date
-from typing import List, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import requests
 
-from utils.util import jst_today_str, jst_today_date
 from utils.market import enhance_market_score
 from utils.sector import top_sectors_5d
-from utils.position import load_positions, analyze_positions
-from utils.scoring import score_stock
-from utils.rr import compute_rr
+from utils.position import load_positions, analyze_positions_with_rr
+from utils.scoring import score_stock, compute_in_rank
+from utils.rr import compute_rr, rr_min_by_market
+from utils.util import jst_today_str, jst_today_date
+
 
 # ============================================================
-# 基本設定
+# 設定
 # ============================================================
 UNIVERSE_PATH = "universe_jpx.csv"
 POSITIONS_PATH = "positions.csv"
-EVENTS_PATH = "events.csv"      # あれば読む（無ければ無視）
+EVENTS_PATH = "events.csv"
 WORKER_URL = os.getenv("WORKER_URL")
 
+EARNINGS_EXCLUDE_DAYS = 3
 MAX_FINAL_STOCKS = 3
-EARNINGS_EXCLUDE_DAYS = 3       # 決算 ±3日除外
-LIQ_MIN_TURNOVER = 100_000_000  # 最低売買代金（20日平均）
 
 
 # ============================================================
-# イベント関連
+# 日付 / イベント
 # ============================================================
 def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
     if not os.path.exists(path):
         return []
-
     try:
         df = pd.read_csv(path)
     except Exception:
@@ -44,25 +42,23 @@ def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
 
     events: List[Dict[str, str]] = []
     for _, row in df.iterrows():
-        date_str = str(row.get("date", "")).strip()
+        d = str(row.get("date", "")).strip()
         label = str(row.get("label", "")).strip()
         kind = str(row.get("kind", "")).strip()
-        if not date_str or not label:
+        if not d or not label:
             continue
-        events.append({"date": date_str, "label": label, "kind": kind})
+        events.append({"date": d, "label": label, "kind": kind})
     return events
 
 
-def build_event_warnings(today: date) -> List[str]:
+def build_event_warnings(today: datetime.date) -> List[str]:
     events = load_events()
     warns: List[str] = []
-
     for ev in events:
         try:
             d = datetime.strptime(ev["date"], "%Y-%m-%d").date()
         except Exception:
             continue
-
         delta = (d - today).days
         if -1 <= delta <= 2:
             if delta > 0:
@@ -76,19 +72,19 @@ def build_event_warnings(today: date) -> List[str]:
 
 
 # ============================================================
-# Universe / 決算フィルタ
+# Universe ロード & 決算フィルタ
 # ============================================================
 def load_universe(path: str = UNIVERSE_PATH) -> Optional[pd.DataFrame]:
     if not os.path.exists(path):
-        print(f"[WARN] universe file not found: {path}")
+        print(f"[WARN] universe not found: {path}")
         return None
-
     try:
         df = pd.read_csv(path)
     except Exception as e:
         print(f"[WARN] failed to read universe: {e}")
         return None
 
+    # ticker カラム必須
     if "ticker" not in df.columns:
         print("[WARN] universe has no 'ticker' column")
         return None
@@ -106,7 +102,7 @@ def load_universe(path: str = UNIVERSE_PATH) -> Optional[pd.DataFrame]:
     return df
 
 
-def in_earnings_window(row: pd.Series, today: date) -> bool:
+def in_earnings_window(row: pd.Series, today: datetime.date) -> bool:
     d = row.get("earnings_date_parsed")
     if d is None or pd.isna(d):
         return False
@@ -118,49 +114,22 @@ def in_earnings_window(row: pd.Series, today: date) -> bool:
 
 
 # ============================================================
-# スコア / RR の下限（地合い連動）
+# 地合い関連
 # ============================================================
-def min_quality_threshold(mkt_score: int) -> float:
+def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
     if mkt_score >= 70:
-        return 70.0
+        return 2.0, "強気（ブレイク＋押し目）"
     if mkt_score >= 60:
-        return 72.0
-    if mkt_score >= 50:
-        return 75.0
-    if mkt_score >= 40:
-        return 80.0
-    return 82.0
-
-
-def min_rr_threshold(mkt_score: int) -> float:
-    if mkt_score >= 70:
-        return 1.8
-    if mkt_score >= 60:
-        return 2.0
-    if mkt_score >= 50:
-        return 2.2
-    if mkt_score >= 40:
-        return 2.5
-    return 2.8
-
-
-# ============================================================
-# レバレッジ推奨（地合い連動）
-# ============================================================
-def recommend_leverage(mkt_score: int) -> tuple[float, str]:
-    if mkt_score >= 70:
-        return 1.8, "強め（押し目＋一部ブレイク）"
-    if mkt_score >= 60:
-        return 1.6, "やや強め（押し目メイン）"
+        return 1.7, "やや強気（押し目＋一部ブレイク）"
     if mkt_score >= 50:
         return 1.3, "中立（押し目メイン）"
     if mkt_score >= 40:
-        return 1.1, "やや守り（ロット控えめ）"
-    return 1.0, "守り（新規かなり絞る）"
+        return 1.1, "やや守り（新規ロット小さめ）"
+    return 1.0, "守り（新規は最小ロット）"
 
 
 # ============================================================
-# yfinance ラッパ
+# スクリーニング
 # ============================================================
 def fetch_history(ticker: str, period: str = "130d") -> Optional[pd.DataFrame]:
     for attempt in range(2):
@@ -169,31 +138,53 @@ def fetch_history(ticker: str, period: str = "130d") -> Optional[pd.DataFrame]:
             if df is not None and not df.empty:
                 return df
         except Exception as e:
-            print(f"[WARN] fetch history failed {ticker} (try {attempt+1}): {e}")
-        time.sleep(0.8)
+            print(f"[WARN] history fail {ticker} (try {attempt+1}): {e}")
     return None
 
 
-# ============================================================
-# スクリーニング本体
-# ============================================================
-def run_screening(today: date, mkt_score: int) -> List[Dict]:
+def classify_no_candidate_reason(stats: Dict[str, int]) -> str:
+    # stats: {"total":..., "earnings":..., "score":..., "in":..., "rr":...}
+    if stats["total"] == 0:
+        return "ユニバースに銘柄がありません"
+    if stats["earnings"] == stats["total"]:
+        return "決算前後（±3日）が多く、安全のため除外"
+    if stats["score"] == stats["total"]:
+        return "形不足（トレンド未形成）"
+    if stats["in"] == stats["total"]:
+        return "INゾーン未達（押し目前）"
+    if stats["rr"] == stats["total"]:
+        return "RR不足（リスクリワードが足りない）"
+    # 混在パターン
+    if stats["in"] > 0:
+        return "INゾーンに入るまで待つ日"
+    if stats["rr"] > 0:
+        return "RRが伸びきるまで待つ日"
+    return "総合的に期待値が足りない日"
+
+
+def run_screening(
+    today: datetime.date,
+    mkt_score: int,
+) -> Tuple[List[Dict], Optional[str]]:
     df = load_universe(UNIVERSE_PATH)
     if df is None:
-        return []
+        return [], "ユニバースファイル未読込"
 
-    q_min = min_quality_threshold(mkt_score)
-    rr_min = min_rr_threshold(mkt_score)
+    rr_min = rr_min_by_market(mkt_score)
 
-    results: List[Dict] = []
+    stats = {"total": 0, "earnings": 0, "score": 0, "in": 0, "rr": 0}
+
+    candidates: List[Dict] = []
 
     for _, row in df.iterrows():
         ticker = str(row["ticker"]).strip()
         if not ticker:
             continue
+        stats["total"] += 1
 
-        # 決算前後 ±N日 は除外
+        # 決算前後は除外
         if in_earnings_window(row, today):
+            stats["earnings"] += 1
             continue
 
         name = str(row.get("name", ticker))
@@ -203,69 +194,77 @@ def run_screening(today: date, mkt_score: int) -> List[Dict]:
         if hist is None or len(hist) < 60:
             continue
 
-        # 流動性フィルタ
-        if "Close" not in hist.columns or "Volume" not in hist.columns:
-            continue
-        close = hist["Close"].astype(float)
-        vol = hist["Volume"].astype(float)
-        if len(close) < 20:
-            continue
-        turnover = close * vol
-        avg_turnover = float(turnover.rolling(20).mean().iloc[-1])
-        if not np.isfinite(avg_turnover) or avg_turnover < LIQ_MIN_TURNOVER:
+        # ① 形のスコア（0〜100）
+        score = score_stock(hist)
+        if not np.isfinite(score) or score < 60.0:
+            stats["score"] += 1
             continue
 
-        # Quality スコア
-        base_score = score_stock(ticker, hist, row)
-        if base_score is None or not np.isfinite(base_score):
-            continue
-        if base_score < q_min:
+        # ② INゾーン判定
+        in_rank = compute_in_rank(hist)
+        if in_rank == "様子見":
+            stats["in"] += 1
             continue
 
-        # RR / IN
-        rr_info = compute_rr(hist, mkt_score)
-        rr = float(rr_info.get("rr", 0.0))
+        # ③ RR計算
+        rr_info = compute_rr(hist, mkt_score, in_rank=in_rank)
+        rr = float(rr_info["rr"])
         if not np.isfinite(rr) or rr < rr_min:
+            stats["rr"] += 1
             continue
 
-        entry = float(rr_info.get("entry", close.iloc[-1]))
-        tp_pct = float(rr_info.get("tp_pct", 0.0))
-        sl_pct = float(rr_info.get("sl_pct", 0.0))
-
-        results.append(
+        candidates.append(
             {
                 "ticker": ticker,
                 "name": name,
                 "sector": sector,
-                "score": float(base_score),
+                "score": float(score),
+                "in_rank": in_rank,
                 "rr": rr,
-                "entry": entry,
-                "tp_pct": tp_pct,
-                "sl_pct": sl_pct,
+                "entry": float(rr_info["entry"]),
+                "tp_pct": float(rr_info["tp_pct"]),
+                "sl_pct": float(rr_info["sl_pct"]),
             }
         )
 
-    results.sort(key=lambda x: (x["score"], x["rr"]), reverse=True)
-    return results[:MAX_FINAL_STOCKS]
+    candidates.sort(key=lambda x: (x["score"], x["rr"]), reverse=True)
+    top = candidates[:MAX_FINAL_STOCKS]
+
+    if not top:
+        reason = classify_no_candidate_reason(stats)
+    else:
+        reason = None
+
+    return top, reason
 
 
 # ============================================================
-# レポート構築
+# レポート作成
 # ============================================================
 def build_report(
     today_str: str,
-    today_date: date,
+    today_date: datetime.date,
     mkt: Dict,
     pos_text: str,
     total_asset: float,
 ) -> str:
     mkt_score = int(mkt.get("score", 50))
-    mkt_comment = str(mkt.get("comment", "中立"))
+    base_comment = str(mkt.get("comment", ""))
+    # 地合いコメントを少し人間語に
+    if mkt_score >= 70:
+        detail = "買い優勢（ブレイク＋押し目）"
+    elif mkt_score >= 60:
+        detail = "押し目適正（一部ブレイク可）"
+    elif mkt_score >= 50:
+        detail = "中立（押し目メイン）"
+    elif mkt_score >= 40:
+        detail = "弱い押し目（新規小さく）"
+    else:
+        detail = "守り（新規ほぼ見送り）"
 
     lev, lev_comment = recommend_leverage(mkt_score)
-    if not np.isfinite(total_asset) or total_asset <= 0:
-        total_asset = 3_000_000.0
-    max_pos = int(round(total_asset * lev))
+    est_asset = total_asset if np.isfinite(total_asset) and total_asset > 0 else 2_000_000.0
+    max_pos = int(round(est_asset * lev))
 
     # セクター
     secs = top_sectors_5d()
@@ -277,74 +276,82 @@ def build_report(
     event_lines = build_event_warnings(today_date)
 
     # スクリーニング
-    core_list = run_screening(today_date, mkt_score)
+    core_list, no_cand_reason = run_screening(today_date, mkt_score)
 
     lines: List[str] = []
 
+    # 結論
     lines.append(f"📅 {today_str} stockbotTOM 日報")
     lines.append("")
     lines.append("◆ 今日の結論")
-    lines.append(f"- 地合い: {mkt_score}点 ({mkt_comment})")
+    lines.append(f"- 地合い: {mkt_score}点 ({base_comment})")
+    lines.append(f"  ※{detail}")
     lines.append(f"- レバ: {lev:.1f}倍（{lev_comment}）")
     lines.append(f"- MAX建玉: 約{max_pos:,}円")
     lines.append("")
 
+    # セクター
     lines.append("📈 セクター（5日）")
     if sec_lines:
         lines.extend(sec_lines)
     else:
-        lines.append("- データ不足")
+        lines.append("データ不足")
     lines.append("")
 
-    lines.append("⚠ イベント")
+    # イベント
     if event_lines:
-        for ev in event_lines:
-            lines.append(ev)
-    else:
-        lines.append("- 特になし")
-    lines.append("")
+        lines.append("⚠ イベント")
+        for s in event_lines:
+            lines.append(s)
+        lines.append("")
 
+    # Core候補
     lines.append(f"🏆 Core候補（最大{MAX_FINAL_STOCKS}銘柄）")
     if core_list:
         for c in core_list:
+            lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
             lines.append(
-                f"- {c['ticker']} {c['name']} [{c['sector']}]"
+                f"  Score:{c['score']:.1f} RR:{c['rr']:.2f}R IN:{c['in_rank']}"
             )
             lines.append(
-                f"Score:{c['score']:.1f} RR:{c['rr']:.2f}R"
-            )
-            lines.append(
-                f"IN:{c['entry']:.1f} TP:{c['tp_pct']*100:+.1f}% SL:{c['sl_pct']*100:.1f}%"
+                f"  IN:{c['entry']:.1f} "
+                f"TP:+{c['tp_pct']*100:.1f}% "
+                f"SL:{c['sl_pct']*100:.1f}%"
             )
             lines.append("")
     else:
         lines.append("- 該当なし")
+        if no_cand_reason:
+            lines.append("")
+            lines.append("📌 該当なし理由")
+            lines.append(f"- {no_cand_reason}")
         lines.append("")
 
+    # ポジション
     lines.append("📊 ポジション")
-    lines.append(pos_text.strip() if pos_text.strip() else "ノーポジション")
+    lines.append(pos_text.strip() or "ノーポジション")
 
     return "\n".join(lines)
 
 
 # ============================================================
-# LINE送信（分割対応）
+# LINE送信（分割）
 # ============================================================
 def send_line(text: str) -> None:
     if not WORKER_URL:
-        print("[WARN] WORKER_URL 未設定。print のみ。")
+        print("[WARN] WORKER_URL 未設定。printのみ。")
         print(text)
         return
 
     chunk_size = 3900
-    chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+    chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
     for ch in chunks:
         try:
             r = requests.post(WORKER_URL, json={"text": ch}, timeout=15)
-            print("[LINE RESULT]", r.status_code, r.text[:200])
+            print("[LINE RESULT]", r.status_code, r.text)
         except Exception as e:
-            print("[ERROR] LINE送信失敗:", e)
+            print("[ERROR] LINE送信エラー:", e)
             print(ch)
 
 
@@ -355,14 +362,13 @@ def main() -> None:
     today_str = jst_today_str()
     today_date = jst_today_date()
 
-    # 地合い（半導体込み強化版）
+    # 地合い（強化版）
     mkt = enhance_market_score()
 
-    # ポジション
+    # ポジション & 資産 & RR
     pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset = analyze_positions(pos_df)
+    pos_text, total_asset, _rr_map = analyze_positions_with_rr(pos_df, mkt_score=int(mkt.get("score", 50)))
 
-    # レポート作成
     report = build_report(
         today_str=today_str,
         today_date=today_date,
@@ -371,7 +377,6 @@ def main() -> None:
         total_asset=total_asset,
     )
 
-    # ログ & LINE
     print(report)
     send_line(report)
 
