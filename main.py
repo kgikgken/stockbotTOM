@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Tuple
 
 import numpy as np
@@ -27,11 +27,11 @@ WORKER_URL = os.getenv("WORKER_URL")
 # 決算前後の除外
 EARNINGS_EXCLUDE_DAYS = 3
 
-# スクリーニング関連
-MAX_FINAL_STOCKS = 3           # 常に最大3銘柄まで表示
-SCORE_MIN_BASE = 70.0          # Aランク基準
-RR_MIN_BASE = 1.8
-EV_R_MIN_BASE = 0.4            # 期待値 (R)の下限
+# スクリーニング関連（v12.0 ベース）
+MAX_FINAL_STOCKS = 3            # 表示する候補数（常に最大3）
+SCORE_MIN_BASE = 70.0           # Aランク相当の基準スコア
+RR_MIN_BASE = 1.8               # 最低RR
+EV_R_MIN_BASE = 0.4             # 最低期待値（R）
 
 
 # ============================================================
@@ -39,6 +39,7 @@ EV_R_MIN_BASE = 0.4            # 期待値 (R)の下限
 # ============================================================
 
 def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
+    """events.csv を読む（なければ空リスト）"""
     if not os.path.exists(path):
         return []
 
@@ -52,23 +53,21 @@ def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
         date_str = str(row.get("date", "")).strip()
         label = str(row.get("label", "")).strip()
         kind = str(row.get("kind", "")).strip()
-        time_jst = str(row.get("time_jst", "")).strip()
         if not date_str or not label:
             continue
-        events.append(
-            {
-                "date": date_str,
-                "label": label,
-                "kind": kind,
-                "time_jst": time_jst,
-            }
-        )
+        events.append({"date": date_str, "label": label, "kind": kind})
     return events
 
 
 def build_event_warnings(today_date) -> List[str]:
+    """
+    イベントの2日前〜翌日までを表示。
+    出力例:
+    ⚠ FOMC（2025-12-11 JST / 本日）
+    """
     events = load_events()
     warns: List[str] = []
+
     for ev in events:
         try:
             d = datetime.strptime(ev["date"], "%Y-%m-%d").date()
@@ -83,16 +82,13 @@ def build_event_warnings(today_date) -> List[str]:
                 when = "本日"
             else:
                 when = "直近"
-
-            if ev.get("time_jst"):
-                time_part = f"{ev['date']} {ev['time_jst']} JST"
-            else:
-                time_part = f"{ev['date']} JST"
-
-            warns.append(f"⚠ {ev['label']}（{time_part} / {when}）")
+            warns.append(
+                f"⚠ {ev['label']}（{ev['date']} JST / {when}）"
+            )
 
     if not warns:
         warns.append("- 特になし")
+
     return warns
 
 
@@ -101,6 +97,9 @@ def build_event_warnings(today_date) -> List[str]:
 # ============================================================
 
 def filter_earnings(df: pd.DataFrame, today_date) -> pd.DataFrame:
+    """
+    決算 ±EARNINGS_EXCLUDE_DAYS 日の銘柄を除外
+    """
     if "earnings_date" not in df.columns:
         return df
 
@@ -131,6 +130,7 @@ def filter_earnings(df: pd.DataFrame, today_date) -> pd.DataFrame:
 # ============================================================
 
 def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """シンプルATR"""
     if df is None or len(df) <= period + 1:
         return 0.0
 
@@ -154,29 +154,30 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
 def compute_entry_price(close: pd.Series, ma5: float, ma20: float, atr: float) -> float:
     """
     “今日から3〜10日スイングで勝ちやすい” IN価格
-    - ベースは MA20 付近
-    - ATR の 0.5倍だけ下方向にずらす（押し目をしっかり待つ）
-    - 直近安値を割りすぎないように補正
-    - 強トレンド時は少しだけ浅めに
+
+    - ベースは MA20
+    - ATR の 0.5倍だけ下にずらす（押し目を待つ）
+    - 直近安値割れは避ける
+    - 強トレンド(MA5>MA20)はやや浅め
     """
     price = float(close.iloc[-1])
     last_low = float(close.iloc[-5:].min())
 
     target = ma20
 
-    # 押し目方向へ 0.5ATR だけずらす
+    # ATR 分だけ押し目を深く
     if atr and atr > 0:
         target = target - atr * 0.5
 
-    # 強トレンド（5MA > 20MA）の場合は少し浅め
+    # 強い上昇トレンド
     if price > ma5 > ma20:
         target = ma20 + (ma5 - ma20) * 0.3
 
-    # 現値より上に行きすぎない
+    # 現値より上になったら、現値少し下に補正
     if target > price:
         target = price * 0.995
 
-    # 直近安値を大きく割らないよう補正
+    # 直近安値より下に行き過ぎない
     if target < last_low:
         target = last_low * 1.02
 
@@ -188,6 +189,7 @@ def compute_entry_price(close: pd.Series, ma5: float, ma20: float, atr: float) -
 # ============================================================
 
 def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
+    """地合いに応じたレバ目安"""
     if mkt_score >= 70:
         return 2.0, "強気（押し目＋一部ブレイク）"
     if mkt_score >= 60:
@@ -200,6 +202,7 @@ def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
 
 
 def calc_max_position(total_asset: float, lev: float) -> int:
+    """その日の最大建玉"""
     if not (np.isfinite(total_asset) and total_asset > 0 and lev > 0):
         return 0
     return int(round(total_asset * lev))
@@ -211,7 +214,7 @@ def calc_max_position(total_asset: float, lev: float) -> int:
 
 def expected_r_from_in_rank(in_rank: str, rr: float) -> float:
     """
-    in_rank ごとのざっくり勝率を想定して EV_R を計算
+    INランクに応じたざっくり勝率を仮定して EV(R) を出す
     """
     if rr <= 0:
         return -1.0
@@ -235,6 +238,7 @@ def expected_r_from_in_rank(in_rank: str, rr: float) -> float:
 # ============================================================
 
 def fetch_history(ticker: str, period: str = "130d") -> pd.DataFrame | None:
+    """yfinance 履歴取得（簡単リトライ付き）"""
     for _ in range(2):
         try:
             df = yf.Ticker(ticker).history(period=period)
@@ -246,6 +250,9 @@ def fetch_history(ticker: str, period: str = "130d") -> pd.DataFrame | None:
 
 
 def run_screening(today_date, mkt_score: int) -> List[Dict]:
+    """
+    ユニバース全銘柄から Core 候補を抽出
+    """
     try:
         df = pd.read_csv(UNIVERSE_PATH)
     except Exception:
@@ -261,15 +268,15 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
 
     df = filter_earnings(df, today_date)
 
+    # 地合いに応じてスコア基準を微調整（ただし候補数は常に最大3）
     MIN_SCORE = SCORE_MIN_BASE
     RR_MIN = RR_MIN_BASE
     EV_MIN = EV_R_MIN_BASE
 
-    # 地合いでスコア閾値を少しだけ可変
     if mkt_score >= 70:
-        MIN_SCORE -= 3
+        MIN_SCORE -= 3   # 強いときは少し緩め
     elif mkt_score <= 45:
-        MIN_SCORE += 3
+        MIN_SCORE += 3   # 弱いときは厳しめ
 
     candidates: List[Dict] = []
 
@@ -285,18 +292,21 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
         if hist is None or len(hist) < 60:
             continue
 
+        # コアスコア
         base_score = score_stock(hist)
         if base_score is None or base_score < MIN_SCORE:
             continue
 
+        # INランク + TP/SL %
         in_rank, tp_pct, sl_pct = calc_inout_for_stock(hist)
         if in_rank == "様子見":
             continue
 
-        # 弱い地合いで「弱めIN」はカット（だが候補数は減らさない）
+        # 弱い地合いで「弱めIN」はカット
         if mkt_score <= 45 and in_rank == "弱めIN":
             continue
 
+        # IN価格・RR・EV計算
         close = hist["Close"].astype(float)
         ma5 = close.rolling(5).mean().iloc[-1]
         ma20 = close.rolling(20).mean().iloc[-1]
@@ -330,10 +340,13 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
             )
         )
 
-    # ソート: Score → EV_R → RR
-    candidates.sort(key=lambda x: (x["score"], x["ev_r"], x["rr"]), reverse=True)
+    # ソート：Score → EV_R → RR
+    candidates.sort(
+        key=lambda x: (x["score"], x["ev_r"], x["rr"]),
+        reverse=True,
+    )
 
-    # 常に最大3銘柄まで
+    # 常に上位 MAX_FINAL_STOCKS 銘柄だけ返す
     return candidates[:MAX_FINAL_STOCKS]
 
 
@@ -341,8 +354,13 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
 # レポート構築
 # ============================================================
 
-def build_report(today_str: str, today_date, mkt: Dict,
-                 pos_text: str, total_asset: float) -> str:
+def build_report(
+    today_str: str,
+    today_date,
+    mkt: Dict,
+    pos_text: str,
+    total_asset: float,
+) -> str:
     mkt_score = int(mkt.get("score", 50))
     mkt_comment = str(mkt.get("comment", "中立"))
 
@@ -352,7 +370,7 @@ def build_report(today_str: str, today_date, mkt: Dict,
     sectors = top_sectors_5d()
     cand = run_screening(today_date, mkt_score)
 
-    # 候補統計
+    # 候補統計（RR）
     if cand:
         rr_vals = [c["rr"] for c in cand]
         avg_rr = float(np.mean(rr_vals))
@@ -375,6 +393,7 @@ def build_report(today_str: str, today_date, mkt: Dict,
     lines.append(f"- レバ: {lev:.1f}倍（{lev_comment}）")
     lines.append(f"- MAX建玉: 約{max_pos:,}円")
     lines.append("")
+
     lines.append("📈 セクター（5日）")
     if sectors:
         for i, (s_name, pct) in enumerate(sectors[:5]):
@@ -388,13 +407,14 @@ def build_report(today_str: str, today_date, mkt: Dict,
         lines.append(ev)
     lines.append("")
 
-    lines.append("🏆 Core候補（最大3銘柄）")
+    lines.append(f"🏆 Core候補（最大{MAX_FINAL_STOCKS}銘柄）")
     if cand:
         for c in cand:
-            lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
             lines.append(
-                f"  Score:{c['score']:.1f} RR:{c['rr']:.2f}R "
-                f"IN:{c['in_rank']} EV:{c['ev_r']:.2f}R"
+                f"- {c['ticker']} {c['name']} [{c['sector']}]"
+            )
+            lines.append(
+                f"  Score:{c['score']:.1f} RR:{c['rr']:.2f}R IN:{c['in_rank']} EV:{c['ev_r']:.2f}R"
             )
             lines.append(
                 f"  IN:{c['entry']:.1f} "
@@ -405,6 +425,7 @@ def build_report(today_str: str, today_date, mkt: Dict,
     else:
         lines.append("- 該当なし")
         lines.append("")
+
     lines.append(cand_header)
     lines.append("")
     lines.append("📊 ポジション")
@@ -418,19 +439,22 @@ def build_report(today_str: str, today_date, mkt: Dict,
 # ============================================================
 
 def send_line(text: str) -> None:
+    """
+    Cloudflare Worker 経由で LINE へ送信。
+    既に動いている仕様に合わせて JSON {"text": "..."} で送る。
+    """
     if not WORKER_URL:
         print("[WARN] WORKER_URL 未設定。以下をprintのみ。")
         print(text)
         return
 
-    # LINEの1メッセージ上限をだいたい考慮して分割
     chunk_size = 3800
     chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
     for ch in chunks:
         try:
             r = requests.post(WORKER_URL, json={"text": ch}, timeout=15)
-            print("[LINE RESULT]", r.status_code, str(r.text)[:200])
+            print("[LINE RESULT]", r.status_code, r.text[:200])
         except Exception as e:
             print("[ERROR] LINE送信に失敗:", e)
             print(ch)
@@ -446,12 +470,17 @@ def main() -> None:
 
     # 地合い（SOX/NVDA込み）
     mkt = enhance_market_score()
+    mkt_score = int(mkt.get("score", 50))
 
     # ポジション
     pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset = analyze_positions(
-        pos_df, mkt_score=int(mkt.get("score", 50))
-    )
+    try:
+        # 新しい analyze_positions(df, mkt_score=...) に対応
+        pos_text, total_asset = analyze_positions(pos_df, mkt_score=mkt_score)
+    except TypeError:
+        # 古い analyze_positions(df) でも動くように保険
+        pos_text, total_asset = analyze_positions(pos_df)
+
     if not (np.isfinite(total_asset) and total_asset > 0):
         total_asset = 2_000_000.0
 
