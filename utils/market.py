@@ -4,26 +4,35 @@ import numpy as np
 import yfinance as yf
 
 
+# ============================================================
+# 基本の市場スコア
+# ============================================================
+
 def _five_day_chg(symbol: str) -> float:
     try:
-        df = yf.Ticker(symbol).history(period="6d")
-        if df is None or df.empty or len(df) < 2:
+        df = yf.Ticker(symbol).history(period="5d")
+        if df is None or df.empty:
             return 0.0
-        close = df["Close"].astype(float)
-        return float((close.iloc[-1] / close.iloc[0] - 1.0) * 100.0)
+        return float(df["Close"].iloc[-1] / df["Close"].iloc[0] - 1.0) * 100.0
     except Exception:
         return 0.0
 
 
 def calc_market_score() -> dict:
+    """
+    日経平均・TOPIXの5日リターンからベース市場スコアを計算
+    返す dict: {"score": int, "comment": str}
+    """
     nk = _five_day_chg("^N225")
     tp = _five_day_chg("^TOPX")
-    base = 50.0 + np.clip((nk + tp) / 2.0, -20.0, 20.0)
+
+    base = 50.0
+    base += np.clip((nk + tp) / 2.0, -20, 20) * 1.0
 
     score = int(np.clip(round(base), 0, 100))
 
     if score >= 70:
-        comment = "強め"
+        comment = "地合い強め"
     elif score >= 60:
         comment = "やや強め"
     elif score >= 50:
@@ -36,21 +45,37 @@ def calc_market_score() -> dict:
     return {"score": score, "comment": comment}
 
 
+# ============================================================
+# 半導体情報を加味した強化スコア
+# ============================================================
+
 def enhance_market_score() -> dict:
+    """
+    calc_market_score に
+    ・SOX指数（5日）
+    ・NVDA（5日）
+    をブーストとして追加
+    """
     mkt = calc_market_score()
     score = float(mkt.get("score", 50))
 
-    # 半導体指数 SOX
+    # SOX
     try:
-        sox_chg = _five_day_chg("^SOX")
-        score += np.clip(sox_chg / 2.0, -5.0, 5.0)
+        sox = yf.Ticker("^SOX").history(period="5d")
+        if sox is not None and not sox.empty:
+            sox_chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100.0
+            score += float(np.clip(sox_chg / 2.0, -5.0, 5.0))
     except Exception:
         pass
 
     # NVDA
     try:
-        nvda_chg = _five_day_chg("NVDA")
-        score += np.clip(nvda_chg / 3.0, -4.0, 4.0)
+        nvda = yf.Ticker("NVDA").history(period="5d")
+        if nvda is not None and not nvda.empty:
+            nvda_chg = float(
+                nvda["Close"].iloc[-1] / nvda["Close"].iloc[0] - 1.0
+            ) * 100.0
+            score += float(np.clip(nvda_chg / 3.0, -4.0, 4.0))
     except Exception:
         pass
 
