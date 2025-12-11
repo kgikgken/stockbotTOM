@@ -1,157 +1,145 @@
+from __future__ import annotations
+
+from typing import Tuple
+
 import numpy as np
 import pandas as pd
 
 
-# ---------------------------------------------------------
-# 基本の安全取得
-# ---------------------------------------------------------
-def _last(series):
+def _last(series: pd.Series) -> float:
     try:
         return float(series.iloc[-1])
     except Exception:
         return np.nan
 
 
-# ---------------------------------------------------------
-# スコアリング
-# ---------------------------------------------------------
-def score_stock(hist: pd.DataFrame) -> float:
-    """
-    0〜100点のスコア
-    main.py の MIN_SCORE と連動するように調整済み
-    """
+def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    vol = df["Volume"].astype(float)
 
+    df["ma20"] = close.rolling(20).mean()
+    df["ma50"] = close.rolling(50).mean()
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df["rsi14"] = 100.0 - (100.0 / (1.0 + rs))
+
+    ret = close.pct_change(fill_method=None)
+    df["vola20"] = ret.rolling(20).std()
+
+    if len(close) >= 60:
+        rolling_high = close.rolling(60).max()
+        df["off_high_pct"] = (close - rolling_high) / rolling_high * 100.0
+    else:
+        df["off_high_pct"] = np.nan
+
+    df["turnover"] = close * vol
+
+    return df
+
+
+def score_stock(hist: pd.DataFrame) -> float:
     if hist is None or len(hist) < 60:
         return 0.0
 
-    df = hist.copy()
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-
-    # ---- 移動平均 ----
-    ma5 = close.rolling(5).mean()
-    ma20 = close.rolling(20).mean()
-    ma50 = close.rolling(50).mean()
-
+    df = _add_indicators(hist)
     score = 0.0
 
-    # トレンド（MA20 > MA50）
-    if _last(ma20) > _last(ma50):
-        score += 25
-    elif _last(ma20) > _last(ma50) * 0.995:
-        score += 15
+    ma20 = df["ma20"]
+    slope = ma20.pct_change(fill_method=None)
+    slope_last = _last(slope)
 
-    # MA5 > MA20（短期勢い）
-    if _last(ma5) > _last(ma20):
-        score += 15
+    if np.isfinite(slope_last):
+        if slope_last > 0.0:
+            score += min(30.0, slope_last * 2000.0 + 10.0)
+        else:
+            score += max(0.0, 10.0 + slope_last * 1500.0)
 
-    # ボラティリティ（安定性評価）
-    vola = close.pct_change().rolling(20).std().iloc[-1]
-    if np.isfinite(vola):
-        if vola < 0.015:
-            score += 15
-        elif vola < 0.025:
-            score += 8
+    rsi = _last(df["rsi14"])
+    if np.isfinite(rsi):
+        if 40 <= rsi <= 60:
+            score += 20.0
+        elif 30 <= rsi < 40 or 60 < rsi <= 70:
+            score += 10.0
 
-    # 直近強さ（5日騰落）
-    try:
-        chg_5d = close.iloc[-1] / close.iloc[-6] - 1
-        if chg_5d > 0.03:
-            score += 15
-        elif chg_5d > 0.00:
-            score += 8
-    except Exception:
-        pass
+    off = _last(df["off_high_pct"])
+    if np.isfinite(off):
+        if -20 <= off <= -5:
+            score += 15.0
+        elif -30 <= off < -20:
+            score += 8.0
 
-    # 出来高増（勢い）
-    try:
-        vol = df["Volume"].astype(float)
-        if vol.iloc[-1] > vol.rolling(20).mean().iloc[-1] * 1.3:
-            score += 10
-    except Exception:
-        pass
+    turn = _last(df["turnover"])
+    if np.isfinite(turn):
+        if turn >= 1e8:
+            score += 20.0
+        elif turn >= 5e7:
+            score += 10.0
 
-    return float(np.clip(score, 0, 100))
+    vola = _last(df["vola20"])
+    if np.isfinite(vola) and vola > 0:
+        if 0.01 <= vola <= 0.04:
+            score += 10.0
+
+    return float(np.clip(score, 0.0, 100.0))
 
 
-# ---------------------------------------------------------
-# IN/OUT 判定（INランク + TP/SL）
-# ---------------------------------------------------------
-def calc_inout_for_stock(hist: pd.DataFrame):
+def calc_inout_for_stock(hist: pd.DataFrame) -> Tuple[str, float, float]:
     """
-    戻り値
-      - in_rank（強IN / 通常IN / 弱めIN / 様子見）
-      - tp_pct（%）
-      - sl_pct（% ※マイナスで返す）
+    INランク, TP%, SL% を決める
+    戻り値: (in_rank, tp_pct, sl_pct(マイナス))
     """
-
     if hist is None or len(hist) < 60:
         return "様子見", 0.0, 0.0
 
-    df = hist.copy()
+    df = _add_indicators(hist)
     close = df["Close"].astype(float)
 
-    ma5 = close.rolling(5).mean().iloc[-1]
-    ma20 = close.rolling(20).mean().iloc[-1]
-    ma50 = close.rolling(50).mean().iloc[-1]
+    price = _last(close)
+    ma20 = _last(df["ma20"])
+    ma50 = _last(df["ma50"])
+    rsi = _last(df["rsi14"])
+    off = _last(df["off_high_pct"])
+    vola = _last(df["vola20"])
 
-    price = close.iloc[-1]
+    in_rank = "様子見"
+    tp_pct = 0.0
+    sl_pct = 0.0
 
-    # ---- IN ランク ----
-    # 強IN条件：短期・中期が揃い押し目気味
-    if price > ma5 > ma20 > ma50 and abs(price - ma20) / price < 0.03:
+    if not all(np.isfinite(x) for x in [price, ma20, ma50, rsi]):
+        return "様子見", 0.0, 0.0
+
+    strong_trend = price > ma20 > ma50
+    up_trend = price > ma20 and ma20 > ma50 * 0.98
+
+    if strong_trend and -20 <= off <= -5 and 40 <= rsi <= 60:
         in_rank = "強IN"
-
-    # 通常IN：トレンド良好で押し目入り
-    elif price > ma20 and ma20 > ma50:
+        sl_pct = -5.0
+        tp_pct = 15.0
+    elif up_trend and -30 <= off <= 0 and 35 <= rsi <= 65:
         in_rank = "通常IN"
-
-    # 弱めIN：一応上昇トレンド
-    elif price > ma50 and ma20 > ma50:
+        sl_pct = -6.0
+        tp_pct = 14.0
+    elif up_trend and -35 <= off <= 5 and 30 <= rsi <= 70:
         in_rank = "弱めIN"
-
+        sl_pct = -7.0
+        tp_pct = 12.0
     else:
         return "様子見", 0.0, 0.0
 
-    # ---- TP/SL 設定 ----
-    # ATRから強さと逆行幅を推定
-    atr = _atr(df)
-
-    if atr <= 0 or not np.isfinite(atr):
-        atr = price * 0.02  # 保険
-
-    # ATR を % に変換
-    atr_pct = atr / price * 100
-
-    # ランク別に TP/SL を変える（可変RR）
-    if in_rank == "強IN":
-        tp_pct = atr_pct * 3.0    # 大きめ
-        sl_pct = -atr_pct * 1.0
-    elif in_rank == "通常IN":
-        tp_pct = atr_pct * 2.4
-        sl_pct = -atr_pct * 1.0
-    else:  # 弱めIN
-        tp_pct = atr_pct * 2.0
-        sl_pct = -atr_pct * 1.2
+    if np.isfinite(vola) and vola > 0:
+        if vola > 0.04:
+            sl_pct *= 1.3
+            tp_pct *= 1.1
+        elif vola < 0.015:
+            sl_pct *= 0.8
+            tp_pct *= 0.9
 
     return in_rank, float(tp_pct), float(sl_pct)
-
-
-# ---------------------------------------------------------
-# ATR（標準）
-# ---------------------------------------------------------
-def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    close = df["Close"].astype(float)
-
-    prev = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev).abs(),
-        (low - prev).abs()
-    ], axis=1).max(axis=1)
-
-    val = tr.rolling(period).mean().iloc[-1]
-    return float(val) if np.isfinite(val) else 0.0
