@@ -1,14 +1,6 @@
 from __future__ import annotations
-
-from typing import Tuple
-
-import numpy as np
 import pandas as pd
-import yfinance as yf
-
-from utils.rr import compute_rr
-
-DEFAULT_ASSET = 3_000_000  # ポジがないときの仮の運用資産
+import numpy as np
 
 
 def load_positions(path: str) -> pd.DataFrame:
@@ -16,67 +8,38 @@ def load_positions(path: str) -> pd.DataFrame:
         df = pd.read_csv(path)
         return df
     except Exception:
-        return pd.DataFrame(columns=["ticker", "shares", "entry_price"])
+        return pd.DataFrame()
 
 
-def analyze_positions(df: pd.DataFrame) -> Tuple[str, float]:
+def analyze_positions(df: pd.DataFrame, mkt_score: int):
     """
     positions.csv を解析して
-      - LINE用ポジション文字列
-      - 推定運用資産
+    - LINE用ポジション文字列
+    - 総資産推定
     を返す
     """
-    if df is None or df.empty:
-        return "ノーポジション", float(DEFAULT_ASSET)
+    if df is None or len(df) == 0:
+        text = "ノーポジション"
+        asset = 2_000_000.0
+        return text, asset
 
     lines = []
-    total_value = 0.0
+    total = 0.0
 
     for _, row in df.iterrows():
         ticker = str(row.get("ticker", "")).strip()
-        shares = float(row.get("shares", 0))
-        entry_price = float(row.get("entry_price", 0))
+        entry = float(row.get("entry_price", 0.0))
+        qty = float(row.get("quantity", 0.0))
+        price = float(row.get("current_price", entry))
 
-        if not ticker or shares <= 0 or entry_price <= 0:
-            continue
+        pnl_pct = (price - entry) / entry * 100.0 if entry > 0 else 0.0
+        value = qty * price
+        total += value
 
-        # 現在値取得
-        try:
-            hist = yf.download(
-                ticker,
-                period="60d",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-            )
-            if hist is None or hist.empty:
-                last_close = entry_price
-            else:
-                last_close = float(hist["Close"].astype(float).iloc[-1])
-        except Exception:
-            last_close = entry_price
-            hist = None
+        lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%")
 
-        pnl_pct = (last_close - entry_price) / entry_price * 100.0
+    if total <= 0 or not np.isfinite(total):
+        total = 2_000_000.0
 
-        # 既存ポジションの RR（entry_price 固定）
-        try:
-            if hist is not None:
-                rr_info = compute_rr(hist, mkt_score=50, entry_price=entry_price)
-                rr_val = float(rr_info.get("rr", 0.0))
-            else:
-                rr_val = 0.0
-        except Exception:
-            rr_val = 0.0
-
-        value = shares * last_close
-        total_value += value
-
-        lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}% RR:{rr_val:.2f}R")
-
-    if not lines:
-        return "ノーポジション", float(DEFAULT_ASSET)
-
-    asset = total_value if total_value > 0 else DEFAULT_ASSET
-    text = "\n".join(lines)
-    return text, float(asset)
+    text = "\n".join(lines) if lines else "ノーポジション"
+    return text, float(total)
