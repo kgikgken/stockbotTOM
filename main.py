@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Tuple
 
 import numpy as np
@@ -31,7 +31,7 @@ EARNINGS_EXCLUDE_DAYS = 3
 MAX_FINAL_STOCKS_BASE = 3      # 地合い次第で 1〜3 に変動
 SCORE_MIN_BASE = 70.0          # Aランク基準
 RR_MIN_BASE = 1.8
-EV_R_MIN_BASE = 0.4            # 期待値 (R)の下限
+EV_R_MIN_BASE = 0.4            # 期待値 (R) の下限
 
 
 # ============================================================
@@ -138,11 +138,10 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
 
 def compute_entry_price(close: pd.Series, ma5: float, ma20: float, atr: float) -> float:
     """
-    “今日から3〜10日スイングで勝ちやすい” IN価格
+    3〜10日スイング用のIN価格をざっくり決める
     - ベースは MA20 付近
-    - ATR の 0.5倍だけ下方向にずらす（押し目をしっかり待つ）
-    - 直近安値を割りすぎないように補正
-    - 強トレンド時は少しだけ浅めに
+    - ATR の 0.5倍だけ下方向にずらす（押し目を待つ）
+    - 強トレンド時は少し浅め
     """
     price = float(close.iloc[-1])
     last_low = float(close.iloc[-5:].min())
@@ -192,7 +191,7 @@ def calc_max_position(total_asset: float, lev: float) -> int:
 
 def expected_r_from_in_rank(in_rank: str, rr: float) -> float:
     """
-    in_rankごとのざっくり勝率を想定して EV_R を計算
+    INランクごとのざっくり勝率を想定して EV(R) を計算
     """
     if rr <= 0:
         return -1.0
@@ -232,7 +231,7 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
     except Exception:
         return []
 
-    # tickerカラム名の吸収
+    # tickerカラム名
     if "ticker" in df.columns:
         t_col = "ticker"
     elif "code" in df.columns:
@@ -242,15 +241,14 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
 
     df = filter_earnings(df, today_date)
 
-    MIN_SCORE = SCORE_MIN_BASE
-    RR_MIN = RR_MIN_BASE
-    EV_MIN = EV_R_MIN_BASE
+    min_score = SCORE_MIN_BASE
+    rr_min = RR_MIN_BASE
+    ev_min = EV_R_MIN_BASE
 
-    # 地合いで少しだけ基準可変
     if mkt_score >= 70:
-        MIN_SCORE -= 3
+        min_score -= 3
     elif mkt_score <= 45:
-        MIN_SCORE += 3
+        min_score += 3
 
     candidates: List[Dict] = []
 
@@ -267,14 +265,13 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
             continue
 
         base_score = score_stock(hist)
-        if base_score is None or base_score < MIN_SCORE:
+        if base_score is None or base_score < min_score:
             continue
 
         in_rank, tp_pct, sl_pct = calc_inout_for_stock(hist)
         if in_rank == "様子見":
             continue
 
-        # 弱い地合いで「弱めIN」は切る
         if mkt_score <= 45 and in_rank == "弱めIN":
             continue
 
@@ -291,7 +288,7 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
         rr = (tp_pct / 100.0) / abs(sl_pct / 100.0) if sl_pct < 0 else 0.0
         ev_r = expected_r_from_in_rank(in_rank, rr)
 
-        if rr < RR_MIN or ev_r < EV_MIN:
+        if rr < rr_min or ev_r < ev_min:
             continue
 
         candidates.append(
@@ -311,13 +308,11 @@ def run_screening(today_date, mkt_score: int) -> List[Dict]:
             )
         )
 
-    # ソート：Score → EV_R → RR
     candidates.sort(
         key=lambda x: (x["score"], x["ev_r"], x["rr"]),
         reverse=True,
     )
 
-    # 地合いで本数を調整
     max_n = MAX_FINAL_STOCKS_BASE
     if mkt_score < 45:
         max_n = 2
@@ -342,7 +337,6 @@ def build_report(today_str: str, today_date, mkt: Dict,
     sectors = top_sectors_5d()
     cand = run_screening(today_date, mkt_score)
 
-    # 候補統計
     if cand:
         rr_vals = [c["rr"] for c in cand]
         avg_rr = float(np.mean(rr_vals))
@@ -382,9 +376,7 @@ def build_report(today_str: str, today_date, mkt: Dict,
     lines.append("🏆 Core候補（最大3銘柄）")
     if cand:
         for c in cand:
-            lines.append(
-                f"- {c['ticker']} {c['name']} [{c['sector']}]"
-            )
+            lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
             lines.append(
                 f"  Score:{c['score']:.1f} RR:{c['rr']:.2f}R IN:{c['in_rank']}"
             )
@@ -434,10 +426,8 @@ def main() -> None:
     today_str = jst_today_str()
     today_date = jst_today_date()
 
-    # 地合い（SOX/NVDA込み）
     mkt = enhance_market_score()
 
-    # ポジション
     pos_df = load_positions(POSITIONS_PATH)
     pos_text, total_asset = analyze_positions(
         pos_df,
@@ -446,7 +436,6 @@ def main() -> None:
     if not (np.isfinite(total_asset) and total_asset > 0):
         total_asset = 2_000_000.0
 
-    # レポート構築
     report = build_report(
         today_str=today_str,
         today_date=today_date,
