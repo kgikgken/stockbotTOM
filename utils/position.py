@@ -9,71 +9,77 @@ import yfinance as yf
 from .scoring import calc_inout_for_stock
 
 
-def load_positions(path: str = "positions.csv") -> pd.DataFrame:
+def load_positions(path: str) -> pd.DataFrame:
     try:
-        df = pd.read_csv(path)
-        return df
+        return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
 
 
-def _current_price_for_ticker(ticker: str) -> float:
+def _fetch_hist(ticker: str, period: str = "90d") -> pd.DataFrame | None:
     try:
-        df = yf.Ticker(ticker).history(period="3d")
-        if df is None or df.empty:
-            return np.nan
-        close = df["Close"].astype(float)
-        return float(close.iloc[-1])
+        df = yf.Ticker(ticker).history(period=period)
+        if df is not None and not df.empty:
+            return df
     except Exception:
+        pass
+    return None
+
+
+def _calc_rr_for_position(ticker: str, entry_price: float) -> float:
+    """
+    現在のボラ・押し目条件からざっくりRRを推定
+    （新規候補と同じロジック）
+    """
+    if entry_price <= 0:
         return np.nan
+
+    hist = _fetch_hist(ticker)
+    if hist is None or len(hist) < 60:
+        return np.nan
+
+    _, tp_pct, sl_pct = calc_inout_for_stock(hist)
+    if sl_pct >= 0:
+        return np.nan
+
+    rr = (tp_pct / 100.0) / abs(sl_pct / 100.0)
+    return float(rr)
 
 
 def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
-    if df is None or df.empty:
-        return "ノーポジション", 2_000_000.0
+    """
+    positions.csv を解析して
+    - LINE用のポジション文字列
+    - 総資産推定
+    を返す
+    """
+    if df is None or len(df) == 0:
+        text = "ノーポジション"
+        asset = 2_000_000.0
+        return text, float(asset)
 
     lines = []
-    total_value = 0.0
+    total = 0.0
 
     for _, row in df.iterrows():
-        ticker = str(row.get("ticker", "")).strip()
-        if not ticker:
-            continue
+        ticker = str(row.get("ticker", row.get("code", "")))
+        entry = float(row.get("entry_price", 0) or 0)
+        qty = float(row.get("quantity", row.get("qty", 0)) or 0)
+        price = float(row.get("current_price", entry) or entry)
 
-        entry = float(row.get("entry_price", 0.0))
-        qty = float(row.get("quantity", 0.0))
-        cur_price = row.get("current_price", np.nan)
-        try:
-            cur_price = float(cur_price)
-        except Exception:
-            cur_price = np.nan
+        pnl_pct = (price - entry) / entry * 100.0 if entry > 0 else 0.0
+        value = price * qty
+        total += value
 
-        if not np.isfinite(cur_price) or cur_price <= 0:
-            cur_price = _current_price_for_ticker(ticker)
-        if not np.isfinite(cur_price) or cur_price <= 0:
-            cur_price = entry
+        rr_now = _calc_rr_for_position(ticker, entry)
+        if np.isfinite(rr_now):
+            lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}% RR:{rr_now:.2f}R")
+        else:
+            lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%")
 
-        pnl_pct = (cur_price - entry) / entry * 100.0 if entry > 0 else 0.0
-
-        # RR 推定（現状のチャートから再計算）
-        rr_txt = ""
-        try:
-            hist = yf.Ticker(ticker).history(period="130d")
-            if hist is not None and not hist.empty and entry > 0:
-                in_rank, tp_pct, sl_pct = calc_inout_for_stock(hist)
-                rr = (tp_pct / 100.0) / abs(sl_pct / 100.0) if sl_pct < 0 else 0.0
-                rr_txt = f" RR:{rr:.2f}R"
-        except Exception:
-            rr_txt = ""
-
-        value = qty * cur_price
-        if np.isfinite(value) and value > 0:
-            total_value += value
-
-        lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%{rr_txt}")
-
-    if total_value <= 0:
-        total_value = 2_000_000.0
+    if total <= 0:
+        total = 2_000_000.0
 
     text = "\n".join(lines) if lines else "ノーポジション"
-    return text, float(total_value)
+
+    return text, float(total)
