@@ -1,36 +1,45 @@
-　import numpy as np
+from __future__ import annotations
+
+from typing import Dict
+
+import numpy as np
 import yfinance as yf
 
 
-def _chg_5d(symbol: str) -> float:
+def _five_day_change(symbol: str) -> float:
     try:
-        df = yf.Ticker(symbol).history(period="6d")
-        if df is None or df.empty or len(df) < 2:
+        df = yf.Ticker(symbol).history(period="5d")
+        if df is None or df.empty:
             return 0.0
-        return float(df["Close"].iloc[-1] / df["Close"].iloc[0] - 1.0) * 100
+        close = df["Close"].astype(float)
+        return float(close.iloc[-1] / close.iloc[0] - 1.0) * 100.0
     except Exception:
         return 0.0
 
 
-def enhance_market_score() -> dict:
-    nk = _chg_5d("^N225")
-    tp = _chg_5d("^TOPX")
+def enhance_market_score() -> Dict:
+    """
+    日経225 / TOPIX + SOX + NVDA から地合いスコアを作成
+    0〜100 にクリップして返す
+    """
+    nk = _five_day_change("^N225")
+    tp = _five_day_change("^TOPX")
+    sox = _five_day_change("^SOX")
+    nvda = _five_day_change("NVDA")
 
-    base = (nk + tp) / 2.0
-    score = 50 + np.clip(base, -20, 20)
+    base = 50.0
 
-    # --- SOX補正 ---
-    sox = _chg_5d("^SOX")
-    score += np.clip(sox / 2.0, -5, 5)
+    jp_avg = (nk + tp) / 2.0
+    base += np.clip(jp_avg, -15.0, 15.0) * 0.8
 
-    # --- NVDA補正 ---
-    nv = _chg_5d("NVDA")
-    score += np.clip(nv / 3.0, -4, 4)
+    semi_boost = np.clip(sox / 4.0, -5.0, 5.0)
+    nvda_boost = np.clip(nvda / 5.0, -4.0, 4.0)
 
-    score = int(np.clip(round(score), 0, 100))
+    score = base + semi_boost + nvda_boost
+    score = int(float(np.clip(round(score), 0, 100)))
 
     if score >= 70:
-        comment = "強め"
+        comment = "地合い強め"
     elif score >= 60:
         comment = "やや強め"
     elif score >= 50:
@@ -40,4 +49,13 @@ def enhance_market_score() -> dict:
     else:
         comment = "弱い"
 
-    return {"score": score, "comment": comment}
+    return {
+        "score": score,
+        "comment": comment,
+        "detail": {
+            "nk225_5d": nk,
+            "topix_5d": tp,
+            "sox_5d": sox,
+            "nvda_5d": nvda,
+        },
+    }
