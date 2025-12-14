@@ -1,311 +1,209 @@
 from __future__ import annotations
 
-import math
-from typing import Dict, Optional
-
 import numpy as np
 import pandas as pd
 
 
-# ============================================================
-# v11.1 PERFECT scoring (spec-complete)
-# 出力キー:
-#   mode: 'swing' / 'day'
-#   total_score: float
-#   rr_raw / ev_r_raw: float  (生)
-#   rr_adj / ev_r_adj: float  (v11.1補正後)
-#   tp_price / sl_price / in_price / in_diff_pct
-#   gu_danger: bool
-#   reach_rate: float (0-1)
-#   reject_reason: str
-# ============================================================
-
-
-def _last(series: pd.Series, default=np.nan) -> float:
+def _last_val(series: pd.Series) -> float:
     try:
         return float(series.iloc[-1])
     except Exception:
-        return float(default)
+        return np.nan
 
-def _sma(series: pd.Series, n: int) -> float:
-    if len(series) < n:
-        return float("nan")
-    return float(series.tail(n).mean())
 
-def _atr(df: pd.DataFrame, n: int = 14) -> float:
-    high = df["high"].astype(float)
-    low = df["low"].astype(float)
-    close = df["close"].astype(float)
-    prev_close = close.shift(1)
-    tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
-    return float(atr.iloc[-1]) if len(atr) else float("nan")
+def calc_ma(close: pd.Series, window: int) -> float:
+    if close is None or len(close) < window:
+        return _last_val(close)
+    return float(close.rolling(window).mean().iloc[-1])
 
-def _rsi(series: pd.Series, n: int = 14) -> float:
-    if len(series) < n + 1:
-        return float("nan")
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = (-delta).clip(lower=0)
-    ru = up.ewm(alpha=1 / n, adjust=False).mean()
-    rd = down.ewm(alpha=1 / n, adjust=False).mean()
-    rs = ru / (rd.replace(0, np.nan))
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1])
 
-def _rolling_high(df: pd.DataFrame, n: int) -> float:
-    if len(df) < n + 1:
-        return float("nan")
-    return float(df["high"].astype(float).iloc[-n:].max())
+def _add_indicators(hist: pd.DataFrame) -> pd.DataFrame:
+    df = hist.copy()
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    open_ = df["Open"].astype(float)
+    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
 
-def _rolling_low(df: pd.DataFrame, n: int) -> float:
-    if len(df) < n + 1:
-        return float("nan")
-    return float(df["low"].astype(float).iloc[-n:].min())
+    df["ma20"] = close.rolling(20).mean()
+    df["ma50"] = close.rolling(50).mean()
 
-def _calc_reach_rate_breakout(df: pd.DataFrame, lookback_events: int, forward_days: int, target_mult_of_atr: float) -> float:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    df["rsi14"] = 100 - (100 / (1 + rs))
+
+    ret = close.pct_change(fill_method=None)
+    df["vola20"] = ret.rolling(20).std()
+
+    # 60日高値からの距離
+    if len(close) >= 60:
+        rolling_high = close.rolling(60).max()
+        df["off_high_pct"] = (close - rolling_high) / (rolling_high + 1e-9) * 100
+    else:
+        df["off_high_pct"] = np.nan
+
+    # 20MAの傾き
+    df["trend_slope20"] = df["ma20"].pct_change(fill_method=None)
+
+    # 下ヒゲ比率
+    rng = (high - low).replace(0, np.nan)
+    lower_shadow = np.where(close >= open_, close - low, open_ - low)
+    df["lower_shadow_ratio"] = np.where(np.isfinite(rng), lower_shadow / rng, 0.0)
+
+    # 売買代金
+    df["turnover"] = close * vol
+    df["turnover_avg20"] = df["turnover"].rolling(20).mean()
+
+    return df
+
+
+def score_stock(hist: pd.DataFrame) -> float | None:
     """
-    簡易「構造的到達率」：
-      - 20日高値ブレイク（終値で上抜け）をイベントと定義
-      - エントリー = 翌日始値（近似で当日終値でも可だがここは翌日始値）
-      - ターゲット = entry + target_mult_of_atr * ATR(entry時点)
-      - forward_days 日以内に高値がターゲット到達した割合
-
-    ※厳密ではなく「届きにくい銘柄の根絶」用の現実フィルタ
+    0-100
     """
-    if len(df) < 60:
-        return float("nan")
+    if hist is None or len(hist) < 80:
+        return None
 
-    d = df.copy().reset_index(drop=True)
-    close = d["close"].astype(float)
-    high = d["high"].astype(float)
-    open_ = d["open"].astype(float)
+    df = _add_indicators(hist)
 
-    # 20日高値（当日含まず）
-    roll_high = high.rolling(20).max().shift(1)
-    breakout = (close > roll_high) & roll_high.notna()
+    close = df["Close"].astype(float)
+    ma20 = df["ma20"]
+    ma50 = df["ma50"]
+    slope = df["trend_slope20"]
 
-    idx = np.where(breakout.values)[0].tolist()
-    if not idx:
-        return float("nan")
+    c_last = _last_val(close)
+    ma20_last = _last_val(ma20)
+    ma50_last = _last_val(ma50)
+    slope_last = _last_val(slope)
 
-    # 直近イベントから採用
-    idx = idx[-lookback_events:]
+    rsi = _last_val(df["rsi14"])
+    off = _last_val(df["off_high_pct"])
+    shadow = _last_val(df["lower_shadow_ratio"])
+    t = _last_val(df["turnover_avg20"])
+    vola = _last_val(df["vola20"])
 
-    hits = 0
-    total = 0
-    for i in idx:
-        # 翌日が無いと成立しない
-        if i + 1 >= len(d):
-            continue
-        entry = float(open_.iloc[i + 1])
-        # ATRをイベント時点の14ATRで近似
-        atr = _atr(d.iloc[: i + 1], 14)
-        if not (atr and atr > 0 and math.isfinite(atr)):
-            continue
-        target = entry + target_mult_of_atr * atr
-        # 先読みウィンドウ
-        j2 = min(len(d) - 1, i + 1 + forward_days)
-        max_high = float(high.iloc[i + 1 : j2 + 1].max())
-        total += 1
-        if max_high >= target:
-            hits += 1
+    sc = 0.0
 
-    if total == 0:
-        return float("nan")
-    return float(hits / total)
-
-def _in_price_swing(close: pd.Series, atr: float) -> float:
-    # 理想押し目：20SMA - 0.3ATR（やや深め）
-    sma20 = _sma(close, 20)
-    if math.isnan(sma20) or not (atr and atr > 0):
-        return float("nan")
-    return float(sma20 - 0.3 * atr)
-
-def _is_perfect_first_leg(df: pd.DataFrame, atr: float) -> bool:
-    """
-    Swing除外：初動完璧すぎ（＝Day向き）
-    - 直近5日で +2.0ATR 以上上昇、かつ押しが浅い
-    """
-    if len(df) < 10 or not (atr and atr > 0):
-        return False
-    close = df["close"].astype(float)
-    chg = float(close.iloc[-1] - close.iloc[-6])
-    if chg >= 2.0 * atr:
-        # 押しの浅さ：直近3日で低下が0.5ATR未満
-        pull = float(close.iloc[-1] - close.iloc[-3:].min())
-        if pull < 0.5 * atr:
-            return True
-    return False
-
-def score_stock(ticker: str, df: pd.DataFrame, meta: Optional[Dict] = None, run_mode: str = "preopen", cfg: Optional[Dict] = None) -> Dict:
-    cfg = cfg or {}
-    meta = meta or {}
-
-    close = df["close"].astype(float)
-    high = df["high"].astype(float)
-    low = df["low"].astype(float)
-    open_ = df["open"].astype(float)
-
-    last = _last(close)
-    atr = _atr(df, 14)
-    rsi = _rsi(close, 14)
-    sma20 = _sma(close, 20)
-    sma50 = _sma(close, 50)
-    trend_up = bool((not math.isnan(sma20)) and (not math.isnan(sma50)) and sma20 > sma50)
-
-    # Swing：理想押し目
-    in_price = _in_price_swing(close, atr)
-    in_diff_pct = float((last - in_price) / last * 100.0) if (math.isfinite(in_price) and last > 0) else float("nan")
-
-    # Swing：SL/TP（構造 + ATR）
-    sup = _rolling_low(df.iloc[:-1], 20)  # 当日含まず
-    brk = _rolling_high(df.iloc[:-1], 20)
-
-    sl = float(sup - 0.2 * atr) if (math.isfinite(sup) and atr and atr > 0) else float("nan")
-    tp = float(brk + 0.2 * atr) if (math.isfinite(brk) and atr and atr > 0) else float("nan")
-
-    swing_risk = float(last - sl) if (math.isfinite(sl)) else float("nan")
-    swing_reward = float(tp - last) if (math.isfinite(tp)) else float("nan")
-    rr_raw = float(swing_reward / swing_risk) if (math.isfinite(swing_reward) and math.isfinite(swing_risk) and swing_risk > 0) else 0.0
-
-    # 追加補助（理論RRだけ高いを潰す：ATR基準）
-    stop_atr = float(swing_risk / atr) if (atr and atr > 0 and math.isfinite(swing_risk)) else 0.0
-    tgt_atr = float(swing_reward / atr) if (atr and atr > 0 and math.isfinite(swing_reward)) else 0.0
-    atr_ok = (stop_atr >= float(cfg.get("MIN_STOP_ATR", 0.7))) and (tgt_atr >= float(cfg.get("MIN_TARGET_ATR", 1.0)))
-
-    # EV（R）：簡易勝率proxy（IN近い/トレンド/過熱で減点）
-    in_zone = bool(math.isfinite(in_price) and atr and atr > 0 and abs(last - in_price) / atr <= 0.8)
-    p = 0.33 + (0.17 if in_zone else 0.0) + (0.12 if trend_up else 0.0) + (0.06 if (not math.isnan(rsi) and rsi < 65) else 0.0)
-    p = float(np.clip(p, 0.10, 0.70))
-    ev_raw = float(p * rr_raw - (1 - p) * 1.0)
-
-    # v11.1(②) 構造TPチェック：TP > 20日高値×1.02
-    tp_over_mult = float(cfg.get("TP_OVER_20D_HIGH_MULT", 1.02))
-    tp_pen = float(cfg.get("TP_OVER_PENALTY_MULT", 0.7))
-    tp_excl = float(cfg.get("TP_OVER_EXCLUDE_MULT", 1.06))
-
-    rr_adj = rr_raw
-    ev_adj = ev_raw
-    reject_reason = ""
-
-    if math.isfinite(brk) and math.isfinite(tp):
-        if tp > brk * tp_excl:
-            reject_reason = "TPが構造的に遠すぎ（20日高値超過）"
-        elif tp > brk * tp_over_mult:
-            rr_adj *= tp_pen
-            ev_adj *= tp_pen
-
-    # v11.1(②) 構造的到達率
-    reach_rate = _calc_reach_rate_breakout(
-        df=df,
-        lookback_events=int(cfg.get("REACH_RATE_LOOKBACK_EVENTS", 30)),
-        forward_days=int(cfg.get("REACH_RATE_FORWARD_DAYS", 10)),
-        target_mult_of_atr=1.5,  # Swingの伸び代をざっくり
-    )
-    if math.isfinite(reach_rate):
-        if reach_rate < float(cfg.get("REACH_RATE_TH", 0.60)):
-            ev_adj *= float(cfg.get("REACH_RATE_EV_MULT", 0.7))
-
-    # Swing除外：初動完璧すぎ（Day向き）
-    if _is_perfect_first_leg(df, atr):
-        # Swing側の点を落としてDay側に寄せる
-        ev_adj *= 0.7
-        rr_adj *= 0.9
-
-    # Swingスコア
-    swing_score = 0.0
-    swing_score += 35.0 * (1.0 if in_zone else 0.0)
-    swing_score += 20.0 * (1.0 if trend_up else 0.0)
-    swing_score += 25.0 * float(np.clip(rr_adj / 3.0, 0, 1))
-    if not math.isnan(rsi):
-        swing_score += 20.0 * float(np.clip((70 - rsi) / 40.0, 0, 1))
-    if not atr_ok:
-        swing_score -= 35.0
-    if reject_reason:
-        swing_score -= 999.0
-
-    # ===== Day案 =====
-    # トリガー：20日高値（当日含まず）
-    trigger = brk
-    day_entry = float(trigger) if math.isfinite(trigger) else last
-    day_sl = float(day_entry - 1.0 * atr) if (atr and atr > 0) else float("nan")
-    day_tp = float(day_entry + 1.5 * atr) if (atr and atr > 0) else float("nan")
-
-    day_risk = float(day_entry - day_sl) if math.isfinite(day_sl) else float("nan")
-    day_reward = float(day_tp - day_entry) if math.isfinite(day_tp) else float("nan")
-    day_rr_raw = float(day_reward / day_risk) if (math.isfinite(day_reward) and math.isfinite(day_risk) and day_risk > 0) else 0.0
-
-    # GU危険域（v11系）
-    gu_danger = False
-    if atr and atr > 0 and math.isfinite(trigger):
-        if run_mode == "postopen":
-            # 実ギャップ：最新バーが当日なら open と前日closeで判定
-            if len(df) >= 2:
-                gap = float(open_.iloc[-1] - close.iloc[-2])
-                gap_atr = abs(gap) / atr
-                gu_danger = bool(gap_atr >= float(cfg.get("MAX_GU_DANGER_ATR_POSTOPEN", 1.2)))
+    # トレンド（最大30）
+    if np.isfinite(slope_last):
+        if slope_last >= 0.01:
+            sc += 12
+        elif slope_last > 0:
+            sc += 6 + (slope_last / 0.01) * 6
         else:
-            # 寄り前：trigger までの距離が小さすぎ＝寄りで飛びやすい危険域（想定）
-            dist = float(trigger - last)
-            gap_atr = abs(dist) / atr
-            gu_danger = bool(gap_atr <= float(cfg.get("MAX_GU_DANGER_ATR_PREOPEN", 0.8)) and last >= trigger - 0.2 * atr)
+            sc += max(0.0, 6 + slope_last * 60)
 
-    # Day EV（保守的）
-    p2 = 0.28 + (0.17 if trend_up else 0.0) + (0.05 if (not math.isnan(rsi) and rsi > 45) else 0.0)
-    p2 = float(np.clip(p2, 0.10, 0.60))
-    day_ev_raw = float(p2 * day_rr_raw - (1 - p2) * 1.0)
-    day_rr_adj = day_rr_raw
-    day_ev_adj = day_ev_raw
-    if gu_danger:
-        day_ev_adj *= 0.6
-        day_rr_adj *= 0.8
+    if np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last):
+        if c_last > ma20_last > ma50_last:
+            sc += 12
+        elif c_last > ma20_last:
+            sc += 6
+        elif ma20_last > ma50_last:
+            sc += 3
 
-    # Dayスコア（押し戻し→再上昇は寄り後判定側で強化する想定。v11.1はベースのみ）
-    day_score = 0.0
-    day_score += 40.0 * float(np.clip(day_rr_adj / 2.0, 0, 1))
-    day_score += 35.0 * (1.0 if trend_up else 0.0)
-    if not math.isnan(rsi):
-        day_score += 15.0 * float(np.clip((rsi - 40) / 30.0, 0, 1))
-    if gu_danger:
-        day_score -= 25.0
+    # 押し目（最大30）
+    if np.isfinite(rsi):
+        if 30 <= rsi <= 45:
+            sc += 14
+        elif 45 < rsi <= 60:
+            sc += 10
+        elif 25 <= rsi < 30 or 60 < rsi <= 70:
+            sc += 6
+        else:
+            sc += 2
 
-    # モード選択：Day優位ならDay
-    mode = "swing"
-    total_score = swing_score
-    rr_out_raw = rr_raw
-    ev_out_raw = ev_raw
-    rr_out_adj = rr_adj
-    ev_out_adj = ev_adj
-    tp_out = tp
-    sl_out = sl
+    if np.isfinite(off):
+        if -18 <= off <= -5:
+            sc += 10
+        elif -25 <= off < -18:
+            sc += 6
+        elif -5 < off <= 5:
+            sc += 6
+        else:
+            sc += 2
 
-    if math.isfinite(trigger) and day_score > swing_score:
-        mode = "day"
-        total_score = day_score
-        rr_out_raw = day_rr_raw
-        ev_out_raw = day_ev_raw
-        rr_out_adj = day_rr_adj
-        ev_out_adj = day_ev_adj
-        tp_out = day_tp
-        sl_out = day_sl
+    if np.isfinite(shadow):
+        if shadow >= 0.5:
+            sc += 6
+        elif shadow >= 0.3:
+            sc += 3
 
-    return {
-        "mode": mode,
-        "total_score": float(total_score),
+    # 流動性・ボラ（最大40）
+    if np.isfinite(t):
+        if t >= 1e9:
+            sc += 28
+        elif t >= 1e8:
+            sc += 28 * (t - 1e8) / 9e8
 
-        "rr_raw": float(rr_out_raw),
-        "ev_r_raw": float(ev_out_raw),
-        "rr_adj": float(rr_out_adj),
-        "ev_r_adj": float(ev_out_adj),
+    if np.isfinite(vola):
+        if vola < 0.02:
+            sc += 12
+        elif vola < 0.06:
+            sc += 12 * (0.06 - vola) / 0.04
 
-        "tp_price": float(tp_out) if math.isfinite(tp_out) else float("nan"),
-        "sl_price": float(sl_out) if math.isfinite(sl_out) else float("nan"),
+    score = float(np.clip(sc, 0, 100))
+    return score
 
-        "in_price": float(in_price) if math.isfinite(in_price) else float("nan"),
-        "in_diff_pct": float(in_diff_pct) if math.isfinite(in_diff_pct) else float("nan"),
 
-        "gu_danger": bool(gu_danger) if mode == "day" else False,
-        "reach_rate": float(reach_rate) if math.isfinite(reach_rate) else float("nan"),
-        "reject_reason": str(reject_reason),
-    }
+def calc_inout_for_stock(hist: pd.DataFrame):
+    """
+    in_rank, tp_pct(%), sl_pct(%; negative)
+    """
+    if hist is None or len(hist) < 80:
+        return "様子見", 6.0, -3.0
+
+    df = _add_indicators(hist)
+
+    close_last = _last_val(df["Close"])
+    ma20_last = _last_val(df["ma20"])
+    rsi_last = _last_val(df["rsi14"])
+    off_last = _last_val(df["off_high_pct"])
+    vola = _last_val(df["vola20"])
+    shadow = _last_val(df["lower_shadow_ratio"])
+
+    rank = "様子見"
+
+    if np.isfinite(rsi_last) and np.isfinite(ma20_last) and np.isfinite(close_last) and np.isfinite(off_last):
+        # “押し目完了”寄り（強）
+        if 30 <= rsi_last <= 48 and -20 <= off_last <= -5 and close_last >= ma20_last * 0.97 and shadow >= 0.3:
+            rank = "強IN"
+        # 普通
+        elif 40 <= rsi_last <= 62 and -15 <= off_last <= 5 and close_last >= ma20_last * 0.99:
+            rank = "通常IN"
+        # 弱め
+        elif 25 <= rsi_last < 30 or 62 < rsi_last <= 72:
+            rank = "弱めIN"
+        else:
+            rank = "様子見"
+
+    # TP/SL%（ボラで可変）
+    v = float(abs(vola)) if np.isfinite(vola) else 0.03
+    if v < 0.015:
+        tp = 0.06
+        sl = -0.03
+    elif v < 0.03:
+        tp = 0.08
+        sl = -0.04
+    else:
+        tp = 0.12
+        sl = -0.06
+
+    # rank微調整
+    if rank == "強IN":
+        tp *= 1.05
+        sl *= 0.90
+    elif rank == "弱めIN":
+        tp *= 0.95
+        sl *= 0.90
+    elif rank == "様子見":
+        tp *= 0.85
+        sl *= 0.85
+
+    tp = float(np.clip(tp, 0.05, 0.18))
+    sl = float(np.clip(sl, -0.08, -0.02))
+
+    return rank, tp * 100.0, sl * 100.0
