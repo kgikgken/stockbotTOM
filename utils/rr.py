@@ -31,11 +31,19 @@ def _atr(df: pd.DataFrame, period: int = 14) -> float:
 
 
 def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) -> dict:
+    """
+    可変RR（固定RR禁止）
+    - SL: 構造（直近安値）＋ATR（クランプあり）
+    - TP: 直近高値/抵抗（60d high）に現実的に届く範囲（地合いで微調整）
+    - entry: 押し目基準（MA20 - 0.5ATR）を軸に、現値を上回らないよう補正
+    戻り：
+      entry, tp_pct, sl_pct, tp_price, sl_price, rr, effective_rr(for_dayのみ)
+    """
     df = hist.copy()
     close = df["Close"].astype(float)
     price = _last_val(close)
     if not np.isfinite(price) or price <= 0:
-        return dict(rr=0.0, entry=0.0, tp_pct=0.0, sl_pct=0.0, tp_price=0.0, sl_price=0.0, entry_basis="na")
+        return dict(rr=0.0, effective_rr=0.0, entry=0.0, tp_pct=0.0, sl_pct=0.0, tp_price=0.0, sl_price=0.0, entry_basis="na")
 
     atr = _atr(df, period=14)
     if not np.isfinite(atr) or atr <= 0:
@@ -44,7 +52,6 @@ def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) 
     ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else price
     ma5 = float(close.rolling(5).mean().iloc[-1]) if len(close) >= 5 else price
 
-    # entry（押し目基準）
     entry = ma20 - 0.5 * atr
     entry_basis = "pullback"
 
@@ -57,32 +64,34 @@ def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) 
 
     lookback = 8 if for_day else 12
     swing_low = float(df["Low"].astype(float).tail(lookback).min())
-    sl_price = min(entry - 0.8 * atr, swing_low - 0.2 * atr)
+    sl_price_raw = min(entry - 0.8 * atr, swing_low - 0.2 * atr)
 
-    sl_pct = (sl_price / entry - 1.0)
+    sl_pct = (sl_price_raw / entry - 1.0)
     sl_pct = float(np.clip(sl_pct, -0.10, -0.02))
     sl_price = entry * (1.0 + sl_pct)
 
     hi_window = 60 if len(close) >= 60 else len(close)
     high_60 = float(close.tail(hi_window).max())
-    tp_price = min(high_60 * 0.995, entry * (1.0 + (0.22 if not for_day else 0.08)))
+    tp_price_raw = min(high_60 * 0.995, entry * (1.0 + (0.22 if not for_day else 0.08)))
 
     if mkt_score >= 70:
-        tp_price *= 1.03
+        tp_price_raw *= 1.03
     elif mkt_score <= 45:
-        tp_price *= 0.97
+        tp_price_raw *= 0.97
 
-    if tp_price <= entry:
-        tp_price = entry * (1.0 + (0.06 if not for_day else 0.03))
+    if tp_price_raw <= entry:
+        tp_price_raw = entry * (1.0 + (0.06 if not for_day else 0.03))
 
-    tp_pct = (tp_price / entry - 1.0)
+    tp_pct = (tp_price_raw / entry - 1.0)
     tp_pct = float(np.clip(tp_pct, 0.03, 0.30))
     tp_price = entry * (1.0 + tp_pct)
 
     rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
+    effective_rr = rr * 0.70 if for_day else rr
 
     return dict(
         rr=float(rr),
+        effective_rr=float(effective_rr),
         entry=float(round(entry, 1)),
         tp_pct=float(tp_pct),
         sl_pct=float(sl_pct),
