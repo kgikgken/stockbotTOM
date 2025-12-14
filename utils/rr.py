@@ -36,8 +36,9 @@ def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) 
     - SL: 構造（直近安値）＋ATR
     - TP: 直近高値/抵抗（60d high）に現実的に届く範囲
     - entry: 「押し目基準」（MA20 - 0.5ATR）を軸に、現値を上回らないよう補正
+
     戻り：
-      entry, tp_pct, sl_pct, tp_price, sl_price, rr
+      entry, tp_pct, sl_pct, tp_price, sl_price, rr, entry_basis
     """
     df = hist.copy()
     close = df["Close"].astype(float)
@@ -78,7 +79,6 @@ def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) 
     # TP（抵抗帯：60日高値の手前＋地合いで微調整）
     hi_window = 60 if len(close) >= 60 else len(close)
     high_60 = float(close.tail(hi_window).max())
-    # 抵抗手前
     tp_price = min(high_60 * 0.995, entry * (1.0 + (0.22 if not for_day else 0.08)))
 
     # 地合いでTP微調整
