@@ -57,12 +57,12 @@ def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) 
     entry = ma20 - 0.5 * atr
     entry_basis = "pullback"
 
-    # 強トレンドで浅め（GUでも無理に買わせない：entryは上げすぎない）
+    # 強トレンドで浅め
     if price > ma5 > ma20:
         entry = ma20 + (ma5 - ma20) * 0.25
         entry_basis = "trend_pullback"
 
-    # 現値より上にはしない（“押し目”の定義を守る）
+    # 現値より上にはしない
     if entry > price:
         entry = price * 0.995
 
@@ -71,23 +71,20 @@ def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) 
     swing_low = float(df["Low"].astype(float).tail(lookback).min())
     sl_price = min(entry - 0.8 * atr, swing_low - 0.2 * atr)
 
-    # SLが近すぎ/遠すぎのクランプ
     sl_pct = (sl_price / entry - 1.0)
     sl_pct = float(np.clip(sl_pct, -0.10, -0.02))
     sl_price = entry * (1.0 + sl_pct)
 
-    # TP（抵抗帯：60日高値の手前＋地合いで微調整）
+    # TP（抵抗帯：60日高値の手前）
     hi_window = 60 if len(close) >= 60 else len(close)
     high_60 = float(close.tail(hi_window).max())
     tp_price = min(high_60 * 0.995, entry * (1.0 + (0.22 if not for_day else 0.08)))
 
-    # 地合いでTP微調整
     if mkt_score >= 70:
         tp_price *= 1.03
     elif mkt_score <= 45:
         tp_price *= 0.97
 
-    # TPがentry以下なら最低限
     if tp_price <= entry:
         tp_price = entry * (1.0 + (0.06 if not for_day else 0.03))
 
