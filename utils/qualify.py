@@ -1,135 +1,228 @@
 from __future__ import annotations
 
-from typing import Dict, Literal
+from typing import Dict, Tuple, List
 
 import numpy as np
 import pandas as pd
 
 
-RunnerKind = Literal["A1_breakout", "A2_prebreak", "none"]
-
-
-def _last(s: pd.Series) -> float:
+def _last(series: pd.Series) -> float:
     try:
-        return float(s.iloc[-1])
+        return float(series.iloc[-1])
     except Exception:
         return float("nan")
 
 
-def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    if df is None or len(df) < period + 2:
+def _ma(series: pd.Series, w: int) -> float:
+    if series is None or len(series) < w:
+        return _last(series)
+    return float(series.rolling(w).mean().iloc[-1])
+
+
+def _pct(a: float, b: float) -> float:
+    if not (np.isfinite(a) and np.isfinite(b) and b != 0):
         return float("nan")
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    close = df["Close"].astype(float)
-    prev_close = close.shift(1)
-
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1
-    ).max(axis=1)
-
-    v = tr.rolling(period).mean().iloc[-1]
-    return float(v) if np.isfinite(v) else float("nan")
+    return float((a / b - 1.0) * 100.0)
 
 
-def _rolling_high(close: pd.Series, window: int) -> float:
-    if close is None or len(close) < 5:
-        return float("nan")
-    w = min(window, len(close))
-    return float(close.tail(w).max())
-
-
-def qualify_runner_grade(hist: pd.DataFrame) -> Dict:
+def runner_strength(hist: pd.DataFrame) -> Tuple[float, str]:
     """
-    vAB' Prime: Runner判定（A1/A2）+ strength(0-100) + grade(1-3)
-
-    A1_breakout:
-      - MA20>MA60（上昇基調）
-      - 60日高値の1.5%以内（ブレイク近傍）
-      - 20日売買代金 >= 1億/日
-
-    A2_prebreak:
-      - MA20>MA60
-      - 高値からの押し戻し 0.3〜1.2ATR
-      - RSI<=75（過熱除外）
-      - 直近安値切り上げ
+    走行能力（0-100）とラベルを返す。
+    A2_prebreak: 高値圏で押している（走る準備）
+    A3_break    : 直近で高値更新〜ブレイク進行
+    B           : 走行はあるが弱い
+    C           : 走らない
     """
-    if hist is None or len(hist) < 90:
-        return dict(is_runner=False, kind="none", strength=0.0, grade=1)
+    if hist is None or len(hist) < 120:
+        return 0.0, "C"
 
     df = hist.copy()
     close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
 
     c = _last(close)
-    if not np.isfinite(c) or c <= 0:
-        return dict(is_runner=False, kind="none", strength=0.0, grade=1)
+    ma20 = _ma(close, 20)
+    ma50 = _ma(close, 50)
+    ma120 = _ma(close, 120)
 
-    ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else c
-    ma60 = float(close.rolling(60).mean().iloc[-1]) if len(close) >= 60 else ma20
-    trend_ok = bool(np.isfinite(ma20) and np.isfinite(ma60) and ma20 > ma60)
+    if not (np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(ma120)):
+        return 0.0, "C"
 
-    atr = _atr(df, 14)
-    if not np.isfinite(atr) or atr <= 0:
-        atr = c * 0.015
+    hi60 = float(close.tail(60).max()) if len(close) >= 60 else float(close.max())
+    off_high = _pct(c, hi60)  # 高値からの距離(%)
 
-    # RSI14
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
-    rsi14 = 100 - (100 / (1 + rs))
-    rsi = _last(rsi14)
+    ret5 = _pct(c, float(close.iloc[-6])) if len(close) >= 6 else float("nan")
+    ret20 = _pct(c, float(close.iloc[-21])) if len(close) >= 21 else float("nan")
 
-    turnover = close * vol
-    t20 = float(turnover.rolling(20).mean().iloc[-1]) if len(turnover) >= 20 else float("nan")
-    liq_ok = bool(np.isfinite(t20) and t20 >= 1e8)
+    r = close.pct_change(fill_method=None)
+    vola20 = float(r.rolling(20).std().iloc[-1]) if len(r) >= 25 else float("nan")
 
-    high60 = _rolling_high(close, 60)
-    dist_to_high = (high60 / c - 1.0) * 100.0 if np.isfinite(high60) else 999.0
+    sc = 0.0
 
-    recent_high = float(high.iloc[-6:-1].max()) if len(high) >= 6 else float(high.tail(5).max())
-    pullback = float(recent_high - c)
-    pullback_atr = pullback / atr if atr > 0 else 999.0
-
-    reup = bool(len(low) >= 3 and float(low.iloc[-1]) > float(low.iloc[-2]))
-
-    a1 = trend_ok and liq_ok and (dist_to_high <= 1.5) and (c >= ma20 * 0.995)
-    a2 = trend_ok and liq_ok and (0.3 <= pullback_atr <= 1.2) and reup and (np.isfinite(rsi) and rsi <= 75)
-
-    kind: RunnerKind = "none"
-    is_runner = False
-    strength = 0.0
-
-    if a1:
-        kind = "A1_breakout"
-        is_runner = True
-        strength = 55.0
-        strength += float(np.clip(20.0 - dist_to_high * 10.0, 0.0, 20.0))
-        strength += 15.0 if c > ma20 else 5.0
-        strength += 10.0 if t20 >= 5e8 else float(np.clip((t20 - 1e8) / 4e8 * 10.0, 0.0, 10.0))
-    elif a2:
-        kind = "A2_prebreak"
-        is_runner = True
-        strength = 50.0
-        strength += float(np.clip((1.2 - pullback_atr) * 15.0, 0.0, 15.0))
-        strength += 10.0 if reup else 0.0
-        strength += 10.0 if t20 >= 5e8 else float(np.clip((t20 - 1e8) / 4e8 * 10.0, 0.0, 10.0))
-        if np.isfinite(rsi):
-            strength += float(np.clip((65.0 - rsi) * 0.3, 0.0, 8.0))
-
-    strength = float(np.clip(strength, 0.0, 100.0))
-
-    if strength >= 75:
-        grade = 3
-    elif strength >= 60:
-        grade = 2
+    # トレンド構造（最大40）
+    if c > ma20 > ma50 > ma120:
+        sc += 40
+    elif c > ma20 > ma50:
+        sc += 30
+    elif c > ma20 and ma20 > ma50:
+        sc += 22
+    elif ma20 > ma50:
+        sc += 14
     else:
-        grade = 1
+        sc += 5
 
-    return dict(is_runner=is_runner, kind=kind, strength=strength, grade=int(grade))
+    # 高値近接（最大25）
+    if np.isfinite(off_high):
+        if off_high >= 0:
+            sc += 25
+        elif off_high >= -2.0:
+            sc += 22
+        elif off_high >= -5.0:
+            sc += 16
+        elif off_high >= -10.0:
+            sc += 10
+        else:
+            sc += 4
+
+    # 勢い（最大25）
+    if np.isfinite(ret20):
+        if ret20 >= 15:
+            sc += 14
+        elif ret20 >= 8:
+            sc += 10
+        elif ret20 >= 3:
+            sc += 6
+        else:
+            sc += 2
+
+    if np.isfinite(ret5):
+        if ret5 >= 6:
+            sc += 11
+        elif ret5 >= 3:
+            sc += 8
+        elif ret5 >= 0:
+            sc += 5
+        else:
+            sc += 0
+
+    # ボラ過大は減点（最大-10）
+    if np.isfinite(vola20):
+        if vola20 > 0.05:
+            sc -= 10
+        elif vola20 > 0.035:
+            sc -= 6
+        elif vola20 > 0.028:
+            sc -= 3
+
+    sc = float(np.clip(sc, 0, 100))
+
+    label = "C"
+    if sc >= 78 and np.isfinite(off_high) and off_high >= -5.0:
+        label = "A2_prebreak"
+        if off_high >= -1.0 and np.isfinite(ret5) and ret5 > 0:
+            label = "A3_break"
+    elif sc >= 65:
+        label = "B"
+    else:
+        label = "C"
+
+    return sc, label
+
+
+def pullback_quality(gap_pct: float, in_rank: str) -> float:
+    """
+    押し目の“実行しやすさ”を0-100で返す。
+    gap_pct: 現在価格が基準INより何%上か（+は上、-は下）
+    """
+    sc = 50.0
+
+    if in_rank == "強IN":
+        sc += 20
+    elif in_rank == "通常IN":
+        sc += 10
+    elif in_rank == "弱めIN":
+        sc += 0
+    else:
+        sc -= 10
+
+    # 追い気味は減点（+2%を超えると大きく減点）
+    if np.isfinite(gap_pct):
+        if gap_pct <= 0.8:
+            sc += 20
+        elif gap_pct <= 1.5:
+            sc += 8
+        elif gap_pct <= 2.5:
+            sc -= 10
+        elif gap_pct <= 4.0:
+            sc -= 22
+        else:
+            sc -= 35
+
+    return float(np.clip(sc, 0, 100))
+
+
+def decide_al_for_swing(runner_sc: float, runner_label: str, rr: float, ev_r: float, in_rank: str) -> int:
+    """
+    SwingのAL（1/2/3）を返す。
+    """
+    if not (np.isfinite(rr) and np.isfinite(ev_r) and np.isfinite(runner_sc)):
+        return 1
+
+    if rr < 1.8 or ev_r < 0.3:
+        return 1
+
+    if runner_label.startswith("A") and runner_sc >= 75 and ev_r >= 0.6 and rr >= 2.5 and in_rank in ("強IN", "通常IN"):
+        return 3
+
+    if runner_sc >= 65 and ev_r >= 0.45 and rr >= 2.0 and in_rank in ("強IN", "通常IN", "弱めIN"):
+        return 2
+
+    return 1
+
+
+def al3_score(runner_sc: float, rr: float, ev_r: float, pb_sc: float) -> float:
+    """
+    AL3の最終選抜スコア（大勝ちモードの一点集中用）。
+    """
+    s = 0.0
+    if np.isfinite(runner_sc):
+        s += runner_sc * 0.45
+    if np.isfinite(ev_r):
+        s += (ev_r * 100.0) * 0.35
+    if np.isfinite(rr):
+        s += (rr * 10.0) * 0.15
+    if np.isfinite(pb_sc):
+        s += pb_sc * 0.05
+    return float(s)
+
+
+def enforce_single_al3(cands: List[Dict], event_near: bool = False) -> List[Dict]:
+    """
+    1日1銘柄 AL3 ルール。
+    - event_near の日は AL3 1銘柄以外を表示しない
+    - 通常日は AL3 1位のみAL3、残りはAL2へ格下げ
+    """
+    if not cands:
+        return cands
+
+    al3 = [c for c in cands if int(c.get("al", 1)) == 3]
+    if not al3:
+        return cands
+
+    al3_sorted = sorted(al3, key=lambda x: float(x.get("al3_score", 0.0)), reverse=True)
+    best = al3_sorted[0]
+    best_ticker = str(best.get("ticker", ""))
+
+    if event_near:
+        return [best]
+
+    out: List[Dict] = []
+    for c in cands:
+        if str(c.get("ticker", "")) == best_ticker:
+            c["al"] = 3
+            out.append(c)
+        else:
+            if int(c.get("al", 1)) == 3:
+                c["al"] = 2
+            out.append(c)
+
+    return out
