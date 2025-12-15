@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple, List
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -10,219 +10,152 @@ def _last(series: pd.Series) -> float:
     try:
         return float(series.iloc[-1])
     except Exception:
-        return float("nan")
+        return np.nan
 
 
-def _ma(series: pd.Series, w: int) -> float:
-    if series is None or len(series) < w:
-        return _last(series)
-    return float(series.rolling(w).mean().iloc[-1])
+def _sma(s: pd.Series, n: int) -> float:
+    if s is None or len(s) < n:
+        return _last(s)
+    return float(s.rolling(n).mean().iloc[-1])
 
 
-def _pct(a: float, b: float) -> float:
-    if not (np.isfinite(a) and np.isfinite(b) and b != 0):
-        return float("nan")
-    return float((a / b - 1.0) * 100.0)
+def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    if df is None or len(df) < period + 2:
+        return np.nan
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
+    prev_close = close.shift(1)
+
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1
+    ).max(axis=1)
+
+    v = tr.rolling(period).mean().iloc[-1]
+    return float(v) if np.isfinite(v) else np.nan
 
 
-def runner_strength(hist: pd.DataFrame) -> Tuple[float, str]:
+def qualify_runner(hist: pd.DataFrame) -> Dict[str, float | str]:
     """
-    走行能力（0-100）とラベルを返す。
-    A2_prebreak: 高値圏で押している（走る準備）
-    A3_break    : 直近で高値更新〜ブレイク進行
-    B           : 走行はあるが弱い
-    C           : 走らない
+    Runner分類（A1/A2_prebreak/B/C）と走行強度(0-100)
+    vAB_prime++: AL3の前提は A2_prebreak のみ。
+
+    A1: すでに走ってしまった（追い禁止）
+    A2_prebreak: 走る準備（押し戻し→再上昇の余地）
+    B/C: 除外寄り
     """
-    if hist is None or len(hist) < 120:
-        return 0.0, "C"
+    if hist is None or len(hist) < 80:
+        return {"runner": "C", "strength": 0.0}
 
     df = hist.copy()
     close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
 
     c = _last(close)
-    ma20 = _ma(close, 20)
-    ma50 = _ma(close, 50)
-    ma120 = _ma(close, 120)
+    if not np.isfinite(c) or c <= 0:
+        return {"runner": "C", "strength": 0.0}
 
-    if not (np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(ma120)):
-        return 0.0, "C"
+    ma20 = _sma(close, 20)
+    ma60 = _sma(close, 60)
 
-    hi60 = float(close.tail(60).max()) if len(close) >= 60 else float(close.max())
-    off_high = _pct(c, hi60)  # 高値からの距離(%)
+    atr = _atr(df, 14)
+    if not np.isfinite(atr) or atr <= 0:
+        atr = max(c * 0.01, 1.0)
 
-    ret5 = _pct(c, float(close.iloc[-6])) if len(close) >= 6 else float("nan")
-    ret20 = _pct(c, float(close.iloc[-21])) if len(close) >= 21 else float("nan")
+    trend_ok = bool(np.isfinite(ma20) and np.isfinite(ma60) and c > ma20 > ma60)
 
-    r = close.pct_change(fill_method=None)
-    vola20 = float(r.rolling(20).std().iloc[-1]) if len(r) >= 25 else float("nan")
+    # 直近10日レンジの位置
+    hi10 = float(high.tail(10).max())
+    lo10 = float(low.tail(10).min())
+    rng = max(hi10 - lo10, 1e-9)
+    pos = float((c - lo10) / rng)  # 0..1
 
+    # 直近3日での“走り”強さ（ATR比）
+    surge = float(close.iloc[-1] - close.iloc[-4]) if len(close) >= 4 else 0.0
+    surge_atr = surge / atr
+
+    # 押し戻しがあるか（直近高値から0.4〜1.2ATR）
+    recent_high = float(high.iloc[-6:-1].max()) if len(high) >= 6 else float(high.max())
+    pullback = float(recent_high - c)
+    pullback_atr = pullback / atr
+    pullback_ok = bool(0.4 <= pullback_atr <= 1.2)
+
+    # 分類
+    if trend_ok and surge_atr >= 1.8 and pos >= 0.80:
+        runner = "A1"
+    elif trend_ok and surge_atr < 1.8 and pullback_ok and pos >= 0.45:
+        runner = "A2_prebreak"
+    elif trend_ok and pos >= 0.35:
+        runner = "B"
+    else:
+        runner = "C"
+
+    # 強度 0-100
     sc = 0.0
+    if trend_ok:
+        sc += 35.0
 
-    # トレンド構造（最大40）
-    if c > ma20 > ma50 > ma120:
-        sc += 40
-    elif c > ma20 > ma50:
-        sc += 30
-    elif c > ma20 and ma20 > ma50:
-        sc += 22
-    elif ma20 > ma50:
-        sc += 14
+    # 走り過ぎでないほど加点（A1は別途弾く）
+    sc += float(np.clip((1.8 - max(surge_atr, 0.0)) / 1.8, 0, 1)) * 20.0
+
+    if pullback_ok:
+        sc += 25.0
     else:
-        sc += 5
+        sc += float(np.clip(1.0 - abs(pullback_atr - 0.8) / 1.2, 0, 1)) * 12.0
 
-    # 高値近接（最大25）
-    if np.isfinite(off_high):
-        if off_high >= 0:
-            sc += 25
-        elif off_high >= -2.0:
-            sc += 22
-        elif off_high >= -5.0:
-            sc += 16
-        elif off_high >= -10.0:
-            sc += 10
-        else:
-            sc += 4
+    sc += float(np.clip(pos, 0, 1)) * 20.0
 
-    # 勢い（最大25）
-    if np.isfinite(ret20):
-        if ret20 >= 15:
-            sc += 14
-        elif ret20 >= 8:
-            sc += 10
-        elif ret20 >= 3:
-            sc += 6
-        else:
-            sc += 2
-
-    if np.isfinite(ret5):
-        if ret5 >= 6:
-            sc += 11
-        elif ret5 >= 3:
-            sc += 8
-        elif ret5 >= 0:
-            sc += 5
-        else:
-            sc += 0
-
-    # ボラ過大は減点（最大-10）
-    if np.isfinite(vola20):
-        if vola20 > 0.05:
-            sc -= 10
-        elif vola20 > 0.035:
-            sc -= 6
-        elif vola20 > 0.028:
-            sc -= 3
-
-    sc = float(np.clip(sc, 0, 100))
-
-    label = "C"
-    if sc >= 78 and np.isfinite(off_high) and off_high >= -5.0:
-        label = "A2_prebreak"
-        if off_high >= -1.0 and np.isfinite(ret5) and ret5 > 0:
-            label = "A3_break"
-    elif sc >= 65:
-        label = "B"
-    else:
-        label = "C"
-
-    return sc, label
+    strength = float(np.clip(sc, 0, 100))
+    return {"runner": runner, "strength": strength}
 
 
-def pullback_quality(gap_pct: float, in_rank: str) -> float:
+def calc_al(runner: str, strength: float, in_rank: str, rr: float, ev_r: float) -> int:
     """
-    押し目の“実行しやすさ”を0-100で返す。
-    gap_pct: 現在価格が基準INより何%上か（+は上、-は下）
+    vAB_prime++:
+      - AL3の前提は A2_prebreak かつ strength>=70
+      - A1は追い禁止なのでAL1扱い
+      - B/CはAL1（Swing枠に出さない）
     """
-    sc = 50.0
+    runner = (runner or "").strip()
 
-    if in_rank == "強IN":
-        sc += 20
-    elif in_rank == "通常IN":
-        sc += 10
-    elif in_rank == "弱めIN":
-        sc += 0
-    else:
-        sc -= 10
-
-    # 追い気味は減点（+2%を超えると大きく減点）
-    if np.isfinite(gap_pct):
-        if gap_pct <= 0.8:
-            sc += 20
-        elif gap_pct <= 1.5:
-            sc += 8
-        elif gap_pct <= 2.5:
-            sc -= 10
-        elif gap_pct <= 4.0:
-            sc -= 22
-        else:
-            sc -= 35
-
-    return float(np.clip(sc, 0, 100))
-
-
-def decide_al_for_swing(runner_sc: float, runner_label: str, rr: float, ev_r: float, in_rank: str) -> int:
-    """
-    SwingのAL（1/2/3）を返す。
-    """
-    if not (np.isfinite(rr) and np.isfinite(ev_r) and np.isfinite(runner_sc)):
+    if runner == "A1":
         return 1
 
-    if rr < 1.8 or ev_r < 0.3:
+    if runner == "A2_prebreak":
+        if strength >= 70 and in_rank in ("強IN", "通常IN") and rr >= 2.0 and ev_r >= 0.45:
+            return 3
         return 1
-
-    if runner_label.startswith("A") and runner_sc >= 75 and ev_r >= 0.6 and rr >= 2.5 and in_rank in ("強IN", "通常IN"):
-        return 3
-
-    if runner_sc >= 65 and ev_r >= 0.45 and rr >= 2.0 and in_rank in ("強IN", "通常IN", "弱めIN"):
-        return 2
 
     return 1
 
 
-def al3_score(runner_sc: float, rr: float, ev_r: float, pb_sc: float) -> float:
+def al3_score(runner_strength: float, ev_r: float, rr: float, gap_pct: float, in_rank: str) -> float:
     """
-    AL3の最終選抜スコア（大勝ちモードの一点集中用）。
+    AL3が複数出た場合の一位決定用。
+
+    PullbackQuality:
+      - 現在が押し目基準より上に飛んでる（gapが大きい）ほど減点
+      - 目安: gap 0〜1.5% 良し、>3% 減点、>5% 強い減点
     """
-    s = 0.0
-    if np.isfinite(runner_sc):
-        s += runner_sc * 0.45
-    if np.isfinite(ev_r):
-        s += (ev_r * 100.0) * 0.35
-    if np.isfinite(rr):
-        s += (rr * 10.0) * 0.15
-    if np.isfinite(pb_sc):
-        s += pb_sc * 0.05
-    return float(s)
+    g = float(gap_pct) if np.isfinite(gap_pct) else 0.0
 
+    if g <= 1.5:
+        pull_q = 1.0
+    elif g <= 3.0:
+        pull_q = 0.9
+    elif g <= 5.0:
+        pull_q = 0.75
+    else:
+        pull_q = 0.60
 
-def enforce_single_al3(cands: List[Dict], event_near: bool = False) -> List[Dict]:
-    """
-    1日1銘柄 AL3 ルール。
-    - event_near の日は AL3 1銘柄以外を表示しない
-    - 通常日は AL3 1位のみAL3、残りはAL2へ格下げ
-    """
-    if not cands:
-        return cands
+    if in_rank == "強IN":
+        in_w = 1.05
+    elif in_rank == "通常IN":
+        in_w = 1.00
+    else:
+        in_w = 0.92
 
-    al3 = [c for c in cands if int(c.get("al", 1)) == 3]
-    if not al3:
-        return cands
-
-    al3_sorted = sorted(al3, key=lambda x: float(x.get("al3_score", 0.0)), reverse=True)
-    best = al3_sorted[0]
-    best_ticker = str(best.get("ticker", ""))
-
-    if event_near:
-        return [best]
-
-    out: List[Dict] = []
-    for c in cands:
-        if str(c.get("ticker", "")) == best_ticker:
-            c["al"] = 3
-            out.append(c)
-        else:
-            if int(c.get("al", 1)) == 3:
-                c["al"] = 2
-            out.append(c)
-
-    return out
+    rs = float(runner_strength) / 100.0
+    return float(rs * float(ev_r) * float(rr) * float(pull_q) * float(in_w))
