@@ -1,161 +1,62 @@
-from __future__ import annotations
 
-from typing import Dict
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-
-def _last(series: pd.Series) -> float:
-    try:
-        return float(series.iloc[-1])
-    except Exception:
-        return np.nan
+from .scoring import add_indicators
 
 
-def _sma(s: pd.Series, n: int) -> float:
-    if s is None or len(s) < n:
-        return _last(s)
-    return float(s.rolling(n).mean().iloc[-1])
-
-
-def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    if df is None or len(df) < period + 2:
-        return np.nan
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    close = df["Close"].astype(float)
-    prev_close = close.shift(1)
-
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1
-    ).max(axis=1)
-
-    v = tr.rolling(period).mean().iloc[-1]
-    return float(v) if np.isfinite(v) else np.nan
-
-
-def qualify_runner(hist: pd.DataFrame) -> Dict[str, float | str]:
+def trend_gate(hist: pd.DataFrame) -> tuple[bool, dict]:
     """
-    Runner分類（A1/A2_prebreak/B/C）と走行強度(0-100)
-    vAB_prime++: AL3の前提は A2_prebreak のみ。
-
-    A1: すでに走ってしまった（追い禁止）
-    A2_prebreak: 走る準備（押し戻し→再上昇の余地）
-    B/C: 除外寄り
+    逆張り排除ゲート（必須）
+    - Close > MA20 > MA50
+    - MA20 上向き（5日前比+）
+    - 安値切り上げ（low[-1] > low[-3] > low[-5]）
+    - 20日平均売買代金 >= 1億
     """
-    if hist is None or len(hist) < 80:
-        return {"runner": "C", "strength": 0.0}
+    df = add_indicators(hist)
+    diag = {"reason": ""}
 
-    df = hist.copy()
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
+    if df is None or len(df) < 60:
+        diag["reason"] = "data_short"
+        return False, diag
 
-    c = _last(close)
-    if not np.isfinite(c) or c <= 0:
-        return {"runner": "C", "strength": 0.0}
+    c = df["Close"].astype(float)
+    ma20 = df["ma20"].astype(float)
+    ma50 = df["ma50"].astype(float)
+    low = df["Low"].astype(float) if "Low" in df.columns else None
+    t20 = df["turnover_avg20"].astype(float)
 
-    ma20 = _sma(close, 20)
-    ma60 = _sma(close, 60)
+    c_last = float(c.iloc[-1])
+    ma20_last = float(ma20.iloc[-1])
+    ma50_last = float(ma50.iloc[-1])
+    ma20_prev5 = float(ma20.iloc[-6]) if len(ma20) >= 6 else float("nan")
 
-    atr = _atr(df, 14)
-    if not np.isfinite(atr) or atr <= 0:
-        atr = max(c * 0.01, 1.0)
+    if not (np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last)):
+        diag["reason"] = "nan"
+        return False, diag
 
-    trend_ok = bool(np.isfinite(ma20) and np.isfinite(ma60) and c > ma20 > ma60)
+    if not (c_last > ma20_last > ma50_last):
+        diag["reason"] = "not_above_mas"
+        return False, diag
 
-    # 直近10日レンジの位置
-    hi10 = float(high.tail(10).max())
-    lo10 = float(low.tail(10).min())
-    rng = max(hi10 - lo10, 1e-9)
-    pos = float((c - lo10) / rng)  # 0..1
+    if not (np.isfinite(ma20_prev5) and ma20_last > ma20_prev5):
+        diag["reason"] = "ma20_not_up"
+        return False, diag
 
-    # 直近3日での“走り”強さ（ATR比）
-    surge = float(close.iloc[-1] - close.iloc[-4]) if len(close) >= 4 else 0.0
-    surge_atr = surge / atr
+    if low is None or len(low) < 6:
+        diag["reason"] = "low_missing"
+        return False, diag
 
-    # 押し戻しがあるか（直近高値から0.4〜1.2ATR）
-    recent_high = float(high.iloc[-6:-1].max()) if len(high) >= 6 else float(high.max())
-    pullback = float(recent_high - c)
-    pullback_atr = pullback / atr
-    pullback_ok = bool(0.4 <= pullback_atr <= 1.2)
+    if not (float(low.iloc[-1]) > float(low.iloc[-3]) > float(low.iloc[-5])):
+        diag["reason"] = "lows_not_rising"
+        return False, diag
 
-    # 分類
-    if trend_ok and surge_atr >= 1.8 and pos >= 0.80:
-        runner = "A1"
-    elif trend_ok and surge_atr < 1.8 and pullback_ok and pos >= 0.45:
-        runner = "A2_prebreak"
-    elif trend_ok and pos >= 0.35:
-        runner = "B"
-    else:
-        runner = "C"
+    t_last = float(t20.iloc[-1])
+    if not (np.isfinite(t_last) and t_last >= 1e8):
+        diag["reason"] = "illiquid"
+        return False, diag
 
-    # 強度 0-100
-    sc = 0.0
-    if trend_ok:
-        sc += 35.0
-
-    # 走り過ぎでないほど加点（A1は別途弾く）
-    sc += float(np.clip((1.8 - max(surge_atr, 0.0)) / 1.8, 0, 1)) * 20.0
-
-    if pullback_ok:
-        sc += 25.0
-    else:
-        sc += float(np.clip(1.0 - abs(pullback_atr - 0.8) / 1.2, 0, 1)) * 12.0
-
-    sc += float(np.clip(pos, 0, 1)) * 20.0
-
-    strength = float(np.clip(sc, 0, 100))
-    return {"runner": runner, "strength": strength}
-
-
-def calc_al(runner: str, strength: float, in_rank: str, rr: float, ev_r: float) -> int:
-    """
-    vAB_prime++:
-      - AL3の前提は A2_prebreak かつ strength>=70
-      - A1は追い禁止なのでAL1扱い
-      - B/CはAL1（Swing枠に出さない）
-    """
-    runner = (runner or "").strip()
-
-    if runner == "A1":
-        return 1
-
-    if runner == "A2_prebreak":
-        if strength >= 70 and in_rank in ("強IN", "通常IN") and rr >= 2.0 and ev_r >= 0.45:
-            return 3
-        return 1
-
-    return 1
-
-
-def al3_score(runner_strength: float, ev_r: float, rr: float, gap_pct: float, in_rank: str) -> float:
-    """
-    AL3が複数出た場合の一位決定用。
-
-    PullbackQuality:
-      - 現在が押し目基準より上に飛んでる（gapが大きい）ほど減点
-      - 目安: gap 0〜1.5% 良し、>3% 減点、>5% 強い減点
-    """
-    g = float(gap_pct) if np.isfinite(gap_pct) else 0.0
-
-    if g <= 1.5:
-        pull_q = 1.0
-    elif g <= 3.0:
-        pull_q = 0.9
-    elif g <= 5.0:
-        pull_q = 0.75
-    else:
-        pull_q = 0.60
-
-    if in_rank == "強IN":
-        in_w = 1.05
-    elif in_rank == "通常IN":
-        in_w = 1.00
-    else:
-        in_w = 0.92
-
-    rs = float(runner_strength) / 100.0
-    return float(rs * float(ev_r) * float(rr) * float(pull_q) * float(in_w))
+    diag["reason"] = "ok"
+    return True, diag
