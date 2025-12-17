@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Dict
+
 import numpy as np
 import pandas as pd
 
@@ -11,76 +13,149 @@ def _last(series: pd.Series) -> float:
         return np.nan
 
 
-def _ma(series: pd.Series, n: int) -> float:
-    if series is None or len(series) < n:
-        return _last(series)
-    return float(series.rolling(n).mean().iloc[-1])
+def _sma(s: pd.Series, n: int) -> float:
+    if s is None or len(s) < n:
+        return _last(s)
+    return float(s.rolling(n).mean().iloc[-1])
 
 
-def _turnover_avg(df: pd.DataFrame, n: int = 20) -> float:
-    if df is None or len(df) < n:
+def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    if df is None or len(df) < period + 2:
         return np.nan
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
     close = df["Close"].astype(float)
-    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
-    tv = close * vol
-    v = tv.rolling(n).mean().iloc[-1]
+    prev_close = close.shift(1)
+
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1
+    ).max(axis=1)
+
+    v = tr.rolling(period).mean().iloc[-1]
     return float(v) if np.isfinite(v) else np.nan
 
 
-def evaluate_runner(hist: pd.DataFrame) -> tuple[str, float]:
-    """Runner判定（0-100）"""
+def qualify_runner(hist: pd.DataFrame) -> Dict[str, float | str]:
+    """
+    Runner分類（A1/A2_prebreak/B/C）と走行強度(0-100)
+    vAB_prime++: AL3の前提は A2_prebreak のみ。
+
+    A1: すでに走ってしまった（追い禁止）
+    A2_prebreak: 走る準備（押し戻し→再上昇の余地）
+    B/C: 除外寄り
+    """
     if hist is None or len(hist) < 80:
-        return "C", 0.0
+        return {"runner": "C", "strength": 0.0}
 
     df = hist.copy()
     close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+
     c = _last(close)
-    ma20 = _ma(close, 20)
-    ma60 = _ma(close, 60)
+    if not np.isfinite(c) or c <= 0:
+        return {"runner": "C", "strength": 0.0}
 
-    if not (np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma60)):
-        return "C", 0.0
+    ma20 = _sma(close, 20)
+    ma60 = _sma(close, 60)
 
-    trend = 1.0 if (c > ma20 > ma60) else 0.0
+    atr = _atr(df, 14)
+    if not np.isfinite(atr) or atr <= 0:
+        atr = max(c * 0.01, 1.0)
 
-    hi = float(close.tail(60).max()) if len(close) >= 60 else float(close.max())
-    dist = (hi / c - 1.0) * 100.0 if c > 0 else 999.0
-    near_high = 1.0 if dist <= 6.0 else (0.0 if dist >= 12.0 else (12.0 - dist) / 6.0)
+    trend_ok = bool(np.isfinite(ma20) and np.isfinite(ma60) and c > ma20 > ma60)
 
-    if len(close) >= 21 and float(close.iloc[-21]) > 0:
-        chg20 = (c / float(close.iloc[-21]) - 1.0) * 100.0
+    # 直近10日レンジの位置
+    hi10 = float(high.tail(10).max())
+    lo10 = float(low.tail(10).min())
+    rng = max(hi10 - lo10, 1e-9)
+    pos = float((c - lo10) / rng)  # 0..1
+
+    # 直近3日での“走り”強さ（ATR比）
+    surge = float(close.iloc[-1] - close.iloc[-4]) if len(close) >= 4 else 0.0
+    surge_atr = surge / atr
+
+    # 押し戻しがあるか（直近高値から0.4〜1.2ATR）
+    recent_high = float(high.iloc[-6:-1].max()) if len(high) >= 6 else float(high.max())
+    pullback = float(recent_high - c)
+    pullback_atr = pullback / atr
+    pullback_ok = bool(0.4 <= pullback_atr <= 1.2)
+
+    # 分類
+    if trend_ok and surge_atr >= 1.8 and pos >= 0.80:
+        runner = "A1"
+    elif trend_ok and surge_atr < 1.8 and pullback_ok and pos >= 0.45:
+        runner = "A2_prebreak"
+    elif trend_ok and pos >= 0.35:
+        runner = "B"
     else:
-        chg20 = 0.0
-    momentum = 1.0 if chg20 >= 8.0 else (0.0 if chg20 <= 2.0 else (chg20 - 2.0) / 6.0)
+        runner = "C"
 
-    t = _turnover_avg(df, 20)
-    liq = 1.0 if (np.isfinite(t) and t >= 1e8) else 0.0
+    # 強度 0-100
+    sc = 0.0
+    if trend_ok:
+        sc += 35.0
 
-    strength = 100.0 * (0.40 * trend + 0.30 * near_high + 0.20 * momentum + 0.10 * liq)
-    strength = float(np.clip(strength, 0, 100))
+    # 走り過ぎでないほど加点（A1は別途弾く）
+    sc += float(np.clip((1.8 - max(surge_atr, 0.0)) / 1.8, 0, 1)) * 20.0
 
-    label = "A2_prebreak" if (trend > 0 and near_high > 0.5 and momentum > 0.5 and liq > 0) else "C"
-    return label, strength
+    if pullback_ok:
+        sc += 25.0
+    else:
+        sc += float(np.clip(1.0 - abs(pullback_atr - 0.8) / 1.2, 0, 1)) * 12.0
 
+    sc += float(np.clip(pos, 0, 1)) * 20.0
 
-def is_al3(c: dict) -> bool:
-    return (
-        c.get("runner_label") == "A2_prebreak"
-        and c.get("in_rank") in ("強IN", "通常IN")
-        and float(c.get("rr", 0.0)) >= 2.5
-        and float(c.get("ev_r", 0.0)) >= 0.6
-    )
+    strength = float(np.clip(sc, 0, 100))
+    return {"runner": runner, "strength": strength}
 
 
-def select_al3_top1(cands: list[dict]) -> list[dict]:
-    al3 = [c for c in cands if is_al3(c)]
-    if not al3:
-        return []
-    al3.sort(
-        key=lambda x: (
-            x.get("runner_strength", 0.0) * x.get("ev_r", 0.0) * x.get("rr", 0.0),
-            x.get("score", 0.0),
-        ),
-        reverse=True,
-    )
-    return [al3[0]]
+def calc_al(runner: str, strength: float, in_rank: str, rr: float, ev_r: float) -> int:
+    """
+    vAB_prime++:
+      - AL3の前提は A2_prebreak かつ strength>=70
+      - A1は追い禁止なのでAL1扱い
+      - B/CはAL1（Swing枠に出さない）
+    """
+    runner = (runner or "").strip()
+
+    if runner == "A1":
+        return 1
+
+    if runner == "A2_prebreak":
+        if strength >= 70 and in_rank in ("強IN", "通常IN") and rr >= 2.0 and ev_r >= 0.45:
+            return 3
+        return 1
+
+    return 1
+
+
+def al3_score(runner_strength: float, ev_r: float, rr: float, gap_pct: float, in_rank: str) -> float:
+    """
+    AL3が複数出た場合の一位決定用。
+
+    PullbackQuality:
+      - 現在が押し目基準より上に飛んでる（gapが大きい）ほど減点
+      - 目安: gap 0〜1.5% 良し、>3% 減点、>5% 強い減点
+    """
+    g = float(gap_pct) if np.isfinite(gap_pct) else 0.0
+
+    if g <= 1.5:
+        pull_q = 1.0
+    elif g <= 3.0:
+        pull_q = 0.9
+    elif g <= 5.0:
+        pull_q = 0.75
+    else:
+        pull_q = 0.60
+
+    if in_rank == "強IN":
+        in_w = 1.05
+    elif in_rank == "通常IN":
+        in_w = 1.00
+    else:
+        in_w = 0.92
+
+    rs = float(runner_strength) / 100.0
+    return float(rs * float(ev_r) * float(rr) * float(pull_q) * float(in_w))
