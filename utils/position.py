@@ -1,13 +1,12 @@
-
 from __future__ import annotations
 
 from typing import Tuple
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from .rr import compute_tp_sl_rr
-
 
 def load_positions(path: str) -> pd.DataFrame:
     try:
@@ -15,8 +14,10 @@ def load_positions(path: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-
 def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
+    """Return (pos_text, total_asset_est).
+    positions.csv expects ticker, entry_price, quantity but must not fail if missing.
+    """
     if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
 
@@ -47,8 +48,8 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         rr = 0.0
         try:
             hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
-            if hist is not None and len(hist) >= 80:
-                rr_info = compute_tp_sl_rr(hist, mkt_score=mkt_score)
+            if hist is not None and len(hist) >= 120:
+                rr_info = compute_tp_sl_rr(hist, mkt_score=mkt_score, for_day=False)
                 rr = float(rr_info.get("rr", 0.0))
         except Exception:
             rr = 0.0
@@ -62,4 +63,4 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         return "ノーポジション", 2_000_000.0
 
     asset_est = total_value if total_value > 0 else 2_000_000.0
-    return "\\n".join(lines), float(asset_est)
+    return "\n".join(lines), float(asset_est)
