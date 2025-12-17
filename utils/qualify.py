@@ -1,62 +1,79 @@
-
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from .scoring import add_indicators
+from .scoring import _last_val
 
+def _pct(a: float, b: float) -> float:
+    if not (np.isfinite(a) and np.isfinite(b)) or b == 0:
+        return 0.0
+    return float((a / b - 1.0) * 100.0)
 
-def trend_gate(hist: pd.DataFrame) -> tuple[bool, dict]:
-    """
-    逆張り排除ゲート（必須）
-    - Close > MA20 > MA50
-    - MA20 上向き（5日前比+）
-    - 安値切り上げ（low[-1] > low[-3] > low[-5]）
-    - 20日平均売買代金 >= 1億
-    """
-    df = add_indicators(hist)
-    diag = {"reason": ""}
+def runner_strength(hist: pd.DataFrame) -> float:
+    """0..100: '走行能力' proxy (trend + momentum + liquidity)."""
+    if hist is None or len(hist) < 220:
+        return 0.0
+    close = hist["Close"].astype(float)
+    vol = hist["Volume"].astype(float) if "Volume" in hist.columns else pd.Series(np.nan, index=hist.index)
 
-    if df is None or len(df) < 60:
-        diag["reason"] = "data_short"
-        return False, diag
+    c = _last_val(close)
+    ma20 = float(close.rolling(20).mean().iloc[-1])
+    ma60 = float(close.rolling(60).mean().iloc[-1])
+    ma200 = float(close.rolling(200).mean().iloc[-1])
 
-    c = df["Close"].astype(float)
-    ma20 = df["ma20"].astype(float)
-    ma50 = df["ma50"].astype(float)
-    low = df["Low"].astype(float) if "Low" in df.columns else None
-    t20 = df["turnover_avg20"].astype(float)
+    # 20d momentum
+    if len(close) >= 21:
+        mom20 = _pct(close.iloc[-1], close.iloc[-21])
+    else:
+        mom20 = 0.0
 
-    c_last = float(c.iloc[-1])
-    ma20_last = float(ma20.iloc[-1])
-    ma50_last = float(ma50.iloc[-1])
-    ma20_prev5 = float(ma20.iloc[-6]) if len(ma20) >= 6 else float("nan")
+    # 60d momentum
+    if len(close) >= 61:
+        mom60 = _pct(close.iloc[-1], close.iloc[-61])
+    else:
+        mom60 = 0.0
 
-    if not (np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last)):
-        diag["reason"] = "nan"
-        return False, diag
+    # Liquidity
+    turnover20 = float((close * vol).rolling(20).mean().iloc[-1]) if len(close) >= 20 else 0.0
 
-    if not (c_last > ma20_last > ma50_last):
-        diag["reason"] = "not_above_mas"
-        return False, diag
+    sc = 0.0
+    # Structure
+    if c > ma20 > ma60 > ma200:
+        sc += 45.0
+    elif c > ma20 > ma60:
+        sc += 30.0
+    elif c > ma20:
+        sc += 18.0
 
-    if not (np.isfinite(ma20_prev5) and ma20_last > ma20_prev5):
-        diag["reason"] = "ma20_not_up"
-        return False, diag
+    sc += float(np.clip(mom20 * 2.0, -10, 20))
+    sc += float(np.clip(mom60 * 1.2, -10, 20))
 
-    if low is None or len(low) < 6:
-        diag["reason"] = "low_missing"
-        return False, diag
+    if np.isfinite(turnover20):
+        if turnover20 >= 1e9:
+            sc += 20
+        elif turnover20 >= 1e8:
+            sc += 20 * (turnover20 - 1e8) / 9e8
 
-    if not (float(low.iloc[-1]) > float(low.iloc[-3]) > float(low.iloc[-5])):
-        diag["reason"] = "lows_not_rising"
-        return False, diag
+    return float(np.clip(sc, 0, 100))
 
-    t_last = float(t20.iloc[-1])
-    if not (np.isfinite(t_last) and t_last >= 1e8):
-        diag["reason"] = "illiquid"
-        return False, diag
+def runner_class(strength: float) -> str:
+    if strength >= 85:
+        return "A2_prebreak"
+    if strength >= 75:
+        return "A3_trend"
+    if strength >= 65:
+        return "B_trend"
+    return "C"
 
-    diag["reason"] = "ok"
-    return True, diag
+def al3_score(base_score: float, rr: float, ev_r: float, runner_strength_v: float) -> float:
+    """AL3 numeric score (higher = better) used for ranking top5."""
+    if not all(np.isfinite(x) for x in (base_score, rr, ev_r, runner_strength_v)):
+        return 0.0
+    # Weights tuned for '勝ちたい' = keep edge + avoid junk
+    return float(
+        0.40 * (base_score / 100.0) +
+        0.25 * np.clip(rr / 6.0, 0, 2) +
+        0.20 * np.clip(ev_r / 1.2, 0, 2) +
+        0.15 * (runner_strength_v / 100.0)
+    ) * 10.0  # make it readable (~0..20)
