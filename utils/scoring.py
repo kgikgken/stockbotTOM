@@ -1,9 +1,7 @@
-　
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
 
 def _last_val(series: pd.Series) -> float:
     try:
@@ -11,150 +9,194 @@ def _last_val(series: pd.Series) -> float:
     except Exception:
         return np.nan
 
+def _sma(series: pd.Series, n: int) -> float:
+    if series is None or len(series) < n:
+        return _last_val(series)
+    return float(series.rolling(n).mean().iloc[-1])
 
-def _rsi14(close: pd.Series) -> pd.Series:
+def _add_indicators(hist: pd.DataFrame) -> pd.DataFrame:
+    df = hist.copy()
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    open_ = df["Open"].astype(float)
+    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
+
+    df["ma5"] = close.rolling(5).mean()
+    df["ma20"] = close.rolling(20).mean()
+    df["ma50"] = close.rolling(50).mean()
+    df["ma200"] = close.rolling(200).mean()
+
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / (avg_loss + 1e-9)
-    return 100 - (100 / (1 + rs))
+    df["rsi14"] = 100 - (100 / (1 + rs))
 
-
-def add_indicators(hist: pd.DataFrame) -> pd.DataFrame:
-    df = hist.copy()
-    c = df["Close"].astype(float)
-    v = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
-
-    df["ma20"] = c.rolling(20).mean()
-    df["ma50"] = c.rolling(50).mean()
-    df["ma200"] = c.rolling(200).mean()
-    df["rsi14"] = _rsi14(c)
-
-    ret = c.pct_change(fill_method=None)
+    ret = close.pct_change(fill_method=None)
     df["vola20"] = ret.rolling(20).std()
 
-    df["turnover"] = c * v
-    df["turnover_avg20"] = df["turnover"].rolling(20).mean()
+    if len(close) >= 60:
+        rolling_high = close.rolling(60).max()
+        df["off_high_pct"] = (close - rolling_high) / (rolling_high + 1e-9) * 100
+    else:
+        df["off_high_pct"] = np.nan
 
-    df["ma20_slope5"] = df["ma20"].diff(5)
+    df["trend_slope20"] = df["ma20"].pct_change(fill_method=None)
+
+    rng = (high - low).replace(0, np.nan)
+    lower_shadow = np.where(close >= open_, close - low, open_ - low)
+    df["lower_shadow_ratio"] = np.where(np.isfinite(rng), lower_shadow / rng, 0.0)
+
+    df["turnover"] = close * vol
+    df["turnover_avg20"] = df["turnover"].rolling(20).mean()
     return df
 
-
-def calc_in_rank(df: pd.DataFrame) -> str:
-    rsi = _last_val(df["rsi14"])
-    c = _last_val(df["Close"])
-    ma20 = _last_val(df["ma20"])
-    if not (np.isfinite(rsi) and np.isfinite(c) and np.isfinite(ma20)):
-        return "様子見"
-
-    if 35 <= rsi <= 50 and c >= ma20 * 0.97:
-        return "強IN"
-    if 40 <= rsi <= 62 and c >= ma20 * 0.99:
-        return "通常IN"
-    if 62 < rsi <= 70:
-        return "弱めIN"
-    return "様子見"
-
-
-def score_stock(df: pd.DataFrame) -> float | None:
-    """
-    0-100（順張り専用スコア）
-    """
-    if df is None or len(df) < 120:
+def score_stock(hist: pd.DataFrame) -> float | None:
+    """0-100 base score (trend + pullback quality + liquidity)."""
+    if hist is None or len(hist) < 120:
         return None
+    df = _add_indicators(hist)
 
-    c = df["Close"].astype(float)
-    ma20 = df["ma20"]
-    ma50 = df["ma50"]
-    ma200 = df["ma200"]
-    slope5 = df["ma20_slope5"]
-    t20 = df["turnover_avg20"]
-    vola20 = df["vola20"]
-    rsi = df["rsi14"]
+    close = df["Close"].astype(float)
+    c_last = _last_val(close)
+    ma20_last = _last_val(df["ma20"])
+    ma50_last = _last_val(df["ma50"])
+    slope_last = _last_val(df["trend_slope20"])
 
-    c_last = _last_val(c)
-    ma20_last = _last_val(ma20)
-    ma50_last = _last_val(ma50)
-    ma200_last = _last_val(ma200)
-    slope_last = _last_val(slope5)
-    t_last = _last_val(t20)
-    vola_last = _last_val(vola20)
-    rsi_last = _last_val(rsi)
+    rsi = _last_val(df["rsi14"])
+    off = _last_val(df["off_high_pct"])
+    shadow = _last_val(df["lower_shadow_ratio"])
+    t = _last_val(df["turnover_avg20"])
+    vola = _last_val(df["vola20"])
 
     sc = 0.0
 
-    # Trend quality (max 55)
+    # Trend (max 35)
+    if np.isfinite(slope_last):
+        if slope_last >= 0.01:
+            sc += 14
+        elif slope_last > 0:
+            sc += 7 + (slope_last / 0.01) * 7
+        else:
+            sc += max(0.0, 7 + slope_last * 70)
+
     if np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last):
         if c_last > ma20_last > ma50_last:
-            sc += 35
+            sc += 14
         elif c_last > ma20_last:
-            sc += 18
+            sc += 7
         elif ma20_last > ma50_last:
-            sc += 10
+            sc += 3
 
-    if np.isfinite(ma200_last) and np.isfinite(ma50_last) and np.isfinite(c_last):
-        if c_last > ma200_last and ma50_last > ma200_last:
-            sc += 12
-        elif c_last > ma200_last:
+    # Pullback / not overheated (max 30)
+    if np.isfinite(rsi):
+        if 30 <= rsi <= 50:
+            sc += 14
+        elif 50 < rsi <= 62:
+            sc += 10
+        elif 25 <= rsi < 30 or 62 < rsi <= 70:
             sc += 6
-
-    if np.isfinite(slope_last) and slope_last > 0:
-        sc += 8
-
-    # Pullback quality (max 25)
-    if np.isfinite(rsi_last):
-        if 38 <= rsi_last <= 55:
-            sc += 18
-        elif 55 < rsi_last <= 62:
-            sc += 10
-        elif 30 <= rsi_last < 38:
-            sc += 10
         else:
             sc += 2
 
-    # Liquidity + vola (max 20)
-    if np.isfinite(t_last):
-        if t_last >= 1e9:
-            sc += 14
-        elif t_last >= 1e8:
-            sc += 14 * (t_last - 1e8) / 9e8
-
-    if np.isfinite(vola_last):
-        if vola_last < 0.02:
+    if np.isfinite(off):
+        if -18 <= off <= -5:
+            sc += 10
+        elif -25 <= off < -18:
             sc += 6
-        elif vola_last < 0.06:
-            sc += 6 * (0.06 - vola_last) / 0.04
+        elif -5 < off <= 5:
+            sc += 6
+        else:
+            sc += 2
+
+    if np.isfinite(shadow):
+        if shadow >= 0.5:
+            sc += 6
+        elif shadow >= 0.3:
+            sc += 3
+
+    # Liquidity / volatility comfort (max 35)
+    if np.isfinite(t):
+        if t >= 1e9:
+            sc += 25
+        elif t >= 1e8:
+            sc += 25 * (t - 1e8) / 9e8
+
+    if np.isfinite(vola):
+        if vola < 0.02:
+            sc += 10
+        elif vola < 0.06:
+            sc += 10 * (0.06 - vola) / 0.04
 
     return float(np.clip(sc, 0, 100))
 
+def calc_in_rank(hist: pd.DataFrame) -> str:
+    """Return 強IN/通常IN/弱めIN/様子見 based on pullback condition."""
+    if hist is None or len(hist) < 120:
+        return "様子見"
+    df = _add_indicators(hist)
 
-def trend_strength(df: pd.DataFrame) -> float:
+    close_last = _last_val(df["Close"])
+    ma20_last = _last_val(df["ma20"])
+    rsi_last = _last_val(df["rsi14"])
+    off_last = _last_val(df["off_high_pct"])
+    shadow = _last_val(df["lower_shadow_ratio"])
+
+    if not (np.isfinite(rsi_last) and np.isfinite(ma20_last) and np.isfinite(close_last) and np.isfinite(off_last)):
+        return "様子見"
+
+    # Strong pullback completion-ish
+    if 30 <= rsi_last <= 50 and -20 <= off_last <= -5 and close_last >= ma20_last * 0.97 and shadow >= 0.3:
+        return "強IN"
+    # Normal
+    if 40 <= rsi_last <= 64 and -15 <= off_last <= 5 and close_last >= ma20_last * 0.99:
+        return "通常IN"
+    # Weak
+    if 25 <= rsi_last < 30 or 64 < rsi_last <= 72:
+        return "弱めIN"
+
+    return "様子見"
+
+def trend_gate(hist: pd.DataFrame) -> tuple[bool, dict]:
+    """Exclude 'falling knife pullback' (逆張り) by requiring short-term uptrend structure.
+    Returns (ok, details)
     """
-    0-100: TrendGate通過後の“走行”強さ（AL3用）
-    """
-    c = df["Close"].astype(float)
-    ma20 = df["ma20"]
-    ma50 = df["ma50"]
-    ma200 = df["ma200"]
-    slope = df["ma20_slope5"]
+    if hist is None or len(hist) < 220:
+        return False, {"reason": "data_short"}
 
-    c_last = _last_val(c)
-    ma20_last = _last_val(ma20)
-    ma50_last = _last_val(ma50)
-    ma200_last = _last_val(ma200)
-    slope_last = _last_val(slope)
+    close = hist["Close"].astype(float)
+    ma20 = close.rolling(20).mean()
+    ma50 = close.rolling(50).mean()
+    ma200 = close.rolling(200).mean()
 
-    s = 0.0
-    if np.isfinite(c_last) and np.isfinite(ma20_last) and np.isfinite(ma50_last):
-        if c_last > ma20_last > ma50_last:
-            s += 50
-    if np.isfinite(ma200_last) and np.isfinite(ma50_last) and ma50_last > ma200_last:
-        s += 20
-    if np.isfinite(slope_last) and slope_last > 0:
-        s += 15
-    if np.isfinite(c_last) and np.isfinite(ma20_last) and ma20_last > 0:
-        dist = abs(c_last / ma20_last - 1.0)
-        s += float(np.clip(15 * (0.04 - dist) / 0.04, 0, 15))
-    return float(np.clip(s, 0, 100))
+    c = _last_val(close)
+    m20 = _last_val(ma20)
+    m50 = _last_val(ma50)
+    m200 = _last_val(ma200)
+
+    if not all(np.isfinite(x) for x in (c, m20, m50, m200)):
+        return False, {"reason": "nan"}
+
+    # Structure: MA20 > MA50 > MA200 and price above MA50
+    struct_ok = (m20 > m50 > m200) and (c > m50)
+
+    # Rising MA50 slope (20 trading days)
+    if len(ma50.dropna()) < 25:
+        slope_ok = False
+    else:
+        m50_now = float(ma50.dropna().iloc[-1])
+        m50_prev = float(ma50.dropna().iloc[-21])
+        slope_ok = (m50_now / m50_prev - 1.0) > 0.0
+
+    ok = bool(struct_ok and slope_ok)
+    return ok, {
+        "price": float(c),
+        "ma20": float(m20),
+        "ma50": float(m50),
+        "ma200": float(m200),
+        "struct_ok": bool(struct_ok),
+        "ma50_slope_ok": bool(slope_ok),
+    }
