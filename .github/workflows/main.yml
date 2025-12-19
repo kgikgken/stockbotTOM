@@ -8,21 +8,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          pip install -r requirements.txt
-
-      - name: Run script
+      - run: pip install -r requirements.txt
+      - run: python main.py
         env:
           WORKER_URL: ${{ secrets.WORKER_URL }}
-        run: |
-          python main.py
