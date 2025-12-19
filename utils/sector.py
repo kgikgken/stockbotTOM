@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import os
 import numpy as np
 import pandas as pd
@@ -7,6 +8,7 @@ from typing import List, Tuple
 
 UNIVERSE_PATH = "universe_jpx.csv"
 MAX_TICKERS_PER_SECTOR = 20
+
 
 def _fetch_change_5d(ticker: str) -> float:
     try:
@@ -18,19 +20,43 @@ def _fetch_change_5d(ticker: str) -> float:
     except Exception:
         return np.nan
 
+
 def top_sectors_5d(top_n: int = 5) -> List[Tuple[str, float]]:
     if not os.path.exists(UNIVERSE_PATH):
         return []
-    df = pd.read_csv(UNIVERSE_PATH)
-    sec_col = "sector" if "sector" in df.columns else "industry_big"
-    t_col = "ticker" if "ticker" in df.columns else "code"
 
-    sectors = []
-    for sec, g in df.groupby(sec_col):
-        chgs = [_fetch_change_5d(t) for t in g[t_col][:MAX_TICKERS_PER_SECTOR]]
-        chgs = [c for c in chgs if np.isfinite(c)]
+    try:
+        df = pd.read_csv(UNIVERSE_PATH)
+    except Exception:
+        return []
+
+    if "sector" in df.columns:
+        sec_col = "sector"
+    elif "industry_big" in df.columns:
+        sec_col = "industry_big"
+    else:
+        return []
+
+    if "ticker" in df.columns:
+        t_col = "ticker"
+    elif "code" in df.columns:
+        t_col = "code"
+    else:
+        return []
+
+    sectors: List[Tuple[str, float]] = []
+
+    for sec_name, sub in df.groupby(sec_col):
+        tickers = sub[t_col].astype(str).tolist()[:MAX_TICKERS_PER_SECTOR]
+        chgs = []
+
+        for t in tickers:
+            chg = _fetch_change_5d(t)
+            if np.isfinite(chg):
+                chgs.append(chg)
+
         if chgs:
-            sectors.append((sec, float(np.mean(chgs))))
+            sectors.append((str(sec_name), float(np.mean(chgs))))
 
     sectors.sort(key=lambda x: x[1], reverse=True)
     return sectors[:top_n]
