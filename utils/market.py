@@ -19,7 +19,7 @@ def calc_market_score() -> dict:
     nk = _five_day_chg("^N225")
     tp = _five_day_chg("^TOPX")
 
-    base = 50.0 + np.clip((nk + tp) / 2.0, -20, 20)
+    base = 50.0 + float(np.clip((nk + tp) / 2.0, -20, 20))
     score = int(np.clip(round(base), 0, 100))
 
     comment = (
@@ -30,22 +30,26 @@ def calc_market_score() -> dict:
         "弱い"
     )
 
-    return {"score": score, "comment": comment}
+    return {"score": score, "comment": comment, "n225_5d": nk, "topix_5d": tp}
 
 
 def enhance_market_score() -> dict:
     mkt = calc_market_score()
-    score = float(mkt["score"])
+    score = float(mkt.get("score", 50))
 
+    # SOX
     try:
         sox = _five_day_chg("^SOX")
-        score += np.clip(sox / 2.0, -5, 5)
+        score += float(np.clip(sox / 2.0, -5.0, 5.0))
+        mkt["sox_5d"] = sox
     except Exception:
         pass
 
+    # NVDA
     try:
         nvda = _five_day_chg("NVDA")
-        score += np.clip(nvda / 3.0, -4, 4)
+        score += float(np.clip(nvda / 3.0, -4.0, 4.0))
+        mkt["nvda_5d"] = nvda
     except Exception:
         pass
 
