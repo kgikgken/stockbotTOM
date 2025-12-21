@@ -1,15 +1,12 @@
 from __future__ import annotations
-
 import numpy as np
 import pandas as pd
-
 
 def _last(s: pd.Series) -> float:
     try:
         return float(s.iloc[-1])
     except Exception:
         return np.nan
-
 
 def _add(hist: pd.DataFrame) -> pd.DataFrame:
     df = hist.copy()
@@ -30,7 +27,6 @@ def _add(hist: pd.DataFrame) -> pd.DataFrame:
     df["off_high"] = (c - df["ma60h"]) / df["ma60h"] * 100
     return df
 
-
 # ------------------------------------------------------------
 # TrendGate（順張り専用）
 # ------------------------------------------------------------
@@ -43,23 +39,16 @@ def trend_gate(hist: pd.DataFrame) -> bool:
     ma20 = _last(df["ma20"])
     ma50 = _last(df["ma50"])
 
-    if not (ma20 > ma50):
-        return False
-    if not (c > ma50):
-        return False
-
-    return True
-
+    return ma20 > ma50 and c > ma50
 
 # ------------------------------------------------------------
-# 押し目判定（STEP2）
+# 押し目判定
 # ------------------------------------------------------------
 def calc_inout_for_stock(hist: pd.DataFrame):
     if hist is None or len(hist) < 80:
         return "様子見", 0, 0
 
     df = _add(hist)
-
     c = _last(df["Close"])
     ma20 = _last(df["ma20"])
     ma50 = _last(df["ma50"])
@@ -67,27 +56,16 @@ def calc_inout_for_stock(hist: pd.DataFrame):
     off_high = _last(df["off_high"])
     turnover = _last(df["turnover"])
 
-    # --- A. 正統派トレンド押し目 ---
-    if (
-        ma20 > ma50 and
-        abs(c / ma20 - 1) <= 0.01 and
-        40 <= rsi <= 55
-    ):
+    if ma20 > ma50 and abs(c / ma20 - 1) <= 0.01 and 40 <= rsi <= 55:
         return "強IN", 0, 0
 
-    # --- B. ブレイク後初押し ---
-    if (
-        off_high <= -3 and off_high >= -7 and
-        ma20 > ma50 and
-        turnover >= 1e8
-    ):
+    if -7 <= off_high <= -3 and ma20 > ma50 and turnover >= 1e8:
         return "通常IN", 0, 0
 
     return "様子見", 0, 0
 
-
 # ------------------------------------------------------------
-# スコア（選別用にレンジを出す）
+# 内部スコア（表示しない）
 # ------------------------------------------------------------
 def score_stock(hist: pd.DataFrame) -> float | None:
     if hist is None or len(hist) < 80:
