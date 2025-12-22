@@ -12,16 +12,12 @@ import requests
 from utils.util import jst_today_str, jst_today_date, parse_event_datetime_jst
 from utils.market import enhance_market_score
 from utils.sector import top_sectors_5d
-from utils.scoring import (
-    score_stock,
-    calc_inout_for_stock,
-    trend_gate
-)
+from utils.scoring import score_stock, calc_inout_for_stock, trend_gate
 from utils.rr import compute_tp_sl_rr
 from utils.position import load_positions, analyze_positions
 
 # ============================================================
-# 設定（Swing専用・順張りのみ）
+# 設定（Swing専用）
 # ============================================================
 UNIVERSE_PATH = "universe_jpx.csv"
 POSITIONS_PATH = "positions.csv"
@@ -37,19 +33,13 @@ SWING_EV_R_MIN = 0.40
 
 SECTOR_TOP_N = 5
 
-
-# ============================================================
-# util
 # ============================================================
 def _safe_float(x, default=np.nan) -> float:
     try:
         v = float(x)
-        if not np.isfinite(v):
-            return float(default)
-        return float(v)
+        return v if np.isfinite(v) else float(default)
     except Exception:
         return float(default)
-
 
 def fetch_history(ticker: str, period: str = "260d") -> Optional[pd.DataFrame]:
     for _ in range(2):
@@ -61,80 +51,31 @@ def fetch_history(ticker: str, period: str = "260d") -> Optional[pd.DataFrame]:
             time.sleep(0.5)
     return None
 
-
 # ============================================================
-# events
-# ============================================================
-def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
+def load_events(path: str = EVENTS_PATH) -> List[str]:
     if not os.path.exists(path):
-        return []
+        return ["- 特になし"]
     try:
         df = pd.read_csv(path)
     except Exception:
-        return []
+        return ["- 特になし"]
 
     out = []
     for _, r in df.iterrows():
-        label = str(r.get("label", "")).strip()
-        if not label:
-            continue
-        out.append(
-            dict(
-                label=label,
-                date=str(r.get("date", "")).strip(),
-                time=str(r.get("time", "")).strip(),
-                datetime=str(r.get("datetime", "")).strip(),
-            )
+        dt = parse_event_datetime_jst(
+            str(r.get("datetime", "")),
+            str(r.get("date", "")),
+            str(r.get("time", "")),
         )
-    return out
+        if dt:
+            out.append(f"⚠ {r.get('label')}（{dt.strftime('%Y-%m-%d %H:%M JST')}）")
+    return out or ["- 特になし"]
 
-
-def build_event_warnings(today_date) -> List[str]:
-    events = load_events()
-    warns = []
-
-    for ev in events:
-        dt = parse_event_datetime_jst(ev["datetime"], ev["date"], ev["time"])
-        if dt is None:
-            continue
-        d = dt.date()
-        delta = (d - today_date).days
-        if -1 <= delta <= 2:
-            when = "本日" if delta == 0 else ("直近" if delta < 0 else f"{delta}日後")
-            warns.append(f"⚠ {ev['label']}（{dt.strftime('%Y-%m-%d %H:%M JST')} / {when}）")
-
-    if not warns:
-        warns.append("- 特になし")
-    return warns
-
-
-# ============================================================
-# earnings filter
-# ============================================================
-def filter_earnings(df: pd.DataFrame, today_date) -> pd.DataFrame:
-    if "earnings_date" not in df.columns:
-        return df
-
-    d = pd.to_datetime(df["earnings_date"], errors="coerce").dt.date
-    keep = []
-    for x in d:
-        if pd.isna(x):
-            keep.append(True)
-        else:
-            keep.append(abs((x - today_date).days) > EARNINGS_EXCLUDE_DAYS)
-    return df[keep]
-
-
-# ============================================================
-# EV
 # ============================================================
 def expected_r(in_rank: str, rr: float) -> float:
-    win = {"強IN": 0.45, "通常IN": 0.40}.get(in_rank, 0.0)
+    win = {"強IN": 0.45, "通常IN": 0.40}.get(in_rank, 0.25)
     return win * rr - (1 - win)
 
-
-# ============================================================
-# Swing screening（順張りのみ）
 # ============================================================
 def run_swing(today_date, mkt_score: int) -> List[Dict]:
     try:
@@ -143,8 +84,6 @@ def run_swing(today_date, mkt_score: int) -> List[Dict]:
         return []
 
     t_col = "ticker" if "ticker" in uni.columns else "code"
-    uni = filter_earnings(uni, today_date)
-
     cands = []
 
     for _, r in uni.iterrows():
@@ -156,7 +95,6 @@ def run_swing(today_date, mkt_score: int) -> List[Dict]:
         if hist is None or len(hist) < 120:
             continue
 
-        # --- トレンドゲート（逆張り完全排除） ---
         if not trend_gate(hist):
             continue
 
@@ -186,9 +124,9 @@ def run_swing(today_date, mkt_score: int) -> List[Dict]:
                 ticker=ticker,
                 name=str(r.get("name", ticker)),
                 sector=str(r.get("sector", "不明")),
-                in_rank=in_rank,
                 rr=rr,
                 ev=ev,
+                in_rank=in_rank,
                 entry=entry,
                 price_now=price_now,
                 gap_pct=gap,
@@ -200,17 +138,14 @@ def run_swing(today_date, mkt_score: int) -> List[Dict]:
     cands.sort(key=lambda x: (x["ev"], x["rr"]), reverse=True)
     return cands[:SWING_MAX_FINAL]
 
-
-# ============================================================
-# report
 # ============================================================
 def build_report(today_str, today_date, mkt, pos_text, total_asset) -> str:
     mkt_score = int(mkt["score"])
-    lev = 1.7 if mkt_score >= 50 else 1.3
+    lev = 2.0 if mkt_score >= 50 else 1.3
     max_pos = int(total_asset * lev)
 
     sectors = top_sectors_5d(SECTOR_TOP_N)
-    events = build_event_warnings(today_date)
+    events = load_events()
     swing = run_swing(today_date, mkt_score)
 
     lines = []
@@ -225,15 +160,11 @@ def build_report(today_str, today_date, mkt, pos_text, total_asset) -> str:
         lines.append(f"{i}. {s} ({p:+.2f}%)")
     lines.append("")
 
-    lines.append("⚠ イベント")
-    lines.extend(events)
-    lines.append("")
-
     lines.append("🏆 Swing（順張りのみ）")
     if swing:
-        avg_rr = np.mean([c["rr"] for c in swing])
-        avg_ev = np.mean([c["ev"] for c in swing])
-        lines.append(f"  候補数:{len(swing)}銘柄 / 平均RR:{avg_rr:.2f} / 平均EV:{avg_ev:.2f}\n")
+        rr_avg = sum(c["rr"] for c in swing) / len(swing)
+        ev_avg = sum(c["ev"] for c in swing) / len(swing)
+        lines.append(f"  候補数:{len(swing)}銘柄 / 平均RR:{rr_avg:.2f} / 平均EV:{ev_avg:.2f}\n")
 
         for c in swing:
             lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
@@ -245,12 +176,8 @@ def build_report(today_str, today_date, mkt, pos_text, total_asset) -> str:
 
     lines.append("📊 ポジション")
     lines.append(pos_text)
-
     return "\n".join(lines)
 
-
-# ============================================================
-# LINE
 # ============================================================
 def send_line(text: str):
     if not WORKER_URL:
@@ -259,9 +186,6 @@ def send_line(text: str):
     for ch in [text[i:i+3800] for i in range(0, len(text), 3800)]:
         requests.post(WORKER_URL, json={"text": ch}, timeout=20)
 
-
-# ============================================================
-# main
 # ============================================================
 def main():
     today_str = jst_today_str()
@@ -274,7 +198,6 @@ def main():
     report = build_report(today_str, today_date, mkt, pos_text, total_asset)
     print(report)
     send_line(report)
-
 
 if __name__ == "__main__":
     main()
