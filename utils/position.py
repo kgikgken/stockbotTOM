@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Tuple
-
-import numpy as np
 import pandas as pd
+import numpy as np
+from typing import Tuple
 import yfinance as yf
 
 from utils.rr import compute_tp_sl_rr
@@ -17,10 +16,6 @@ def load_positions(path: str) -> pd.DataFrame:
 
 
 def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
-    """
-    戻り値: (pos_text, total_asset_est)
-    positions.csv は最低限 ticker, entry_price, quantity を想定（無くても落ちない）
-    """
     if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
 
@@ -35,7 +30,6 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         entry_price = float(row.get("entry_price", 0) or 0)
         qty = float(row.get("quantity", 0) or 0)
 
-        # 現値
         cur = entry_price
         try:
             h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
@@ -49,12 +43,11 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         if np.isfinite(value) and value > 0:
             total_value += value
 
-        # RR更新（保有分も毎日更新）
         rr = 0.0
         try:
             hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
             if hist is not None and len(hist) >= 80:
-                rr_info = compute_tp_sl_rr(hist, mkt_score=mkt_score, for_day=False)
+                rr_info = compute_tp_sl_rr(hist, mkt_score=mkt_score)
                 rr = float(rr_info.get("rr", 0.0))
         except Exception:
             rr = 0.0
