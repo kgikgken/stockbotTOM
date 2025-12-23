@@ -391,6 +391,43 @@ def calc_max_position(total_asset: float, lev: float) -> int:
 
 
 # ============================================================
+# 本命抽出（“勝てるやつ”を前に出す）
+# - 並び順は既に AdjEV→R/day→RR で揃ってる
+# - 表示は 1〜2銘柄を「本命」、残りを「監視/指値」に回す
+# ============================================================
+def pick_core_candidates(picked: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    if not picked:
+        return [], []
+
+    # 本命評価軸：期待値×速度（1〜7日戦）
+    def core_key(x: Dict) -> float:
+        return float(x.get("adj_ev", 0.0)) * float(x.get("r_per_day", 0.0))
+
+    ranked = sorted(picked, key=lambda x: (core_key(x), x.get("adj_ev", 0.0), x.get("r_per_day", 0.0), x.get("rr", 0.0)), reverse=True)
+
+    top1 = ranked[0]
+    core = [top1]
+
+    # 2本目は「同等レベル」だけ採用（無理に増やさない）
+    if len(ranked) >= 2:
+        top2 = ranked[1]
+        k1 = core_key(top1)
+        k2 = core_key(top2)
+
+        # 条件：上位の75%以上、かつ最低限の筋が通ってる
+        if (k1 <= 0) or (
+            (k2 >= 0.75 * k1)
+            and (float(top2.get("adj_ev", 0.0)) >= 0.60)
+            and (float(top2.get("r_per_day", 0.0)) >= 0.70)
+        ):
+            core.append(top2)
+
+    core_tickers = {c.get("ticker") for c in core}
+    rest = [c for c in picked if c.get("ticker") not in core_tickers]
+    return core, rest
+
+
+# ============================================================
 # レポート
 # ============================================================
 def build_report(today_str, today_date, mkt: Dict, delta3: int, pos_text: str, total_asset: float) -> str:
@@ -436,23 +473,49 @@ def build_report(today_str, today_date, mkt: Dict, delta3: int, pos_text: str, t
 
     lines.append("🏆 Swing（順張りのみ / 追いかけ禁止 / 速度重視）")
     if swing:
+        core, rest = pick_core_candidates(swing)
+
+        # 表示用（英語やめ）
+        action_jp = {
+            "EXEC_NOW": "即IN可",
+            "LIMIT_WAIT": "指値待ち",
+            "WATCH_ONLY": "監視のみ",
+        }
+
         lines.append(
             f"  候補数:{len(swing)}銘柄 / 平均RR:{stats.get('avg_rr',0):.2f} / 平均EV:{stats.get('avg_ev',0):.2f} / 平均AdjEV:{stats.get('avg_adj_ev',0):.2f} / 平均R/day:{stats.get('avg_rpd',0):.2f}"
         )
         lines.append("")
-        for c in swing:
-            star = " ⭐" if c.get("action") == "EXEC_NOW" else ""
-            lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}] {star}")
-            lines.append(
-                f"  Setup:{c.get('setup','?')}  RR:{c['rr']:.2f}  EV:{c['ev']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['r_per_day']:.2f}"
-            )
-            lines.append(
-                f"  IN:{c['entry']:.1f} 現在:{c['price_now']:.1f} ({c['gap_pct']:+.2f}%)  ATR:{c['atr']:.1f}  GU:{'Y' if c['gu_flag'] else 'N'}"
-            )
-            lines.append(
-                f"  STOP:{c['sl_price']:.1f}  TP1:{c['tp1']:.1f}  TP2:{c['tp2']:.1f}  ExpectedDays:{c['expected_days']:.1f}  Action:{c['action']}"
-            )
-            lines.append("")
+
+        if core:
+            lines.append("🎯 本命（1〜2銘柄）")
+            for c in core:
+                lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}] ⭐")
+                lines.append(
+                    f"  Setup:{c.get('setup','?')}  RR:{c['rr']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['r_per_day']:.2f}"
+                )
+                lines.append(
+                    f"  IN:{c['entry']:.1f} 現在:{c['price_now']:.1f} ({c['gap_pct']:+.2f}%)  ATR:{c['atr']:.1f}  GU:{'Y' if c['gu_flag'] else 'N'}"
+                )
+                lines.append(
+                    f"  STOP:{c['sl_price']:.1f}  TP1:{c['tp1']:.1f}  TP2:{c['tp2']:.1f}  ExpectedDays:{c['expected_days']:.1f}  行動:{action_jp.get(c['action'], c['action'])}"
+                )
+                lines.append("")
+
+        if rest:
+            lines.append("👀 監視・指値")
+            for c in rest:
+                lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}] ")
+                lines.append(
+                    f"  Setup:{c.get('setup','?')}  RR:{c['rr']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['r_per_day']:.2f}"
+                )
+                lines.append(
+                    f"  IN:{c['entry']:.1f} 現在:{c['price_now']:.1f} ({c['gap_pct']:+.2f}%)  ATR:{c['atr']:.1f}  GU:{'Y' if c['gu_flag'] else 'N'}"
+                )
+                lines.append(
+                    f"  STOP:{c['sl_price']:.1f}  TP1:{c['tp1']:.1f}  TP2:{c['tp2']:.1f}  ExpectedDays:{c['expected_days']:.1f}  行動:{action_jp.get(c['action'], c['action'])}"
+                )
+                lines.append("")
     else:
         lines.append("- 該当なし")
         lines.append("")
