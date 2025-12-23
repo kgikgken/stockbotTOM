@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-from typing import List, Tuple
-
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from typing import List, Tuple
+
 
 UNIVERSE_PATH = "universe_jpx.csv"
 MAX_TICKERS_PER_SECTOR = 20
@@ -25,6 +25,7 @@ def _fetch_change_5d(ticker: str) -> float:
 def top_sectors_5d(top_n: int = 5) -> List[Tuple[str, float]]:
     if not os.path.exists(UNIVERSE_PATH):
         return []
+
     try:
         df = pd.read_csv(UNIVERSE_PATH)
     except Exception:
@@ -56,7 +57,6 @@ def top_sectors_5d(top_n: int = 5) -> List[Tuple[str, float]]:
             chg = _fetch_change_5d(t)
             if np.isfinite(chg):
                 chgs.append(chg)
-
         if chgs:
             sectors.append((str(sec_name), float(np.mean(chgs))))
 
