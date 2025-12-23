@@ -175,17 +175,26 @@ def _setup_type(in_rank: str) -> str:
 
 
 def _action_type(price_now: float, entry: float, atr: float, gu_flag: bool) -> str:
+    # 追いかけ禁止を機械化
+    # - GUは問答無用で監視
+    # - IN中心からの乖離(ATR単位)で EXEC / LIMIT / WATCH を決める
     if gu_flag:
         return "WATCH_ONLY"
     if not (np.isfinite(atr) and atr > 0 and np.isfinite(price_now) and np.isfinite(entry) and entry > 0):
         return "WATCH_ONLY"
+
     dist = abs(price_now - entry) / atr
+
+    # 0.8ATR超は「今日は入らない」
     if dist > IN_DIST_ATR_TH:
+        return "WATCH_ONLY"
+
+    # 0.4〜0.8ATRは指値待ち（押し目待ち）
+    if dist > 0.4:
         return "LIMIT_WAIT"
-    # entryを“中心”にしたINゾーン（±0.5ATR）内ならEXEC_NOW
-    if abs(price_now - entry) <= 0.5 * atr:
-        return "EXEC_NOW"
-    return "WATCH_ONLY"
+
+    return "EXEC_NOW"
+
 
 
 # ============================================================
