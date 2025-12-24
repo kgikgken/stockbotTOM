@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
-
+from typing import Dict
 import numpy as np
 import pandas as pd
-
-from utils.rr import TradePlan
 
 
 def _last(s: pd.Series) -> float:
@@ -15,177 +12,170 @@ def _last(s: pd.Series) -> float:
         return float("nan")
 
 
-def _sma(s: pd.Series, w: int) -> float:
-    if s is None or len(s) < w:
-        return _last(s)
-    v = s.rolling(w).mean().iloc[-1]
-    return float(v) if np.isfinite(v) else _last(s)
-
-
-def _rsi(close: pd.Series, period: int = 14) -> float:
-    if close is None or len(close) < period + 2:
+def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    if df is None or len(df) < period + 2:
         return float("nan")
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / (loss + 1e-9)
-    rsi = 100 - (100 / (1 + rs))
-    v = rsi.iloc[-1]
+    h = df["High"].astype(float)
+    l = df["Low"].astype(float)
+    c = df["Close"].astype(float)
+    pc = c.shift(1)
+
+    tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    v = tr.rolling(period).mean().iloc[-1]
     return float(v) if np.isfinite(v) else float("nan")
 
 
-def _clamp01(x: float) -> float:
-    if not np.isfinite(x):
-        return 0.0
-    return float(np.clip(x, 0.0, 1.0))
+def _add(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    c = d["Close"].astype(float)
+    v = d["Volume"].astype(float) if "Volume" in d.columns else pd.Series(np.nan, index=d.index)
+
+    d["ma20"] = c.rolling(20).mean()
+    d["ma50"] = c.rolling(50).mean()
+    d["ma10"] = c.rolling(10).mean()
+    d["hh20"] = c.rolling(20).max()
+    d["vol20"] = v.rolling(20).mean()
+
+    delta = c.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / (loss + 1e-12)
+    d["rsi14"] = 100 - (100 / (1 + rs))
+
+    d["ret20"] = c.pct_change(20, fill_method=None)
+    d["ret5"] = c.pct_change(5, fill_method=None)
+    return d
 
 
-def _z_to_01(z: float, z_min: float, z_max: float) -> float:
-    if not np.isfinite(z):
-        return 0.0
-    if z_max <= z_min:
-        return 0.0
-    return float(np.clip((z - z_min) / (z_max - z_min), 0.0, 1.0))
+def trend_gate(hist: pd.DataFrame) -> bool:
+    if hist is None or len(hist) < 80:
+        return False
+    d = _add(hist)
+    c = _last(d["Close"])
+    ma20 = _last(d["ma20"])
+    ma50 = _last(d["ma50"])
+    if not (np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50)):
+        return False
+    if not (ma20 > ma50 and c > ma50):
+        return False
+    return True
 
 
-def passes_universe_filters(
-    hist: pd.DataFrame,
-    price_min: float,
-    price_max: float,
-    adv_min: float,
-    atrp_min: float,
-) -> Tuple[bool, Dict[str, float]]:
-    """
-    Universeフィルタ（必須）: 価格 / 流動性(ADV20売買代金) / ボラ(ATR%)
-    """
-    if hist is None or len(hist) < 120:
-        return False, {}
+def detect_setup_type(hist: pd.DataFrame) -> str:
+    if hist is None or len(hist) < 80:
+        return "N"
 
-    df = hist.copy()
-    close = df["Close"].astype(float)
-    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
+    d = _add(hist)
+    c = _last(d["Close"])
+    ma20 = _last(d["ma20"])
+    ma50 = _last(d["ma50"])
+    ma10 = _last(d["ma10"])
+    hh20 = _last(d["hh20"])
+    rsi = _last(d["rsi14"])
 
-    c = _last(close)
-    if not np.isfinite(c) or not (price_min <= c <= price_max):
-        return False, {}
+    atr = _atr(hist, 14)
+    if not np.isfinite(atr) or atr <= 0:
+        return "N"
 
-    # ADV20（売買代金）
-    adv20 = float((close * vol).rolling(20).mean().iloc[-1]) if len(close) >= 20 else float("nan")
-    if not np.isfinite(adv20) or adv20 < adv_min:
-        return False, {}
+    slope20 = float(d["ma20"].pct_change(5, fill_method=None).iloc[-1]) if len(d) >= 30 else 0.0
+    dist_ma20 = abs(c - ma20)
 
-    # ATR%(14)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    prev_close = close.shift(1)
-    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    atr14 = float(tr.rolling(14).mean().iloc[-1]) if len(tr) >= 14 else float("nan")
-    atrp = float(atr14 / c) if np.isfinite(atr14) and np.isfinite(c) and c > 0 else float("nan")
-    if not np.isfinite(atrp) or atrp < atrp_min:
-        return False, {}
-
-    return True, {"adv20": float(adv20), "atr14": float(atr14), "atrp": float(atrp)}
-
-
-def estimate_pwin(
-    hist: pd.DataFrame,
-    plan: TradePlan,
-    sector_rank01: float,
-    adv20: float,
-    market_score: int,
-) -> float:
-    """
-    Pwin 推定（代理特徴の合成）。
-    目的は「EVで殺し切る」ための相対評価。絶対勝率の当てではない。
-    """
-    df = hist.copy()
-    close = df["Close"].astype(float)
-    c = _last(close)
-
-    sma20 = _sma(close, 20)
-    sma50 = _sma(close, 50)
-    rsi = _rsi(close, 14)
-
-    # TrendStrength
-    trend = 0.0
-    if np.isfinite(sma20) and np.isfinite(sma50) and sma20 > sma50:
-        trend += 0.5
-    if np.isfinite(c) and np.isfinite(sma20) and c > sma20:
-        trend += 0.5
-    trend = _clamp01(trend)
-
-    # RSI quality
-    if not np.isfinite(rsi):
-        rsi_q = 0.4
-    elif 40 <= rsi <= 60:
-        rsi_q = 1.0
-    elif 35 <= rsi < 40 or 60 < rsi <= 65:
-        rsi_q = 0.6
-    else:
-        rsi_q = 0.2
-
-    # RS proxy (20d return)
-    rs = 0.0
-    if len(close) >= 21:
-        rs20 = float(close.iloc[-1] / close.iloc[-21] - 1.0)
-        rs = _z_to_01(rs20, -0.10, 0.20)
-
-    # VolumeQuality
-    volq = 0.5
-    if "Volume" in df.columns:
-        vol = df["Volume"].astype(float)
-        v_now = _last(vol)
-        v_ma20 = float(vol.rolling(20).mean().iloc[-1]) if len(vol) >= 20 else float("nan")
-        if np.isfinite(v_now) and np.isfinite(v_ma20) and v_ma20 > 0:
-            if plan.setup == "B":
-                volq = _z_to_01(v_now / v_ma20, 1.0, 2.5)
-            else:
-                volq = _z_to_01(v_ma20 / max(v_now, 1.0), 0.8, 1.6)
-
-    # Liquidity
-    liq = _z_to_01(adv20, 1e8, 1e9)
-
-    # GapRisk
-    gap = 1.0
-    if plan.gu_flag:
-        gap = 0.0
-    elif plan.in_distance_atr > 0.8:
-        gap = 0.2
-    elif plan.action == "指値待ち":
-        gap = 0.6
-
-    # Market
-    mkt = _z_to_01(float(market_score), 45.0, 70.0)
-
-    sec = _clamp01(sector_rank01)
-
-    p = (
-        0.22 * trend
-        + 0.16 * rsi_q
-        + 0.18 * rs
-        + 0.14 * volq
-        + 0.10 * liq
-        + 0.10 * sec
-        + 0.10 * mkt
+    cond_a = (
+        np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(c) and
+        c > ma20 > ma50 and
+        slope20 > 0 and
+        dist_ma20 <= 0.8 * atr and
+        (np.isfinite(rsi) and 38 <= rsi <= 60)
     )
+    if cond_a:
+        return "A"
 
-    # Gap は最後に強制的に効かせる
-    p *= (0.55 + 0.45 * gap)
+    vol = hist["Volume"].astype(float) if "Volume" in hist.columns else pd.Series(np.nan, index=hist.index)
+    vol20 = float(vol.rolling(20).mean().iloc[-1]) if len(vol) >= 25 else float("nan")
+    vol_last = float(vol.iloc[-1]) if len(vol) else float("nan")
+    cond_b = (
+        np.isfinite(hh20) and np.isfinite(c) and c >= hh20 * 0.999 and
+        np.isfinite(vol_last) and np.isfinite(vol20) and vol20 > 0 and vol_last >= 1.5 * vol20 and
+        np.isfinite(ma10) and c >= ma10
+    )
+    if cond_b:
+        return "B"
 
-    return float(np.clip(p, 0.15, 0.70))
+    return "N"
 
 
-def compute_ev(pwin: float, r: float) -> float:
-    if not np.isfinite(pwin) or not np.isfinite(r) or r <= 0:
-        return -999.0
-    return float(pwin * r - (1.0 - pwin) * 1.0)
+def calc_in_zone(hist: pd.DataFrame, setup: str) -> Dict[str, float]:
+    d = _add(hist)
+    c = _last(d["Close"])
+    ma20 = _last(d["ma20"])
+    hh20 = _last(d["hh20"])
+
+    atr = _atr(hist, 14)
+    if not np.isfinite(atr) or atr <= 0:
+        atr = max(float(c) * 0.01 if np.isfinite(c) else 1.0, 1.0)
+
+    if setup == "A":
+        center = float(ma20)
+        lower = center - 0.5 * atr
+        upper = center + 0.5 * atr
+        basis = "MA20±0.5ATR"
+    else:
+        center = float(hh20)
+        lower = center - 0.3 * atr
+        upper = center + 0.3 * atr
+        basis = "HH20±0.3ATR"
+
+    return {"center": float(center), "lower": float(lower), "upper": float(upper), "atr": float(atr), "basis": basis}
 
 
-def regime_multiplier(market_score: int, d_market_3d: int, event_penalty: float) -> float:
-    mult = 1.0
-    if market_score >= 60 and d_market_3d >= 0:
-        mult *= 1.05
-    if d_market_3d <= -5:
-        mult *= 0.70
-    mult *= float(event_penalty)
-    return float(mult)
+def estimate_pwin(hist: pd.DataFrame, sector_rank: int) -> float:
+    if hist is None or len(hist) < 80:
+        return 0.0
+
+    d = _add(hist)
+    c = d["Close"].astype(float)
+    ret = c.pct_change(fill_method=None)
+
+    ma20 = _last(d["ma20"])
+    ma50 = _last(d["ma50"])
+    close = _last(c)
+    rsi = _last(d["rsi14"])
+    ret20 = _last(d["ret20"])
+    ret5 = _last(d["ret5"])
+    vola20 = float(ret.rolling(20).std().iloc[-1]) if len(ret) >= 25 else float("nan")
+
+    sc = 0.0
+
+    if np.isfinite(close) and np.isfinite(ma20) and np.isfinite(ma50):
+        if close > ma20 > ma50:
+            sc += 0.35
+        elif close > ma50:
+            sc += 0.20
+
+    if np.isfinite(rsi):
+        if 50 <= rsi <= 62:
+            sc += 0.15
+        elif 45 <= rsi < 50:
+            sc += 0.08
+        elif rsi > 70:
+            sc -= 0.10
+
+    if np.isfinite(ret20):
+        sc += float(np.clip(ret20 * 2.0, -0.10, 0.18))
+
+    if np.isfinite(ret5):
+        sc += float(np.clip(ret5 * 1.5, -0.08, 0.12))
+
+    if sector_rank <= 5:
+        sc += (6 - sector_rank) * 0.02
+    else:
+        sc -= 0.05
+
+    if np.isfinite(vola20):
+        if vola20 >= 0.035:
+            sc -= 0.12
+        elif vola20 <= 0.015:
+            sc += 0.05
+
+    p = 0.35 + sc
+    return float(np.clip(p, 0.15, 0.65))
