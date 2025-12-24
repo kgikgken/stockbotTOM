@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from typing import Dict, Tuple
+
 import numpy as np
 import pandas as pd
-from typing import Literal, Tuple, Optional
 
-
-SetupType = Literal["A", "B"]
+from utils.rr import TradePlan
 
 
 def _last(s: pd.Series) -> float:
@@ -15,184 +15,177 @@ def _last(s: pd.Series) -> float:
         return float("nan")
 
 
-def _atr14(df: pd.DataFrame, period: int = 14) -> float:
-    if df is None or len(df) < period + 2:
+def _sma(s: pd.Series, w: int) -> float:
+    if s is None or len(s) < w:
+        return _last(s)
+    v = s.rolling(w).mean().iloc[-1]
+    return float(v) if np.isfinite(v) else _last(s)
+
+
+def _rsi(close: pd.Series, period: int = 14) -> float:
+    if close is None or len(close) < period + 2:
         return float("nan")
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    close = df["Close"].astype(float)
-    prev_close = close.shift(1)
-    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    v = tr.rolling(period).mean().iloc[-1]
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / (loss + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    v = rsi.iloc[-1]
     return float(v) if np.isfinite(v) else float("nan")
 
 
-def add_indicators(hist: pd.DataFrame) -> pd.DataFrame:
+def _clamp01(x: float) -> float:
+    if not np.isfinite(x):
+        return 0.0
+    return float(np.clip(x, 0.0, 1.0))
+
+
+def _z_to_01(z: float, z_min: float, z_max: float) -> float:
+    if not np.isfinite(z):
+        return 0.0
+    if z_max <= z_min:
+        return 0.0
+    return float(np.clip((z - z_min) / (z_max - z_min), 0.0, 1.0))
+
+
+def passes_universe_filters(
+    hist: pd.DataFrame,
+    price_min: float,
+    price_max: float,
+    adv_min: float,
+    atrp_min: float,
+) -> Tuple[bool, Dict[str, float]]:
+    """
+    Universeフィルタ（必須）: 価格 / 流動性(ADV20売買代金) / ボラ(ATR%)
+    """
+    if hist is None or len(hist) < 120:
+        return False, {}
+
     df = hist.copy()
-    c = df["Close"].astype(float)
-    v = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
+    close = df["Close"].astype(float)
+    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
 
-    df["ma10"] = c.rolling(10).mean()
-    df["ma20"] = c.rolling(20).mean()
-    df["ma50"] = c.rolling(50).mean()
+    c = _last(close)
+    if not np.isfinite(c) or not (price_min <= c <= price_max):
+        return False, {}
 
-    # 20日高値（当日含む/除くの両方）
-    df["hh20"] = c.rolling(20).max()
-    df["hh20_prev"] = df["hh20"].shift(1)
+    # ADV20（売買代金）
+    adv20 = float((close * vol).rolling(20).mean().iloc[-1]) if len(close) >= 20 else float("nan")
+    if not np.isfinite(adv20) or adv20 < adv_min:
+        return False, {}
 
-    # 出来高
-    df["vol_ma20"] = v.rolling(20).mean()
+    # ATR%(14)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr14 = float(tr.rolling(14).mean().iloc[-1]) if len(tr) >= 14 else float("nan")
+    atrp = float(atr14 / c) if np.isfinite(atr14) and np.isfinite(c) and c > 0 else float("nan")
+    if not np.isfinite(atrp) or atrp < atrp_min:
+        return False, {}
 
-    # 売買代金（20日平均）
-    df["adv20"] = (c * v).rolling(20).mean()
-
-    # SMA20の傾き（5日前との差分）
-    df["ma20_slope5"] = df["ma20"] - df["ma20"].shift(5)
-
-    # ATR
-    df["atr14"] = _atr14(df, 14)
-
-    return df
-
-
-def universe_pass(hist: pd.DataFrame) -> Tuple[bool, float, float, float]:
-    """
-    Returns: (pass, close, adv20, atr_pct)
-    """
-    if hist is None or len(hist) < 120:
-        return False, float("nan"), float("nan"), float("nan")
-
-    df = add_indicators(hist)
-    c = _last(df["Close"])
-    adv20 = _last(df["adv20"])
-    atr = _last(df["atr14"])
-
-    if not (np.isfinite(c) and 200.0 <= c <= 15000.0):
-        return False, c, adv20, float("nan")
-
-    if not (np.isfinite(adv20) and adv20 >= 100_000_000.0):
-        return False, c, adv20, float("nan")
-
-    if not (np.isfinite(atr) and atr > 0):
-        return False, c, adv20, float("nan")
-
-    atr_pct = atr / c * 100.0
-    if atr_pct < 1.5:
-        return False, c, adv20, atr_pct
-
-    return True, c, adv20, atr_pct
+    return True, {"adv20": float(adv20), "atr14": float(atr14), "atrp": float(atrp)}
 
 
-def detect_setup(hist: pd.DataFrame) -> Tuple[Optional[SetupType], str]:
-    """
-    Setup A: トレンド押し目
-    Setup B: ブレイク（厳選）
-
-    Returns: (setup_type, in_rank)
-    """
-    if hist is None or len(hist) < 120:
-        return None, "様子見"
-
-    df = add_indicators(hist)
-
-    c = _last(df["Close"])
-    ma20 = _last(df["ma20"])
-    ma50 = _last(df["ma50"])
-    slope5 = _last(df["ma20_slope5"])
-    atr = _last(df["atr14"])
-
-    if not (np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(atr) and atr > 0):
-        return None, "様子見"
-
-    # --- Setup A（最優先） ---
-    # Close > SMA20 > SMA50, SMA20 slope+, CloseがSMA20に接近（<=0.8ATR）
-    if (c > ma20 > ma50) and (slope5 > 0):
-        dist = abs(c - ma20)
-        if dist <= 0.8 * atr:
-            # 強/通常の差：接近度
-            if dist <= 0.4 * atr:
-                return "A", "強IN"
-            return "A", "通常IN"
-
-    # --- Setup B（厳選） ---
-    # Close > HH20(prev) かつ Vol >=1.5*VolMA20
-    hh20_prev = _last(df["hh20_prev"])
-    vol = _last(df["Volume"]) if "Volume" in df.columns else float("nan")
-    vol_ma20 = _last(df["vol_ma20"])
-
-    if np.isfinite(hh20_prev) and np.isfinite(vol) and np.isfinite(vol_ma20) and vol_ma20 > 0:
-        if (c > hh20_prev) and (vol >= 1.5 * vol_ma20):
-            # 抜けた日だけ（追いかけ防止）：ブレイクラインから0.6ATR以内
-            if abs(c - hh20_prev) <= 0.6 * atr:
-                return "B", "通常IN"
-
-    return None, "様子見"
-
-
-def in_zone_center(hist: pd.DataFrame, setup: SetupType) -> Tuple[float, float]:
-    """
-    Returns: (center, atr)
-    A: SMA20
-    B: HH20(prev)
-    """
-    df = add_indicators(hist)
-    atr = _last(df["atr14"])
-    if not (np.isfinite(atr) and atr > 0):
-        atr = float("nan")
-
-    if setup == "A":
-        center = _last(df["ma20"])
-    else:
-        center = _last(df["hh20_prev"])
-    return float(center), float(atr)
-
-
-def gu_flag(hist: pd.DataFrame) -> bool:
-    if hist is None or len(hist) < 2:
-        return False
-    df = add_indicators(hist)
-    atr = _last(df["atr14"])
-    if not (np.isfinite(atr) and atr > 0):
-        return False
-    o = float(df["Open"].astype(float).iloc[-1])
-    prev_c = float(df["Close"].astype(float).iloc[-2])
-    return bool(o > prev_c + 1.0 * atr)
-
-
-def pwin_proxy(
-    in_rank: str,
-    setup: SetupType,
-    sector_rank: int,
-    mkt_score: int,
-    delta_mkt_3d: int,
+def estimate_pwin(
+    hist: pd.DataFrame,
+    plan: TradePlan,
+    sector_rank01: float,
     adv20: float,
+    market_score: int,
 ) -> float:
     """
-    ログ無しの代理Pwin（最小限）
-    - A > B
-    - セクター上位ほど加点
-    - 地合い悪化は減点
-    - 流動性は下限以上なら微加点
+    Pwin 推定（代理特徴の合成）。
+    目的は「EVで殺し切る」ための相対評価。絶対勝率の当てではない。
     """
-    p = 0.34
-    if setup == "A":
-        p += 0.04
-    if in_rank == "強IN":
-        p += 0.03
+    df = hist.copy()
+    close = df["Close"].astype(float)
+    c = _last(close)
 
-    # sector_rank: 1..5
-    if 1 <= sector_rank <= 5:
-        p += (6 - sector_rank) * 0.006  # max +0.03
+    sma20 = _sma(close, 20)
+    sma50 = _sma(close, 50)
+    rsi = _rsi(close, 14)
 
-    if mkt_score >= 60:
-        p += 0.01
-    if mkt_score < 50:
-        p -= 0.01
+    # TrendStrength
+    trend = 0.0
+    if np.isfinite(sma20) and np.isfinite(sma50) and sma20 > sma50:
+        trend += 0.5
+    if np.isfinite(c) and np.isfinite(sma20) and c > sma20:
+        trend += 0.5
+    trend = _clamp01(trend)
 
-    if delta_mkt_3d <= -5:
-        p -= 0.03
+    # RSI quality
+    if not np.isfinite(rsi):
+        rsi_q = 0.4
+    elif 40 <= rsi <= 60:
+        rsi_q = 1.0
+    elif 35 <= rsi < 40 or 60 < rsi <= 65:
+        rsi_q = 0.6
+    else:
+        rsi_q = 0.2
 
-    if np.isfinite(adv20) and adv20 >= 200_000_000:
-        p += 0.01
+    # RS proxy (20d return)
+    rs = 0.0
+    if len(close) >= 21:
+        rs20 = float(close.iloc[-1] / close.iloc[-21] - 1.0)
+        rs = _z_to_01(rs20, -0.10, 0.20)
 
-    return float(np.clip(p, 0.20, 0.55))
+    # VolumeQuality
+    volq = 0.5
+    if "Volume" in df.columns:
+        vol = df["Volume"].astype(float)
+        v_now = _last(vol)
+        v_ma20 = float(vol.rolling(20).mean().iloc[-1]) if len(vol) >= 20 else float("nan")
+        if np.isfinite(v_now) and np.isfinite(v_ma20) and v_ma20 > 0:
+            if plan.setup == "B":
+                volq = _z_to_01(v_now / v_ma20, 1.0, 2.5)
+            else:
+                volq = _z_to_01(v_ma20 / max(v_now, 1.0), 0.8, 1.6)
+
+    # Liquidity
+    liq = _z_to_01(adv20, 1e8, 1e9)
+
+    # GapRisk
+    gap = 1.0
+    if plan.gu_flag:
+        gap = 0.0
+    elif plan.in_distance_atr > 0.8:
+        gap = 0.2
+    elif plan.action == "指値待ち":
+        gap = 0.6
+
+    # Market
+    mkt = _z_to_01(float(market_score), 45.0, 70.0)
+
+    sec = _clamp01(sector_rank01)
+
+    p = (
+        0.22 * trend
+        + 0.16 * rsi_q
+        + 0.18 * rs
+        + 0.14 * volq
+        + 0.10 * liq
+        + 0.10 * sec
+        + 0.10 * mkt
+    )
+
+    # Gap は最後に強制的に効かせる
+    p *= (0.55 + 0.45 * gap)
+
+    return float(np.clip(p, 0.15, 0.70))
+
+
+def compute_ev(pwin: float, r: float) -> float:
+    if not np.isfinite(pwin) or not np.isfinite(r) or r <= 0:
+        return -999.0
+    return float(pwin * r - (1.0 - pwin) * 1.0)
+
+
+def regime_multiplier(market_score: int, d_market_3d: int, event_penalty: float) -> float:
+    mult = 1.0
+    if market_score >= 60 and d_market_3d >= 0:
+        mult *= 1.05
+    if d_market_3d <= -5:
+        mult *= 0.70
+    mult *= float(event_penalty)
+    return float(mult)
