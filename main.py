@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -10,51 +11,49 @@ import yfinance as yf
 import requests
 
 from utils.util import jst_today_str, jst_today_date, parse_event_datetime_jst
-from utils.market import enhance_market_score, market_score_delta_3d
 from utils.sector import top_sectors_5d
-from utils.scoring import score_stock, calc_inout_for_stock, trend_gate
-from utils.rr import compute_tp_sl_rr
 from utils.position import load_positions, analyze_positions
+from utils.scoring import (
+    detect_setup,
+    gu_flag,
+    in_zone_center,
+    pwin_proxy,
+    universe_pass,
+)
+from utils.rr import compute_tp_sl_rr  # positions用に残す（互換）
+from utils.market import enhance_market_score
 
 
 # ============================================================
-# 設定（Swing専用 / ベース保持）
+# 設定（Swing専用 / 1〜7日）
 # ============================================================
 UNIVERSE_PATH = "universe_jpx.csv"
 POSITIONS_PATH = "positions.csv"
 EVENTS_PATH = "events.csv"
 WORKER_URL = os.getenv("WORKER_URL")
 
-# 決算前後の除外（新規）
+# 決算前後の除外（営業日ではなく暦日：元仕様を維持）
 EARNINGS_EXCLUDE_DAYS = 3
 
-# Swing条件
-SWING_MAX_FINAL = 5
-SWING_SCORE_MIN = 72.0
-SWING_RR_MIN = 2.0
-SWING_EV_R_MIN = 0.40
-
-# 1〜7日（速度重視）
-MAX_EXPECTED_DAYS = 5.0
-MIN_R_PER_DAY = 0.50
-
-# GU / IN乖離
-GU_ATR_TH = 1.0
-IN_DIST_ATR_TH = 0.8
-
-# NO-TRADE
-NO_TRADE_MKT_SCORE = 45
-NO_TRADE_DELTA3_TH = -5
-NO_TRADE_DELTA3_SCORE_CAP = 55
-NO_TRADE_AVG_ADJ_EV = 0.40
-NO_TRADE_GU_RATIO = 0.60
-
-# 表示
+# セクター上位Nのみ
 SECTOR_TOP_N = 5
+
+# 出力上限
+SWING_MAX_FINAL = 5
+WATCH_MAX = 10
+
+# 足切り
+RR_MIN = 2.2
+EV_MIN = 0.40
+EXPECTED_DAYS_MAX = 5.0
+R_PER_DAY_MIN = 0.50
+
+# 追いかけ禁止（IN乖離）
+IN_DIST_ATR_LIMIT = 0.80
 
 
 # ============================================================
-# util
+# 便利
 # ============================================================
 def _safe_float(x, default=np.nan) -> float:
     try:
@@ -73,12 +72,12 @@ def fetch_history(ticker: str, period: str = "260d") -> Optional[pd.DataFrame]:
             if df is not None and not df.empty:
                 return df
         except Exception:
-            time.sleep(0.5)
+            time.sleep(0.4)
     return None
 
 
 # ============================================================
-# events
+# events.csv
 # ============================================================
 def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
     if not os.path.exists(path):
@@ -87,27 +86,33 @@ def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
         df = pd.read_csv(path)
     except Exception:
         return []
-
-    out: List[Dict[str, str]] = []
-    for _, r in df.iterrows():
-        label = str(r.get("label", "")).strip()
+    events: List[Dict[str, str]] = []
+    for _, row in df.iterrows():
+        label = str(row.get("label", "")).strip()
         if not label:
             continue
-        out.append(
-            dict(
-                label=label,
-                date=str(r.get("date", "")).strip(),
-                time=str(r.get("time", "")).strip(),
-                datetime=str(r.get("datetime", "")).strip(),
-            )
+        events.append(
+            {
+                "label": label,
+                "kind": str(row.get("kind", "")).strip(),
+                "date": str(row.get("date", "")).strip(),
+                "time": str(row.get("time", "")).strip(),
+                "datetime": str(row.get("datetime", "")).strip(),
+            }
         )
-    return out
+    return events
 
 
 def build_event_warnings(today_date) -> Tuple[List[str], bool]:
+    """
+    Returns: (lines, is_risky_day)
+    is_risky_day: FOMC/CPI/日銀/GDP 等が「本日または翌日」なら True（保守的）
+    """
     events = load_events()
     warns: List[str] = []
-    near_critical = False
+    risky = False
+
+    keywords = ("FOMC", "CPI", "PCE", "雇用統計", "日銀", "GDP", "政策金利", "米CPI", "米PCE")
 
     for ev in events:
         dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
@@ -115,273 +120,98 @@ def build_event_warnings(today_date) -> Tuple[List[str], bool]:
             continue
         d = dt.date()
         delta = (d - today_date).days
-
         if -1 <= delta <= 2:
             when = "本日" if delta == 0 else ("直近" if delta < 0 else f"{delta}日後")
-            warns.append(f"⚠ {ev['label']}（{dt.strftime('%Y-%m-%d %H:%M JST')} / {when}）")
+            dt_disp = dt.strftime("%Y-%m-%d %H:%M JST")
+            warns.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
 
-        # 前日〜当日は環境悪化扱い（v1.1）
-        if 0 <= delta <= 1:
-            near_critical = True
+            if (delta in (0, 1)) and any(k in ev["label"] for k in keywords):
+                risky = True
 
     if not warns:
         warns.append("- 特になし")
-    return warns, near_critical
+    return warns, risky
 
 
 # ============================================================
-# earnings
+# 決算フィルタ
 # ============================================================
 def filter_earnings(df: pd.DataFrame, today_date) -> pd.DataFrame:
     if "earnings_date" not in df.columns:
         return df
+    try:
+        parsed = pd.to_datetime(df["earnings_date"], errors="coerce").dt.date
+    except Exception:
+        return df
 
-    d = pd.to_datetime(df["earnings_date"], errors="coerce").dt.date
-    keep = []
-    for x in d:
-        if pd.isna(x):
+    df = df.copy()
+    df["earnings_date_parsed"] = parsed
+
+    keep: List[bool] = []
+    for d in df["earnings_date_parsed"]:
+        if d is None or pd.isna(d):
             keep.append(True)
-        else:
-            keep.append(abs((x - today_date).days) > EARNINGS_EXCLUDE_DAYS)
+            continue
+        try:
+            delta = abs((d - today_date).days)
+            keep.append(delta > EARNINGS_EXCLUDE_DAYS)
+        except Exception:
+            keep.append(True)
+
     return df[keep]
 
 
 # ============================================================
-# EV
+# MarketScore Δ3d（追加）
 # ============================================================
-def expected_r(in_rank: str, rr: float) -> float:
-    win = {"強IN": 0.45, "通常IN": 0.40, "弱めIN": 0.33}.get(in_rank, 0.25)
-    return float(win * rr - (1.0 - win))
-
-
-def regime_multiplier(mkt_score: int, delta3: int, event_near: bool) -> float:
-    mult = 1.0
-    if mkt_score >= 60 and delta3 >= 0:
-        mult *= 1.05
-    if delta3 <= NO_TRADE_DELTA3_TH:
-        mult *= 0.70
-    if event_near:
-        mult *= 0.75
-    return float(mult)
-
-
-def _setup_type(in_rank: str) -> str:
-    # v1.1：A=押し目（強） / B=ブレイク寄り（通常）
-    if in_rank == "強IN":
-        return "A"
-    if in_rank == "通常IN":
-        return "B"
-    return "?"
-
-
-def _action_type(price_now: float, entry: float, atr: float, gu_flag: bool) -> str:
-    # 追いかけ禁止を機械化
-    # - GUは問答無用で監視
-    # - IN中心からの乖離(ATR単位)で EXEC / LIMIT / WATCH を決める
-    if gu_flag:
-        return "WATCH_ONLY"
-    if not (np.isfinite(atr) and atr > 0 and np.isfinite(price_now) and np.isfinite(entry) and entry > 0):
-        return "WATCH_ONLY"
-
-    dist = abs(price_now - entry) / atr
-
-    # 0.8ATR超は「今日は入らない」
-    if dist > IN_DIST_ATR_TH:
-        return "WATCH_ONLY"
-
-    # 0.4〜0.8ATRは指値待ち（押し目待ち）
-    if dist > 0.4:
-        return "LIMIT_WAIT"
-
-    return "EXEC_NOW"
-
-
-
-# ============================================================
-# Swing screening（順張り専用）
-# ============================================================
-def run_swing(today_date, mkt_score: int, delta3: int, event_near: bool) -> Tuple[List[Dict], Dict]:
+def _market_score_from_prices(close: pd.Series) -> int:
     """
-    戻り:
-      - final_candidates
-      - stats: dict(avg_adj_ev, gu_ratio, no_trade, reasons, avg_rr, avg_ev, avg_rpd)
+    close: 連続した終値（日足）
+    スコア設計は「既存の軽量版」を踏襲：5日変化 + 0-100に丸め
+    """
+    if close is None or len(close) < 6:
+        return 50
+    c = close.astype(float).dropna()
+    if len(c) < 6:
+        return 50
+    chg = (c.iloc[-1] / c.iloc[-6] - 1.0) * 100.0
+    base = 50.0 + float(np.clip(chg, -20.0, 20.0))
+    return int(np.clip(round(base), 0, 100))
+
+
+def calc_market_score_delta_3d() -> Tuple[int, int]:
+    """
+    Returns: (score_today, delta_3d)
+    3営業日前を厳密に追わず、「直近3本前のバー終点」を近似に採用。
     """
     try:
-        uni = pd.read_csv(UNIVERSE_PATH)
+        df = yf.Ticker("^TOPX").history(period="14d", auto_adjust=True)
+        if df is None or df.empty or len(df) < 10:
+            df = yf.Ticker("^N225").history(period="14d", auto_adjust=True)
+        if df is None or df.empty:
+            return 50, 0
+        close = df["Close"].astype(float).dropna()
+        if len(close) < 10:
+            return 50, 0
+
+        score_today = _market_score_from_prices(close)
+        close_3d = close.iloc[:-3]  # 3本前まで
+        score_3d_ago = _market_score_from_prices(close_3d)
+
+        return int(score_today), int(score_today - score_3d_ago)
     except Exception:
-        return [], {"no_trade": True, "reasons": ["universe_read_fail"]}
-
-    if "ticker" in uni.columns:
-        t_col = "ticker"
-    elif "code" in uni.columns:
-        t_col = "code"
-    else:
-        return [], {"no_trade": True, "reasons": ["ticker_column_missing"]}
-
-    uni = filter_earnings(uni, today_date)
-
-    mult = regime_multiplier(mkt_score, delta3, event_near)
-
-    cands: List[Dict] = []
-    gu_count = 0
-
-    for _, r in uni.iterrows():
-        ticker = str(r.get(t_col, "")).strip()
-        if not ticker:
-            continue
-
-        hist = fetch_history(ticker)
-        if hist is None or len(hist) < 120:
-            continue
-
-        # --- TrendGate（逆張り完全排除） ---
-        if not trend_gate(hist):
-            continue
-
-        score = score_stock(hist)
-        if score is None or not np.isfinite(score) or score < SWING_SCORE_MIN:
-            continue
-
-        in_rank, _, _ = calc_inout_for_stock(hist)
-        if in_rank == "様子見":
-            continue
-
-        rr_info = compute_tp_sl_rr(hist, mkt_score=mkt_score)
-        rr = float(rr_info.get("rr", 0.0))
-        if not np.isfinite(rr) or rr < SWING_RR_MIN:
-            continue
-
-        ev = expected_r(in_rank, rr)
-        if not np.isfinite(ev) or ev < SWING_EV_R_MIN:
-            continue
-
-        adj_ev = float(ev * mult)
-
-        atr = float(rr_info.get("atr", 0.0))
-        if not (np.isfinite(atr) and atr > 0):
-            atr = max(float(hist["Close"].iloc[-1]) * 0.01, 1.0)
-
-        # 速度（ExpectedDays, R/day）
-        entry = float(rr_info["entry"])
-        tp2 = float(rr_info["tp_price"])  # 既存のTP（TP2扱い）
-        expected_days = (tp2 - entry) / (atr * 1.0) if atr > 0 else 999.0
-        expected_days = float(expected_days) if np.isfinite(expected_days) else 999.0
-        r_per_day = float(rr / expected_days) if expected_days > 0 else 0.0
-
-        # 速度足切り（1〜7日戦）
-        if expected_days > MAX_EXPECTED_DAYS:
-            continue
-        if r_per_day < MIN_R_PER_DAY:
-            continue
-
-        price_now = _safe_float(hist["Close"].iloc[-1])
-        open_today = _safe_float(hist["Open"].iloc[-1])
-        prev_close = _safe_float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price_now
-
-        gu_flag = bool(np.isfinite(open_today) and np.isfinite(prev_close) and open_today > (prev_close + GU_ATR_TH * atr))
-        if gu_flag:
-            gu_count += 1
-
-        action = _action_type(price_now, entry, atr, gu_flag)
-
-        gap = (price_now / entry - 1) * 100 if entry > 0 else np.nan
-
-        # TP1/TP2
-        sl_price = float(rr_info["sl_price"])
-        r_unit = max(entry - sl_price, 0.0)
-        tp1 = entry + 1.5 * r_unit
-        tp2 = float(rr_info["tp_price"])
-
-        cands.append(
-            dict(
-                ticker=ticker,
-                name=str(r.get("name", ticker)),
-                sector=str(r.get("sector", r.get("industry_big", "不明"))),
-                setup=_setup_type(in_rank),
-                in_rank=in_rank,
-                rr=float(rr),
-                ev=float(ev),
-                adj_ev=float(adj_ev),
-                r_per_day=float(r_per_day),
-                expected_days=float(expected_days),
-                entry=float(entry),
-                price_now=float(price_now) if np.isfinite(price_now) else np.nan,
-                gap_pct=float(gap) if np.isfinite(gap) else np.nan,
-                atr=float(atr),
-                gu_flag=gu_flag,
-                action=action,
-                sl_price=float(sl_price),
-                tp1=float(tp1),
-                tp2=float(tp2),
-            )
-        )
-
-    # 統計
-    gu_ratio = (gu_count / len(cands)) if cands else 0.0
-    avg_adj_ev = float(np.mean([x["adj_ev"] for x in cands])) if cands else 0.0
-    avg_rr = float(np.mean([x["rr"] for x in cands])) if cands else 0.0
-    avg_ev = float(np.mean([x["ev"] for x in cands])) if cands else 0.0
-    avg_rpd = float(np.mean([x["r_per_day"] for x in cands])) if cands else 0.0
-
-    reasons: List[str] = []
-
-    # NO-TRADE判定（候補が0でも、地合いで止める）
-    no_trade = False
-    if mkt_score < NO_TRADE_MKT_SCORE:
-        no_trade = True
-        reasons.append("MarketScore<45")
-    if (delta3 <= NO_TRADE_DELTA3_TH) and (mkt_score < NO_TRADE_DELTA3_SCORE_CAP):
-        no_trade = True
-        reasons.append("Δ3d悪化")
-    if cands and avg_adj_ev < NO_TRADE_AVG_ADJ_EV:
-        no_trade = True
-        reasons.append("AvgAdjustedEV不足")
-    if cands and gu_ratio >= NO_TRADE_GU_RATIO:
-        no_trade = True
-        reasons.append("GU過多")
-
-    # ソート：AdjustedEV → R/day → RR
-    cands.sort(key=lambda x: (x["adj_ev"], x["r_per_day"], x["rr"]), reverse=True)
-
-    # セクター偏り（同一セクター最大2）
-    picked: List[Dict] = []
-    sec_cnt: Dict[str, int] = {}
-    for c in cands:
-        sec = str(c.get("sector", "不明"))
-        if sec_cnt.get(sec, 0) >= 2:
-            continue
-        picked.append(c)
-        sec_cnt[sec] = sec_cnt.get(sec, 0) + 1
-        if len(picked) >= SWING_MAX_FINAL:
-            break
-
-    # NO-TRADEなら、Actionを全部WATCH_ONLYに落とす（入らない日を固定）
-    if no_trade:
-        for c in picked:
-            c["action"] = "WATCH_ONLY"
-
-    stats = {
-        "no_trade": no_trade,
-        "reasons": reasons,
-        "gu_ratio": float(gu_ratio),
-        "avg_adj_ev": float(avg_adj_ev),
-        "avg_rr": float(avg_rr),
-        "avg_ev": float(avg_ev),
-        "avg_rpd": float(avg_rpd),
-        "mult": float(mult),
-    }
-    return picked, stats
+        return 50, 0
 
 
 # ============================================================
-# レバレッジ（ベース保持：地合い依存は残すが、判断はNO-TRADEが握る）
+# レバレッジ（簡易）
 # ============================================================
-def recommend_leverage(mkt_score: int) -> float:
+def recommend_leverage(mkt_score: int) -> Tuple[float, str]:
     if mkt_score >= 60:
-        return 2.0
+        return 2.0, "攻め（押し目＋一部ブレイク）"
     if mkt_score >= 45:
-        return 1.7
-    return 0.0
+        return 1.7, "中立（厳選・押し目中心）"
+    return 1.0, "守り（新規禁止）"
 
 
 def calc_max_position(total_asset: float, lev: float) -> int:
@@ -391,142 +221,394 @@ def calc_max_position(total_asset: float, lev: float) -> int:
 
 
 # ============================================================
-# 本命抽出（“勝てるやつ”を前に出す）
-# - 並び順は既に AdjEV→R/day→RR で揃ってる
-# - 表示は 1〜2銘柄を「本命」、残りを「監視/指値」に回す
+# EV / AdjEV / 速度
 # ============================================================
-def pick_core_candidates(picked: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
-    if not picked:
-        return [], []
+def calc_ev(pwin: float, rr: float) -> float:
+    if rr <= 0:
+        return -999.0
+    p = float(np.clip(pwin, 0.0, 1.0))
+    return float(p * rr - (1.0 - p) * 1.0)
 
-    # 本命評価軸：期待値×速度（1〜7日戦）
-    def core_key(x: Dict) -> float:
-        return float(x.get("adj_ev", 0.0)) * float(x.get("r_per_day", 0.0))
 
-    ranked = sorted(picked, key=lambda x: (core_key(x), x.get("adj_ev", 0.0), x.get("r_per_day", 0.0), x.get("rr", 0.0)), reverse=True)
+def regime_multiplier(mkt_score: int, delta_3d: int, risky_event: bool) -> float:
+    mult = 1.00
+    if mkt_score >= 60 and delta_3d >= 0:
+        mult *= 1.05
+    if delta_3d <= -5:
+        mult *= 0.70
+    if risky_event:
+        mult *= 0.75
+    return float(mult)
 
-    top1 = ranked[0]
-    core = [top1]
 
-    # 2本目は「同等レベル」だけ採用（無理に増やさない）
-    if len(ranked) >= 2:
-        top2 = ranked[1]
-        k1 = core_key(top1)
-        k2 = core_key(top2)
-
-        # 条件：上位の75%以上、かつ最低限の筋が通ってる
-        if (k1 <= 0) or (
-            (k2 >= 0.75 * k1)
-            and (float(top2.get("adj_ev", 0.0)) >= 0.60)
-            and (float(top2.get("r_per_day", 0.0)) >= 0.70)
-        ):
-            core.append(top2)
-
-    core_tickers = {c.get("ticker") for c in core}
-    rest = [c for c in picked if c.get("ticker") not in core_tickers]
-    return core, rest
+def expected_days(tp2: float, entry: float, atr: float, k: float = 1.0) -> float:
+    if not (np.isfinite(tp2) and np.isfinite(entry) and np.isfinite(atr) and atr > 0):
+        return 999.0
+    return float(max(0.5, (tp2 - entry) / (k * atr)))
 
 
 # ============================================================
-# レポート
+# スクリーニング
 # ============================================================
-def build_report(today_str, today_date, mkt: Dict, delta3: int, pos_text: str, total_asset: float) -> str:
-    mkt_score = int(mkt.get("score", 50))
-    mkt_comment = str(mkt.get("comment", ""))
+@dataclass
+class SwingCandidate:
+    ticker: str
+    name: str
+    sector: str
+    sector_rank: int
+    setup: str  # A/B
+    in_rank: str
+    rr: float
+    ev: float
+    adjev: float
+    r_per_day: float
+    entry: float
+    price_now: float
+    gap_pct: float
+    atr: float
+    gu: bool
+    stop: float
+    tp1: float
+    tp2: float
+    exp_days: float
+    action: str  # EXEC_NOW / LIMIT_WAIT / WATCH_ONLY
 
-    events, event_near = build_event_warnings(today_date)
 
-    lev = recommend_leverage(mkt_score)
-    max_pos = calc_max_position(total_asset, lev)
+def run_swing(
+    today_date,
+    mkt_score: int,
+    delta_mkt_3d: int,
+    top_sectors: List[Tuple[str, float]],
+    risky_event: bool,
+) -> Tuple[List[SwingCandidate], List[SwingCandidate], List[str]]:
+    """
+    Returns: (main_list, watch_list, debug_reasons_for_notradecheck)
+    """
+    try:
+        uni = pd.read_csv(UNIVERSE_PATH)
+    except Exception:
+        return [], [], ["universe読み込み失敗"]
 
-    sectors = top_sectors_5d(SECTOR_TOP_N)
-    swing, stats = run_swing(today_date, mkt_score=mkt_score, delta3=delta3, event_near=event_near)
+    if "ticker" in uni.columns:
+        t_col = "ticker"
+    elif "code" in uni.columns:
+        t_col = "code"
+    else:
+        return [], [], ["universeにticker/code列が無い"]
 
+    # 決算除外（新規）
+    uni = filter_earnings(uni, today_date)
+
+    # セクター上位
+    top_sector_names = [s for s, _ in top_sectors]
+    sector_rank_map = {s: i + 1 for i, (s, _) in enumerate(top_sectors)}
+
+    mains: List[SwingCandidate] = []
+    watches: List[SwingCandidate] = []
+
+    for _, row in uni.iterrows():
+        ticker = str(row.get(t_col, "")).strip()
+        if not ticker:
+            continue
+
+        name = str(row.get("name", ticker))
+        sector = str(row.get("sector", row.get("industry_big", "不明")))
+
+        # セクターフィルタ（上位のみ）
+        if top_sector_names and (sector not in top_sector_names):
+            continue
+
+        hist = fetch_history(ticker, period="260d")
+        if hist is None or len(hist) < 120:
+            continue
+
+        # Universe フィルタ
+        ok, c_now, adv20, atr_pct = universe_pass(hist)
+        if not ok:
+            continue
+
+        setup, in_rank = detect_setup(hist)
+        if setup is None:
+            continue
+
+        # Setup B は地合い55未満は弾く（事故回避）
+        if setup == "B" and mkt_score < 55:
+            continue
+
+        center, atr = in_zone_center(hist, setup)
+        if not (np.isfinite(center) and np.isfinite(atr) and atr > 0):
+            continue
+
+        # INゾーン（中心のみ使う：±は報告用に不要なら後で追加）
+        entry = float(center)
+
+        # GU判定
+        gu = gu_flag(hist)
+
+        # 追いかけ禁止（IN乖離）
+        price_now = float(hist["Close"].astype(float).iloc[-1])
+        dist_atr = abs(price_now - entry) / atr if atr > 0 else 999.0
+
+        # Stop/Target（仕様ベース）
+        if setup == "A":
+            stop = entry - 1.2 * atr
+            breakline = np.nan
+            resistance = float(hist["Close"].astype(float).tail(60).max()) * 0.995
+        else:
+            # Setup B: ブレイクラインは entry（=HH20prev）
+            breakline = entry
+            stop = breakline - 1.0 * atr
+            resistance = float(hist["Close"].astype(float).tail(60).max()) * 0.995
+
+        # R距離
+        r_dist = entry - stop
+        if not (np.isfinite(r_dist) and r_dist > 0):
+            continue
+
+        # TP2: 基本は 3R だが、60日高値手前で頭を叩く
+        tp2_raw = entry + 3.0 * r_dist
+        tp2 = min(tp2_raw, resistance)
+        if tp2 <= entry:
+            continue
+
+        # TP1: 1.5R（TP2に合わせて上限）
+        tp1 = min(entry + 1.5 * r_dist, tp2 * 0.995)
+
+        # RR（TP2基準）
+        rr = (tp2 - entry) / r_dist
+
+        # 期待日数 / 速度
+        exp_days = expected_days(tp2, entry, atr, k=1.0)
+        r_day = rr / exp_days if exp_days > 0 else 0.0
+
+        # 代理Pwin → EV
+        srank = int(sector_rank_map.get(sector, 99))
+        pwin = pwin_proxy(in_rank, setup, srank, mkt_score, delta_mkt_3d, adv20)
+        ev = calc_ev(pwin, rr)
+        mult = regime_multiplier(mkt_score, delta_mkt_3d, risky_event)
+        adjev = ev * mult
+
+        # 足切り
+        if rr < RR_MIN:
+            continue
+        if ev < EV_MIN:
+            continue
+        if exp_days > EXPECTED_DAYS_MAX:
+            continue
+        if r_day < R_PER_DAY_MIN:
+            continue
+
+        # ギャップ%
+        gap_pct = (price_now / entry - 1.0) * 100.0 if entry > 0 else float("nan")
+
+        # Action
+        action = "LIMIT_WAIT"
+        if gu:
+            action = "WATCH_ONLY"
+        elif dist_atr > IN_DIST_ATR_LIMIT:
+            action = "WATCH_ONLY"
+        else:
+            # 即INは「かなり厳選」（勝てる寄せ）
+            # - Setup Aのみ
+            # - 現値がINから近い（0.5ATR以内）
+            # - 速度/AdjEVが上位
+            if (setup == "A") and (dist_atr <= 0.50) and (adjev >= 0.80) and (r_day >= 0.80):
+                action = "EXEC_NOW"
+            else:
+                action = "LIMIT_WAIT"
+
+        cand = SwingCandidate(
+            ticker=ticker,
+            name=name,
+            sector=sector,
+            sector_rank=srank,
+            setup=str(setup),
+            in_rank=in_rank,
+            rr=float(rr),
+            ev=float(ev),
+            adjev=float(adjev),
+            r_per_day=float(r_day),
+            entry=float(round(entry, 1)),
+            price_now=float(round(price_now, 1)),
+            gap_pct=float(gap_pct),
+            atr=float(round(atr, 1)),
+            gu=bool(gu),
+            stop=float(round(stop, 1)),
+            tp1=float(round(tp1, 1)),
+            tp2=float(round(tp2, 1)),
+            exp_days=float(round(exp_days, 1)),
+            action=action,
+        )
+
+        if action == "WATCH_ONLY":
+            watches.append(cand)
+        else:
+            mains.append(cand)
+
+    # ソート：AdjEV * R/day を最優先（=最強に寄せる）
+    def key(c: SwingCandidate):
+        return (c.adjev * c.r_per_day, c.adjev, c.r_per_day, c.rr)
+
+    mains.sort(key=key, reverse=True)
+    watches.sort(key=key, reverse=True)
+
+    # 本命は mains の先頭から（最大5）
+    mains = mains[:SWING_MAX_FINAL]
+    watches = watches[:WATCH_MAX]
+
+    return mains, watches, []
+
+
+# ============================================================
+# NO-TRADE 判定
+# ============================================================
+def decide_trade_allowed(
+    mkt_score: int,
+    delta_3d: int,
+    risky_event: bool,
+    mains: List[SwingCandidate],
+    watches: List[SwingCandidate],
+) -> Tuple[bool, List[str]]:
+    reasons: List[str] = []
+
+    if mkt_score < 45:
+        reasons.append("MarketScore<45")
+    if (delta_3d <= -5) and (mkt_score < 55):
+        reasons.append("ΔMarketScore_3d<=-5 かつ MarketScore<55")
+
+    # 上位候補（mains）の平均AdjEV
+    if mains:
+        avg_adjev = float(np.mean([c.adjev for c in mains]))
+        if avg_adjev < 0.30:
+            reasons.append("上位候補の平均AdjEV<0.30")
+    else:
+        # main が空なら「実質ノートレ」
+        reasons.append("条件を満たす候補なし")
+
+    # GU比率（mains+watches のうちGU）
+    all_cands = mains + watches
+    if all_cands:
+        gu_ratio = float(np.mean([1.0 if c.gu else 0.0 for c in all_cands]))
+        if gu_ratio >= 0.60:
+            reasons.append("GU_flag比率>=60%")
+
+    # イベント（強制ノートレにはしない、倍率で抑制するだけ。必要ならここで追加）
+    if risky_event:
+        # 仕様では倍率 0.75、NO-TRADEではない
+        pass
+
+    allowed = len(reasons) == 0
+    return allowed, reasons
+
+
+# ============================================================
+# レポート（日本語のみ）
+# ============================================================
+def _yn(b: bool) -> str:
+    return "Y" if b else "N"
+
+
+def _action_jp(a: str) -> str:
+    if a == "EXEC_NOW":
+        return "即IN可"
+    if a == "LIMIT_WAIT":
+        return "指値待ち"
+    return "監視のみ"
+
+
+def build_report(
+    today_str: str,
+    today_date,
+    mkt_score: int,
+    mkt_comment: str,
+    delta_3d: int,
+    lev: float,
+    lev_comment: str,
+    max_pos: int,
+    sectors: List[Tuple[str, float]],
+    event_lines: List[str],
+    trade_allowed: bool,
+    notrade_reasons: List[str],
+    mains: List[SwingCandidate],
+    watches: List[SwingCandidate],
+    pos_text: str,
+) -> str:
     lines: List[str] = []
     lines.append(f"📅 {today_str} stockbotTOM 日報")
     lines.append("")
     lines.append("◆ 今日の結論（Swing専用）")
-
-    if stats.get("no_trade", False):
-        reason_str = " / ".join(stats.get("reasons", []) or ["条件該当"])
-        lines.append(f"🚫 本日は新規見送り（{reason_str}）")
-    else:
+    if trade_allowed:
         lines.append("✅ 新規可（条件クリア）")
-
+    else:
+        rs = " / ".join(notrade_reasons) if notrade_reasons else "条件該当"
+        lines.append(f"🚫 本日は新規見送り（{rs}）")
     lines.append(f"- 地合い: {mkt_score}点 ({mkt_comment})")
-    lines.append(f"- ΔMarketScore_3d: {delta3:+d}")
-    lines.append(f"- レバ: {lev:.1f}倍")
+    lines.append(f"- ΔMarketScore_3d: {delta_3d:+d}")
+    lines.append(f"- レバ: {lev:.1f}倍（{lev_comment}）")
     lines.append(f"- MAX建玉: 約{max_pos:,}円")
     lines.append("")
 
     lines.append("📈 セクター（5日）")
     if sectors:
-        for i, (s, p) in enumerate(sectors, 1):
-            lines.append(f"{i}. {s} ({p:+.2f}%)")
+        for i, (s_name, pct) in enumerate(sectors, 1):
+            lines.append(f"{i}. {s_name} ({pct:+.2f}%)")
     else:
         lines.append("- データ不足")
     lines.append("")
 
     lines.append("⚠ イベント")
-    lines.extend(events)
+    lines.extend(event_lines)
     lines.append("")
 
     lines.append("🏆 Swing（順張りのみ / 追いかけ禁止 / 速度重視）")
-    if swing:
-        core, rest = pick_core_candidates(swing)
-
-        # 表示用（英語やめ）
-        action_jp = {
-            "EXEC_NOW": "即IN可",
-            "LIMIT_WAIT": "指値待ち",
-            "WATCH_ONLY": "監視のみ",
-        }
-
-        lines.append(
-            f"  候補数:{len(swing)}銘柄 / 平均RR:{stats.get('avg_rr',0):.2f} / 平均EV:{stats.get('avg_ev',0):.2f} / 平均AdjEV:{stats.get('avg_adj_ev',0):.2f} / 平均R/day:{stats.get('avg_rpd',0):.2f}"
-        )
+    if mains:
+        avg_rr = float(np.mean([c.rr for c in mains]))
+        avg_ev = float(np.mean([c.ev for c in mains]))
+        avg_adjev = float(np.mean([c.adjev for c in mains]))
+        avg_rpd = float(np.mean([c.r_per_day for c in mains]))
+        lines.append(f"  候補数:{len(mains)}銘柄 / 平均RR:{avg_rr:.2f} / 平均EV:{avg_ev:.2f} / 平均AdjEV:{avg_adjev:.2f} / 平均R/day:{avg_rpd:.2f}")
         lines.append("")
 
-        if core:
-            lines.append("🎯 本命（1〜2銘柄）")
-            for c in core:
-                lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}] ⭐")
-                lines.append(
-                    f"  Setup:{c.get('setup','?')}  RR:{c['rr']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['r_per_day']:.2f}"
-                )
-                lines.append(
-                    f"  IN:{c['entry']:.1f} 現在:{c['price_now']:.1f} ({c['gap_pct']:+.2f}%)  ATR:{c['atr']:.1f}  GU:{'Y' if c['gu_flag'] else 'N'}"
-                )
-                lines.append(
-                    f"  STOP:{c['sl_price']:.1f}  TP1:{c['tp1']:.1f}  TP2:{c['tp2']:.1f}  ExpectedDays:{c['expected_days']:.1f}  行動:{action_jp.get(c['action'], c['action'])}"
-                )
-                lines.append("")
+        # 本命（上位1〜2）
+        core = mains[:2]
+        lines.append("🎯 本命（1〜2銘柄）")
+        for c in core:
+            lines.append(f"- {c.ticker} {c.name} [{c.sector}] ⭐")
+            lines.append(f"  Setup:{c.setup}  RR:{c.rr:.2f}  AdjEV:{c.adjev:.2f}  R/day:{c.r_per_day:.2f}")
+            lines.append(f"  IN:{c.entry:.1f} 現在:{c.price_now:.1f} ({c.gap_pct:+.2f}%)  ATR:{c.atr:.1f}  GU:{_yn(c.gu)}")
+            lines.append(f"  STOP:{c.stop:.1f}  TP1:{c.tp1:.1f}  TP2:{c.tp2:.1f}  ExpectedDays:{c.exp_days:.1f}  行動:{_action_jp(c.action)}")
+            lines.append("")
 
+        # 残り
+        rest = mains[2:]
         if rest:
             lines.append("👀 監視・指値")
             for c in rest:
-                lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}] ")
-                lines.append(
-                    f"  Setup:{c.get('setup','?')}  RR:{c['rr']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['r_per_day']:.2f}"
-                )
-                lines.append(
-                    f"  IN:{c['entry']:.1f} 現在:{c['price_now']:.1f} ({c['gap_pct']:+.2f}%)  ATR:{c['atr']:.1f}  GU:{'Y' if c['gu_flag'] else 'N'}"
-                )
-                lines.append(
-                    f"  STOP:{c['sl_price']:.1f}  TP1:{c['tp1']:.1f}  TP2:{c['tp2']:.1f}  ExpectedDays:{c['expected_days']:.1f}  行動:{action_jp.get(c['action'], c['action'])}"
-                )
+                lines.append(f"- {c.ticker} {c.name} [{c.sector}]")
+                lines.append(f"  Setup:{c.setup}  RR:{c.rr:.2f}  AdjEV:{c.adjev:.2f}  R/day:{c.r_per_day:.2f}")
+                lines.append(f"  IN:{c.entry:.1f} 現在:{c.price_now:.1f} ({c.gap_pct:+.2f}%)  ATR:{c.atr:.1f}  GU:{_yn(c.gu)}")
+                lines.append(f"  STOP:{c.stop:.1f}  TP1:{c.tp1:.1f}  TP2:{c.tp2:.1f}  ExpectedDays:{c.exp_days:.1f}  行動:{_action_jp(c.action)}")
                 lines.append("")
     else:
         lines.append("- 該当なし")
         lines.append("")
 
+    # WATCH_ONLY（任意表示）
+    if watches:
+        lines.append("👁 監視リスト（今日は入らない）")
+        for c in watches[:WATCH_MAX]:
+            lines.append(f"- {c.ticker} {c.name} [{c.sector}]")
+            lines.append(f"  Setup:{c.setup}  RR:{c.rr:.2f}  AdjEV:{c.adjev:.2f}  R/day:{c.r_per_day:.2f}  GU:{_yn(c.gu)}  行動:{_action_jp(c.action)}")
+        lines.append("")
+
     lines.append("📊 ポジション")
     lines.append(pos_text.strip() if pos_text else "ノーポジション")
+
     return "\n".join(lines)
 
 
 # ============================================================
-# LINE送信（通った仕様：json={"text": ...}）
+# LINE送信（json={"text": ...}）
 # ============================================================
 def send_line(text: str) -> None:
     if not WORKER_URL:
@@ -548,23 +630,70 @@ def main() -> None:
     today_str = jst_today_str()
     today_date = jst_today_date()
 
+    # 既存の市場評価（表示用コメントなど）
     mkt = enhance_market_score()
-    delta3 = market_score_delta_3d()
+    mkt_comment = str(mkt.get("comment", "中立"))
 
-    mkt_score = int(mkt.get("score", 50))
+    # Δ3d（必須追加）
+    mkt_score_today, delta_3d = calc_market_score_delta_3d()
+    mkt_score = int(mkt_score_today)
 
+    # レバ
+    lev, lev_comment = recommend_leverage(mkt_score)
+    max_pos = 0
+
+    # セクター
+    sectors = top_sectors_5d(top_n=SECTOR_TOP_N)
+
+    # イベント
+    event_lines, risky_event = build_event_warnings(today_date)
+
+    # ポジション
     pos_df = load_positions(POSITIONS_PATH)
     pos_text, total_asset = analyze_positions(pos_df, mkt_score=mkt_score)
     if not (np.isfinite(total_asset) and total_asset > 0):
         total_asset = 2_000_000.0
+    max_pos = calc_max_position(total_asset, lev)
+
+    # 候補
+    mains, watches, _ = run_swing(
+        today_date=today_date,
+        mkt_score=mkt_score,
+        delta_mkt_3d=delta_3d,
+        top_sectors=sectors,
+        risky_event=risky_event,
+    )
+
+    # NO-TRADE
+    trade_allowed, reasons = decide_trade_allowed(
+        mkt_score=mkt_score,
+        delta_3d=delta_3d,
+        risky_event=risky_event,
+        mains=mains,
+        watches=watches,
+    )
+    if not trade_allowed:
+        # 新規禁止の日はレバ表示も守りに寄せる（実行はしない）
+        lev = 1.0
+        lev_comment = "新規禁止"
+        max_pos = calc_max_position(total_asset, lev)
 
     report = build_report(
         today_str=today_str,
         today_date=today_date,
-        mkt=mkt,
-        delta3=delta3,
+        mkt_score=mkt_score,
+        mkt_comment=mkt_comment,
+        delta_3d=delta_3d,
+        lev=lev,
+        lev_comment=lev_comment,
+        max_pos=max_pos,
+        sectors=sectors,
+        event_lines=event_lines,
+        trade_allowed=trade_allowed,
+        notrade_reasons=reasons,
+        mains=mains,
+        watches=watches,
         pos_text=pos_text,
-        total_asset=total_asset,
     )
 
     print(report)
