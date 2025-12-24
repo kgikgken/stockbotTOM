@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from typing import Tuple
-
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.rr import classify_setup, build_trade_plan
+from utils.rr import compute_tp_sl_rr
+from utils.scoring import detect_setup_type
 
 
 def load_positions(path: str) -> pd.DataFrame:
@@ -17,10 +17,6 @@ def load_positions(path: str) -> pd.DataFrame:
 
 
 def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
-    """
-    positions.csv は最低限 ticker, entry_price, quantity を想定（無くても落ちない）
-    戻り値: (pos_text, total_asset_est)
-    """
     if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
 
@@ -31,36 +27,38 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         ticker = str(row.get("ticker", "")).strip()
         if not ticker:
             continue
-
         entry_price = float(row.get("entry_price", 0) or 0)
         qty = float(row.get("quantity", 0) or 0)
 
         cur = entry_price
         try:
-            h = yf.Ticker(ticker).history(period="8d", auto_adjust=True)
+            h = yf.Ticker(ticker).history(period="6d", auto_adjust=True)
             if h is not None and not h.empty:
                 cur = float(h["Close"].iloc[-1])
         except Exception:
             pass
 
-        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
         value = cur * qty
         if np.isfinite(value) and value > 0:
             total_value += value
 
-        rr_txt = ""
-        try:
-            hist = yf.Ticker(ticker).history(period="320d", auto_adjust=True)
-            if hist is not None and len(hist) >= 120:
-                setup = classify_setup(hist)
-                if setup:
-                    plan = build_trade_plan(hist, setup=setup)
-                    if plan and plan.r > 0:
-                        rr_txt = f" R:{plan.r:.2f}"
-        except Exception:
-            rr_txt = ""
+        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
 
-        lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%{rr_txt}")
+        rr = 0.0
+        try:
+            hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
+            if hist is not None and len(hist) >= 80:
+                setup = detect_setup_type(hist)
+                if setup in ("A", "B"):
+                    rr_info = compute_tp_sl_rr(hist, mkt_score=mkt_score, setup=setup)
+                    rr = float(rr_info.get("rr", 0.0))
+        except Exception:
+            rr = 0.0
+
+        if rr > 0:
+            lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%  RR:{rr:.2f}R")
+        else:
+            lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%")
 
     if not lines:
         return "ノーポジション", 2_000_000.0
