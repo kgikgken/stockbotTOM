@@ -19,6 +19,12 @@ def jst_today_date():
 
 
 def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str: str | None) -> Optional[datetime]:
+    """
+    events.csv の入力を柔軟に解釈して JST datetime を返す。
+      - datetime: "2025-12-11 03:00"
+      - date: "2025-12-11" と time:"03:00"
+      - date: "2025-12-11" のみ（00:00）
+    """
     dt_str = (dt_str or "").strip()
     date_str = (date_str or "").strip()
     time_str = (time_str or "").strip()
