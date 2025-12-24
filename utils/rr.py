@@ -1,114 +1,93 @@
 from __future__ import annotations
 
-from typing import Dict
 import numpy as np
 import pandas as pd
 
-from utils.scoring import calc_in_zone
 
-
-def _last(s: pd.Series) -> float:
+def _last_val(series: pd.Series) -> float:
     try:
-        return float(s.iloc[-1])
+        return float(series.iloc[-1])
     except Exception:
-        return float("nan")
+        return float('nan')
 
 
 def _atr(df: pd.DataFrame, period: int = 14) -> float:
     if df is None or len(df) < period + 2:
-        return float("nan")
-    h = df["High"].astype(float)
-    l = df["Low"].astype(float)
-    c = df["Close"].astype(float)
-    pc = c.shift(1)
+        return 0.0
 
-    tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    high = df['High'].astype(float)
+    low = df['Low'].astype(float)
+    close = df['Close'].astype(float)
+    prev_close = close.shift(1)
+
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+
     v = tr.rolling(period).mean().iloc[-1]
-    return float(v) if np.isfinite(v) else float("nan")
+    if v is None or not np.isfinite(v):
+        return 0.0
+    return float(v)
 
 
-def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, setup: str) -> Dict[str, float]:
-    if hist is None or len(hist) < 80:
-        return dict(rr=0.0)
-
+def compute_tp_sl_rr(hist: pd.DataFrame, mkt_score: int, for_day: bool = False) -> dict:
     df = hist.copy()
-    close = df["Close"].astype(float)
-    open_ = df["Open"].astype(float) if "Open" in df.columns else close
-    low = df["Low"].astype(float)
-
-    price = _last(close)
-    prev_close = float(close.shift(1).iloc[-1]) if len(close) >= 2 else float("nan")
-    open_last = _last(open_)
+    close = df['Close'].astype(float)
+    price = _last_val(close)
+    if not np.isfinite(price) or price <= 0:
+        return dict(rr=0.0, entry=0.0, tp_pct=0.0, sl_pct=0.0, tp_price=0.0, sl_price=0.0, entry_basis='na')
 
     atr = _atr(df, 14)
     if not np.isfinite(atr) or atr <= 0:
-        atr = max(float(price) * 0.01 if np.isfinite(price) else 1.0, 1.0)
+        atr = max(price * 0.01, 1.0)
 
-    inz = calc_in_zone(df, setup)
-    in_center = float(inz["center"])
-    in_lower = float(inz["lower"])
-    in_upper = float(inz["upper"])
+    ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else price
+    ma5 = float(close.rolling(5).mean().iloc[-1]) if len(close) >= 5 else price
 
-    entry = in_center
-    if np.isfinite(price) and entry > price:
+    entry = ma20 - 0.5 * atr
+    entry_basis = 'pullback'
+
+    if price > ma5 > ma20:
+        entry = ma20 + (ma5 - ma20) * 0.25
+        entry_basis = 'trend_pullback'
+
+    if entry > price:
         entry = price * 0.995
 
-    gu_flag = False
-    if np.isfinite(open_last) and np.isfinite(prev_close):
-        if open_last > prev_close + 1.0 * atr:
-            gu_flag = True
+    lookback = 8 if for_day else 12
+    swing_low = float(df['Low'].astype(float).tail(lookback).min())
+    sl_price = min(entry - 0.8 * atr, swing_low - 0.2 * atr)
 
-    if setup == "A":
-        stop = in_lower - 0.7 * atr
-        swing_low = float(low.tail(12).min())
-        stop = min(stop, swing_low - 0.2 * atr)
-    else:
-        stop = in_center - 1.0 * atr
-        swing_low = float(low.tail(10).min())
-        stop = min(stop, swing_low - 0.2 * atr)
-
-    risk = entry - stop
-    if not np.isfinite(risk) or risk <= 0:
-        return dict(rr=0.0)
-
-    min_risk = max(entry * 0.02, 0.7 * atr)
-    if risk < min_risk:
-        stop = entry - min_risk
-        risk = entry - stop
-
-    # --- Targets ---
-    # TP1/TP2 は「Rベース」だが、上値余地（抵抗）で現実的にクランプする。
-    tp1_raw = entry + 1.5 * risk
-    tp2_raw = entry + 3.0 * risk
+    sl_pct = (sl_price / entry - 1.0)
+    sl_pct = float(np.clip(sl_pct, -0.10, -0.02))
+    sl_price = entry * (1.0 + sl_pct)
 
     hi_window = 60 if len(close) >= 60 else len(close)
     high_60 = float(close.tail(hi_window).max())
-    resistance = high_60 * 0.995  # 抵抗手前
 
-    # 強い上値余地がある時は 3R を超えるのも許容（ただし抵抗まで）
-    rr_cap_max = 6.0
-    tp2_cap_by_rr = entry + rr_cap_max * risk
+    tp_price = min(high_60 * 0.995, entry * (1.0 + (0.22 if not for_day else 0.08)))
 
-    # 抵抗が遠いほど tp2 は伸びる（最大 rr_cap_max まで）。抵抗が近ければ自然に RR が落ちる。
-    tp2 = min(resistance, tp2_cap_by_rr)
-    tp1 = min(tp1_raw, tp2)
+    if mkt_score >= 70:
+        tp_price *= 1.03
+    elif mkt_score <= 45:
+        tp_price *= 0.97
 
-    R = (tp2 - entry) / risk if risk > 0 else 0.0
-    # 追いかけは「上方向」だけ（上に離れているほど危険）。下方向は“落ちるナイフ”として別扱い。
-    dist_above_atr = ((price - in_center) / atr) if (np.isfinite(price) and atr > 0 and price > in_center) else 0.0
-    dist_below_atr = ((in_center - price) / atr) if (np.isfinite(price) and atr > 0 and price < in_center) else 0.0
+    if tp_price <= entry:
+        tp_price = entry * (1.0 + (0.06 if not for_day else 0.03))
+
+    tp_pct = (tp_price / entry - 1.0)
+    tp_pct = float(np.clip(tp_pct, 0.03, 0.30))
+    tp_price = entry * (1.0 + tp_pct)
+
+    rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
 
     return dict(
+        rr=float(rr),
         entry=float(round(entry, 1)),
-        in_lower=float(round(in_lower, 1)),
-        in_upper=float(round(in_upper, 1)),
-        stop=float(round(stop, 1)),
-        tp1=float(round(tp1, 1)),
-        tp2=float(round(tp2, 1)),
-        rr=float(R),
-        atr=float(round(atr, 1)),
-        gu_flag=bool(gu_flag),
-        dist_above_atr=float(dist_above_atr),
-        dist_below_atr=float(dist_below_atr),
-        in_dist_atr=float(dist_above_atr),
+        tp_pct=float(tp_pct),
+        sl_pct=float(sl_pct),
+        tp_price=float(round(tp_price, 1)),
+        sl_price=float(round(sl_price, 1)),
+        entry_basis=entry_basis,
     )
