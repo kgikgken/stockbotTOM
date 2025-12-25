@@ -1,19 +1,13 @@
-import yfinance as yf
 import numpy as np
-
-def _chg(sym):
-    d = yf.Ticker(sym).history(period="6d", auto_adjust=True)["Close"]
-    return (d.iloc[-1]/d.iloc[0]-1)*100
+import yfinance as yf
 
 def enhance_market_score():
-    base = 50 + (_chg("^TOPX")+_chg("^N225"))/2
-    score = int(np.clip(base, 0, 100))
-    comment = "中立" if score >= 50 else "弱め"
-    return {"score": score, "comment": comment}
+    def chg(sym):
+        df = yf.Ticker(sym).history(period="6d", auto_adjust=True)
+        return (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1) * 100 if len(df) >= 2 else 0
 
-def market_delta_3d():
-    try:
-        d = yf.Ticker("^TOPX").history(period="6d", auto_adjust=True)["Close"]
-        return int((d.iloc[-1]/d.iloc[-4]-1)*100)
-    except Exception:
-        return 0
+    base = 50 + (chg("^TOPX") + chg("^N225")) / 2
+    score = int(np.clip(base, 0, 100))
+
+    comment = "中立" if 45 <= score <= 60 else "強め" if score > 60 else "弱め"
+    return {"score": score, "comment": comment}
