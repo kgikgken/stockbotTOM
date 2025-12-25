@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 JST = timezone(timedelta(hours=9))
 
@@ -7,3 +7,6 @@ def jst_today_str():
 
 def jst_today_date():
     return datetime.now(JST).date()
+
+def parse_event_datetime_jst(*args):
+    return None
