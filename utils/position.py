@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-import yfinance as yf
 from typing import Tuple
+import yfinance as yf
 
-from utils.rr import compute_trade_plan
+from .rr import build_trade_plan
+from .scoring import setup_type, in_zone
 
 def load_positions(path: str) -> pd.DataFrame:
     try:
@@ -13,15 +14,7 @@ def load_positions(path: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-def analyze_positions(
-    df: pd.DataFrame,
-    mkt_score: int = 50
-) -> Tuple[str, float]:
-    """
-    戻り値:
-      - 表示用テキスト
-      - 推定総資産（最低ラインあり）
-    """
+def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
     if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
 
@@ -33,13 +26,10 @@ def analyze_positions(
         if not ticker:
             continue
 
-        entry = float(row.get("entry_price", 0) or 0)
+        entry_price = float(row.get("entry_price", 0) or 0)
         qty = float(row.get("quantity", 0) or 0)
 
-        if entry <= 0 or qty <= 0:
-            continue
-
-        cur = entry
+        cur = entry_price
         try:
             h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
             if h is not None and not h.empty:
@@ -47,20 +37,22 @@ def analyze_positions(
         except Exception:
             pass
 
-        pnl_pct = (cur - entry) / entry * 100.0
+        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
         value = cur * qty
-        if np.isfinite(value):
+        if np.isfinite(value) and value > 0:
             total_value += value
 
-        # RR 再計算（毎朝アップデート）
         rr = 0.0
         try:
-            hist = yf.Ticker(ticker).history(period="300d", auto_adjust=True)
+            hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
             if hist is not None and len(hist) >= 120:
-                plan = compute_trade_plan(hist, "A", mkt_score)
-                rr = float(plan.get("R", 0.0))
+                st, _ = setup_type(hist)
+                if st in ("A", "B"):
+                    cen, low, high = in_zone(hist, st)
+                    plan = build_trade_plan(hist, st, cen, low, high, mkt_score=mkt_score)
+                    rr = float(plan.get("rr", 0.0))
         except Exception:
-            pass
+            rr = 0.0
 
         if rr > 0:
             lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}% RR:{rr:.2f}R")
@@ -70,5 +62,5 @@ def analyze_positions(
     if not lines:
         return "ノーポジション", 2_000_000.0
 
-    asset_est = max(total_value, 2_000_000.0)
+    asset_est = total_value if total_value > 0 else 2_000_000.0
     return "\n".join(lines), float(asset_est)
