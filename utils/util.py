@@ -14,17 +14,7 @@ def jst_today_str() -> str:
 def jst_today_date():
     return jst_now().date()
 
-def parse_event_datetime_jst(
-    dt_str: str | None,
-    date_str: str | None,
-    time_str: str | None,
-) -> Optional[datetime]:
-    """
-    events.csv の柔軟パース
-    - datetime: "2025-12-11 03:00"
-    - date + time
-    - dateのみ（00:00）
-    """
+def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str: str | None) -> Optional[datetime]:
     dt_str = (dt_str or "").strip()
     date_str = (date_str or "").strip()
     time_str = (time_str or "").strip()
@@ -39,9 +29,7 @@ def parse_event_datetime_jst(
     if date_str and time_str:
         for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
             try:
-                return datetime.strptime(
-                    f"{date_str} {time_str}", fmt
-                ).replace(tzinfo=JST)
+                return datetime.strptime(f"{date_str} {time_str}", fmt).replace(tzinfo=JST)
             except Exception:
                 pass
 
@@ -49,6 +37,5 @@ def parse_event_datetime_jst(
         try:
             return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=JST)
         except Exception:
-            pass
-
+            return None
     return None
