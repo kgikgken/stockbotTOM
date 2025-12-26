@@ -1,4 +1,7 @@
-# utils/position.py
+from __future__ import annotations
+
+from typing import Tuple
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -8,18 +11,38 @@ def load_positions(path: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-def analyze_positions(df: pd.DataFrame, mkt_score: int):
-    if df.empty:
-        return "ノーポジション", 2_000_000
+def analyze_positions(df: pd.DataFrame) -> Tuple[str, float]:
+    if df is None or len(df) == 0:
+        return "ノーポジション", 2_000_000.0
+
     lines = []
-    total = 0
-    for _, r in df.iterrows():
-        t = r["ticker"]
-        entry = r["entry_price"]
-        qty = r["quantity"]
-        h = yf.Ticker(t).history(period="5d", auto_adjust=True)
-        cur = h["Close"].iloc[-1] if len(h) else entry
-        pnl = (cur - entry) / entry * 100
-        total += cur * qty
-        lines.append(f"- {t}: 損益 {pnl:.2f}%")
-    return "\n".join(lines), total
+    total_value = 0.0
+
+    for _, row in df.iterrows():
+        ticker = str(row.get("ticker", "")).strip()
+        if not ticker:
+            continue
+
+        entry_price = float(row.get("entry_price", 0) or 0)
+        qty = float(row.get("quantity", 0) or 0)
+
+        cur = entry_price
+        try:
+            h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
+            if h is not None and not h.empty:
+                cur = float(h["Close"].iloc[-1])
+        except Exception:
+            pass
+
+        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
+        value = cur * qty
+        if np.isfinite(value) and value > 0:
+            total_value += value
+
+        lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%")
+
+    if not lines:
+        return "ノーポジション", 2_000_000.0
+
+    asset_est = total_value if total_value > 0 else 2_000_000.0
+    return "\n".join(lines), float(asset_est)
