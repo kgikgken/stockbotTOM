@@ -1,25 +1,60 @@
+from __future__ import annotations
+
+import os
+import numpy as np
 import pandas as pd
 import yfinance as yf
-import numpy as np
+from typing import List, Tuple
 
 UNIVERSE_PATH = "universe_jpx.csv"
+MAX_TICKERS_PER_SECTOR = 20
 
-def top_sectors_5d(n=5):
-    df = pd.read_csv(UNIVERSE_PATH)
-    t_col = "ticker" if "ticker" in df.columns else "code"
-    s_col = "sector" if "sector" in df.columns else "industry_big"
+def _fetch_5d_return(ticker: str) -> float:
+    try:
+        df = yf.Ticker(ticker).history(period="6d", auto_adjust=True)
+        if df is None or len(df) < 2:
+            return np.nan
+        c = df["Close"].astype(float)
+        return float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0)
+    except Exception:
+        return np.nan
 
-    out = []
-    for sec, g in df.groupby(s_col):
-        chgs = []
-        for t in g[t_col].head(10):
-            try:
-                h = yf.Ticker(t).history(period="6d", auto_adjust=True)
-                chgs.append((h["Close"].iloc[-1] / h["Close"].iloc[0] - 1) * 100)
-            except:
-                pass
-        if chgs:
-            out.append((sec, np.mean(chgs)))
+def top_sectors_5d(top_n: int = 5) -> List[Tuple[str, float]]:
+    if not os.path.exists(UNIVERSE_PATH):
+        return []
 
-    out.sort(key=lambda x: x[1], reverse=True)
-    return out[:n]
+    try:
+        df = pd.read_csv(UNIVERSE_PATH)
+    except Exception:
+        return []
+
+    if "sector" in df.columns:
+        sec_col = "sector"
+    elif "industry_big" in df.columns:
+        sec_col = "industry_big"
+    else:
+        return []
+
+    if "ticker" in df.columns:
+        t_col = "ticker"
+    elif "code" in df.columns:
+        t_col = "code"
+    else:
+        return []
+
+    sectors: List[Tuple[str, float]] = []
+
+    for sec, sub in df.groupby(sec_col):
+        tickers = sub[t_col].astype(str).tolist()[:MAX_TICKERS_PER_SECTOR]
+        rets = []
+
+        for t in tickers:
+            r = _fetch_5d_return(t)
+            if np.isfinite(r):
+                rets.append(r)
+
+        if rets:
+            sectors.append((str(sec), float(np.mean(rets))))
+
+    sectors.sort(key=lambda x: x[1], reverse=True)
+    return sectors[:top_n]
