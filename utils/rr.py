@@ -1,30 +1,29 @@
 import numpy as np
 import pandas as pd
 
-def _atr(df, n=14):
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - df["Close"].shift()).abs(),
-        (df["Low"] - df["Close"].shift()).abs()
-    ], axis=1).max(axis=1)
-    return tr.rolling(n).mean().iloc[-1]
+def compute_trade_plan(df: pd.DataFrame, setup: str, mkt_score: int) -> dict:
+    close = df["Close"]
+    atr = (df["High"] - df["Low"]).rolling(14).mean().iloc[-1]
 
-def compute_tp_sl_rr(hist, mkt_score=50):
-    close = hist["Close"]
-    price = close.iloc[-1]
-    atr = _atr(hist)
+    if setup == "A":
+        entry = close.rolling(20).mean().iloc[-1]
+        stop = entry - 1.2 * atr
+    else:
+        entry = close.rolling(20).max().iloc[-2]
+        stop = entry - 1.0 * atr
 
-    entry = close.rolling(20).mean().iloc[-1] - 0.5 * atr
-    entry = min(entry, price)
+    r = entry - stop
+    tp1 = entry + 1.5 * r
+    tp2 = entry + 3.0 * r
 
-    sl = entry - 1.2 * atr
-    tp = min(close.rolling(60).max().iloc[-1], entry + 3.0 * atr)
+    R = (tp2 - entry) / r if r > 0 else 0.0
 
-    rr = (tp - entry) / max(entry - sl, 1e-6)
-
-    return {
-        "entry": round(entry, 1),
-        "sl_price": round(sl, 1),
-        "tp_price": round(tp, 1),
-        "rr": rr,
-    }
+    return dict(
+        entry=entry,
+        stop=stop,
+        tp1=tp1,
+        tp2=tp2,
+        R=R,
+        in_low=entry - 0.5 * atr,
+        in_high=entry + 0.5 * atr,
+    )
