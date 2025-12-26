@@ -1,58 +1,21 @@
+# utils/sector.py
 from __future__ import annotations
-
-import os
-import numpy as np
 import pandas as pd
 import yfinance as yf
-from typing import List, Tuple
+import numpy as np
 
 UNIVERSE_PATH = "universe_jpx.csv"
-MAX_TICKERS_PER_SECTOR = 20
 
-def _fetch_change_5d(ticker: str) -> float:
-    try:
-        df = yf.Ticker(ticker).history(period="6d", auto_adjust=True)
-        if df is None or df.empty or len(df) < 2:
-            return np.nan
-        c = df["Close"].astype(float)
-        return float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0)
-    except Exception:
-        return np.nan
-
-def top_sectors_5d(top_n: int = 5) -> List[Tuple[str, float]]:
-    if not os.path.exists(UNIVERSE_PATH):
-        return []
-    try:
-        df = pd.read_csv(UNIVERSE_PATH)
-    except Exception:
-        return []
-
-    if "sector" in df.columns:
-        sec_col = "sector"
-    elif "industry_big" in df.columns:
-        sec_col = "industry_big"
-    else:
-        return []
-
-    if "ticker" in df.columns:
-        t_col = "ticker"
-    elif "code" in df.columns:
-        t_col = "code"
-    else:
-        return []
-
-    sectors: List[Tuple[str, float]] = []
-    for sec_name, sub in df.groupby(sec_col):
-        tickers = sub[t_col].astype(str).tolist()
-        if not tickers:
-            continue
-        tickers = tickers[:MAX_TICKERS_PER_SECTOR]
+def top_sectors_5d(top_n: int = 5):
+    df = pd.read_csv(UNIVERSE_PATH)
+    out = []
+    for sec, sub in df.groupby("sector"):
         chgs = []
-        for t in tickers:
-            chg = _fetch_change_5d(t)
-            if np.isfinite(chg):
-                chgs.append(chg)
+        for t in sub["ticker"].head(10):
+            h = yf.Ticker(t).history(period="6d", auto_adjust=True)
+            if len(h) >= 2:
+                chgs.append((h["Close"].iloc[-1] / h["Close"].iloc[0] - 1) * 100)
         if chgs:
-            sectors.append((str(sec_name), float(np.mean(chgs))))
-    sectors.sort(key=lambda x: x[1], reverse=True)
-    return sectors[:top_n]
+            out.append((sec, float(np.mean(chgs))))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return out[:top_n]
