@@ -1,57 +1,81 @@
-def compute_tp_sl_rr(hist, mkt_score: int, for_day: bool = False) -> dict:
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+def _last(series: pd.Series) -> float:
+    try:
+        return float(series.iloc[-1])
+    except Exception:
+        return np.nan
+
+def atr14(df: pd.DataFrame) -> float:
+    if df is None or len(df) < 16:
+        return np.nan
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
+    prev = close.shift(1)
+    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    v = tr.rolling(14).mean().iloc[-1]
+    return float(v) if np.isfinite(v) else np.nan
+
+def hh20(df: pd.DataFrame) -> float:
+    close = df["Close"].astype(float)
+    if len(close) < 21:
+        return float(close.max())
+    return float(close.tail(20).max())
+
+def swing_low(df: pd.DataFrame, lookback: int = 12) -> float:
+    low = df["Low"].astype(float)
+    if len(low) < lookback:
+        return float(low.min())
+    return float(low.tail(lookback).min())
+
+def build_trade_plan(hist: pd.DataFrame, setup_type: str, in_center: float, in_low: float, in_high: float, mkt_score: int) -> dict:
     df = hist.copy()
     close = df["Close"].astype(float)
-    price = float(close.iloc[-1])
+    price = _last(close)
+    atr = atr14(df)
+    if not np.isfinite(atr) or atr <= 0:
+        atr = max(price * 0.01, 1.0)
 
-    atr = _atr(df, 14)
-    if not atr or atr <= 0:
-        atr = price * 0.01
+    if setup_type == "A":
+        stop = in_low - 0.7 * atr
+        stop = min(stop, swing_low(df, 12) - 0.2 * atr)
+    else:
+        stop = in_center - 1.0 * atr
+        stop = min(stop, swing_low(df, 12) - 0.2 * atr)
 
-    ma20 = close.rolling(20).mean().iloc[-1]
-    ma5 = close.rolling(5).mean().iloc[-1]
+    risk = max(in_center - stop, 0.5 * atr)
+    stop = in_center - risk
 
-    entry = ma20 - 0.5 * atr
-    entry_basis = "pullback"
-
-    if price > ma5 > ma20:
-        entry = ma20 + (ma5 - ma20) * 0.25
-        entry_basis = "trend_pullback"
-
-    if entry > price:
-        entry = price * 0.995
-
-    lookback = 8 if for_day else 12
-    swing_low = df["Low"].astype(float).tail(lookback).min()
-    sl_price = min(entry - 0.8 * atr, swing_low - 0.2 * atr)
-
-    sl_pct = (sl_price / entry - 1.0)
-    sl_pct = float(np.clip(sl_pct, -0.10, -0.02))
-    sl_price = entry * (1.0 + sl_pct)
-
-    hi_window = 60 if len(close) >= 60 else len(close)
-    high_60 = float(close.tail(hi_window).max())
-    tp_price = min(high_60 * 0.995, entry * (1.0 + (0.22 if not for_day else 0.08)))
+    tp1 = in_center + 1.5 * risk
+    tp2 = in_center + 3.0 * risk
 
     if mkt_score >= 70:
-        tp_price *= 1.03
+        tp2 *= 1.02
+        tp1 *= 1.01
     elif mkt_score <= 45:
-        tp_price *= 0.97
+        tp2 *= 0.98
+        tp1 *= 0.99
 
-    if tp_price <= entry:
-        tp_price = entry * (1.0 + (0.06 if not for_day else 0.03))
+    rr = (tp2 - in_center) / (in_center - stop) if in_center > stop else 0.0
 
-    tp_pct = float(tp_price / entry - 1.0)
-    tp_pct = float(np.clip(tp_pct, 0.03, 0.30))
-    tp_price = entry * (1.0 + tp_pct)
-
-    rr = tp_pct / abs(sl_pct) if sl_pct < 0 else 0.0
+    expected_days = (tp2 - in_center) / (1.0 * atr) if atr > 0 else 999.0
+    expected_days = float(np.clip(expected_days, 0.5, 12.0))
+    r_per_day = rr / expected_days if expected_days > 0 else 0.0
 
     return {
+        "atr": float(atr),
+        "in_center": float(in_center),
+        "in_low": float(in_low),
+        "in_high": float(in_high),
+        "stop": float(stop),
+        "tp1": float(tp1),
+        "tp2": float(tp2),
         "rr": float(rr),
-        "entry": float(round(entry, 1)),
-        "tp_pct": tp_pct,
-        "sl_pct": sl_pct,
-        "tp_price": float(round(tp_price, 1)),
-        "sl_price": float(round(sl_price, 1)),
-        "entry_basis": entry_basis,
+        "expected_days": float(expected_days),
+        "r_per_day": float(r_per_day),
+        "price_now": float(price) if np.isfinite(price) else np.nan,
     }
