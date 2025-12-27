@@ -1,60 +1,74 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
-@dataclass
-class DiversifyResult:
-    picks: List[dict]
-    watch_added: List[dict]
+HIGH_BETA_SECTORS = {"電気機器", "情報・通信業", "精密機器", "輸送用機器"}
 
-def _corr_20d(a: pd.Series, b: pd.Series) -> float:
+def _returns_20(hist: pd.DataFrame) -> pd.Series | None:
     try:
-        aa = a.pct_change(fill_method=None).dropna().tail(21)
-        bb = b.pct_change(fill_method=None).dropna().tail(21)
-        df = pd.concat([aa.rename("a"), bb.rename("b")], axis=1).dropna()
-        if len(df) < 15:
-            return 0.0
-        return float(df["a"].corr(df["b"]))
+        close = hist["Close"].astype(float)
+        if len(close) < 25:
+            return None
+        r = close.pct_change(fill_method=None).dropna()
+        return r.tail(20)
     except Exception:
-        return 0.0
+        return None
 
-def apply_diversify(candidates: List[dict], max_picks: int = 5, sector_max: int = 2, corr_max: float = 0.75) -> DiversifyResult:
-    picks: List[dict] = []
-    watch: List[dict] = []
+def diversify_select(
+    candidates: List[Dict],
+    histories: Dict[str, pd.DataFrame],
+    max_final: int = 5,
+    max_per_sector: int = 2,
+    max_highbeta_sector: int = 1,
+    corr_threshold: float = 0.75,
+) -> Tuple[List[Dict], List[Dict]]:
+    selected: List[Dict] = []
+    dropped: List[Dict] = []
+
+    rets: Dict[str, pd.Series] = {}
+    for c in candidates:
+        t = c["ticker"]
+        h = histories.get(t)
+        s = _returns_20(h) if h is not None else None
+        if s is not None and len(s) >= 10:
+            rets[t] = s
+
     sector_count: Dict[str, int] = {}
 
     for c in candidates:
-        if len(picks) >= max_picks:
+        if len(selected) >= max_final:
             break
 
-        sec = str(c.get("sector","不明"))
-        if sector_count.get(sec, 0) >= sector_max:
-            c2 = dict(c)
-            c2["watch_reason"] = "セクター上限"
-            watch.append(c2)
+        sec = str(c.get("sector", "不明"))
+        limit = max_highbeta_sector if sec in HIGH_BETA_SECTORS else max_per_sector
+        if sector_count.get(sec, 0) >= limit:
+            d = dict(c); d["drop_reason"] = "セクター上限"
+            dropped.append(d)
             continue
 
         ok = True
-        for p in picks:
-            try:
-                corr = _corr_20d(c["hist_close"], p["hist_close"])
-            except Exception:
-                corr = 0.0
-            if corr > corr_max:
+        for s in selected:
+            t1, t2 = c["ticker"], s["ticker"]
+            r1, r2 = rets.get(t1), rets.get(t2)
+            if r1 is None or r2 is None:
+                continue
+            n = min(len(r1), len(r2))
+            if n < 10:
+                continue
+            corr = float(pd.concat([r1.tail(n).reset_index(drop=True), r2.tail(n).reset_index(drop=True)], axis=1).corr().iloc[0,1])
+            if np.isfinite(corr) and corr > corr_threshold:
                 ok = False
-                c2 = dict(c)
-                c2["watch_reason"] = f"相関高い(corr>{corr_max:.2f})"
-                watch.append(c2)
                 break
 
         if not ok:
+            d = dict(c); d["drop_reason"] = "相関高"
+            dropped.append(d)
             continue
 
-        picks.append(c)
+        selected.append(c)
         sector_count[sec] = sector_count.get(sec, 0) + 1
 
-    return DiversifyResult(picks=picks, watch_added=watch)
+    return selected, dropped
