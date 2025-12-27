@@ -1,75 +1,80 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import List, Dict
+from datetime import datetime
+from typing import Dict, List, Optional
 
 import pandas as pd
 
-from utils.util import parse_event_datetime_jst
+from utils.util import JST
 
-EVENTS_PATH = "events.csv"
+def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str: str | None) -> Optional[datetime]:
+    dt_str = (dt_str or "").strip()
+    date_str = (date_str or "").strip()
+    time_str = (time_str or "").strip()
 
-@dataclass
-class EventContext:
-    warnings: List[str]
-    is_major_event_near: bool
-    event_multiplier: float
+    if dt_str:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(dt_str, fmt).replace(tzinfo=JST)
+            except Exception:
+                pass
 
-def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
+    if date_str and time_str:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(f"{date_str} {time_str}", fmt).replace(tzinfo=JST)
+            except Exception:
+                pass
+
+    if date_str:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=JST)
+        except Exception:
+            return None
+
+    return None
+
+def load_events(path: str) -> List[Dict[str, str]]:
     if not os.path.exists(path):
         return []
     try:
         df = pd.read_csv(path)
     except Exception:
         return []
-
-    events: List[Dict[str, str]] = []
+    out: List[Dict[str, str]] = []
     for _, row in df.iterrows():
         label = str(row.get("label", "")).strip()
         if not label:
             continue
-        kind = str(row.get("kind", "")).strip()
-        date_str = str(row.get("date", "")).strip()
-        time_str = str(row.get("time", "")).strip()
-        dt_str = str(row.get("datetime", "")).strip()
-        importance = str(row.get("importance", "")).strip()  # 任意列
-        events.append({"label": label, "kind": kind, "date": date_str, "time": time_str, "datetime": dt_str, "importance": importance})
-    return events
+        out.append(
+            {
+                "label": label,
+                "kind": str(row.get("kind", "")).strip(),
+                "date": str(row.get("date", "")).strip(),
+                "time": str(row.get("time", "")).strip(),
+                "datetime": str(row.get("datetime", "")).strip(),
+            }
+        )
+    return out
 
-def get_event_context(today_date) -> EventContext:
-    events = load_events()
+def build_event_warnings(path: str, today_date) -> List[str]:
     warns: List[str] = []
-    major_near = False
-
-    for ev in events:
+    for ev in load_events(path):
         dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
         if dt is None:
             continue
-
-        d = dt.date()
-        delta = (d - today_date).days
+        delta = (dt.date() - today_date).days
         if -1 <= delta <= 2:
-            if delta > 0:
-                when = f"{delta}日後"
-            elif delta == 0:
-                when = "本日"
-            else:
-                when = "直近"
+            when = "直近" if delta < 0 else ("本日" if delta == 0 else f"{delta}日後")
+            warns.append(f"⚠ {ev['label']}（{dt.strftime('%Y-%m-%d %H:%M JST')} / {when}）")
+    return warns if warns else ["- 特になし"]
 
-            dt_disp = dt.strftime("%Y-%m-%d %H:%M JST")
-            warns.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
-
-            # 「重要」扱い（kind/importance のどれかがそれっぽいなら近いとする）
-            k = (ev.get("kind","") or "").lower()
-            imp = (ev.get("importance","") or "").lower()
-            if any(x in k for x in ["fomc","cpi","pce","boj","gdp","employment","payroll","is m","ism"]) or any(x in imp for x in ["high","major","重要"]):
-                if delta in (0,1):  # 前日/当日あたりを重視
-                    major_near = True
-
-    if not warns:
-        warns.append("- 特になし")
-
-    # v2.0: 重要イベント前日は 0.75
-    mult = 0.75 if major_near else 1.00
-    return EventContext(warnings=warns, is_major_event_near=major_near, event_multiplier=mult)
+def is_major_event_tomorrow(path: str, today_date) -> bool:
+    for ev in load_events(path):
+        dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
+        if dt is None:
+            continue
+        if (dt.date() - today_date).days == 1:
+            return True
+    return False
