@@ -1,50 +1,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional
 
 import numpy as np
+import pandas as pd
 
-from utils.features import FeaturePack
+from utils.features import Features
 
-@dataclass
+@dataclass(frozen=True)
 class SetupResult:
-    setup_type: Optional[str]  # "A" | "B" | None
-    reasons: List[str]
+    setup: str
+    breakout_line: float
+    reason: str
 
-def decide_setup(feat: FeaturePack) -> SetupResult:
-    reasons: List[str] = []
-    c = feat.close
+def detect_setup(hist: pd.DataFrame, f: Features) -> Optional[SetupResult]:
+    price = f.price
+    if not (np.isfinite(price) and price > 0):
+        return None
 
-    # Setup A: トレンド押し目
-    a_ok = True
-    if not (np.isfinite(c) and np.isfinite(feat.sma20) and np.isfinite(feat.sma50)):
-        a_ok = False
-    else:
-        if not (c > feat.sma20 > feat.sma50):
-            a_ok = False
-        if not (feat.sma20_slope_5d > 0):
-            a_ok = False
-        if not (abs(c - feat.sma20) <= 0.8 * feat.atr14):
-            a_ok = False
-        if not (40 <= feat.rsi14 <= 62):
-            a_ok = False
-
-    # Setup B: ブレイク
-    b_ok = True
-    if not (np.isfinite(c) and np.isfinite(feat.hh20) and np.isfinite(feat.vol) and np.isfinite(feat.vol_ma20)):
-        b_ok = False
-    else:
-        if not (c > feat.hh20):
-            b_ok = False
-        if not (feat.vol >= 1.5 * feat.vol_ma20):
-            b_ok = False
-
-    # 優先はA（押し目）
+    near = abs(price - f.ma20) <= 0.8 * f.atr
+    a_ok = (
+        np.isfinite(f.ma20) and np.isfinite(f.ma50) and
+        price > f.ma20 > f.ma50 and
+        np.isfinite(f.slope20_5d) and f.slope20_5d > 0 and
+        np.isfinite(f.rsi) and 40 <= f.rsi <= 62 and
+        near
+    )
     if a_ok:
-        return SetupResult(setup_type="A", reasons=reasons)
+        return SetupResult(setup="A", breakout_line=float(f.ma20), reason="トレンド押し目")
 
+    if hist is None or len(hist) < 60:
+        return None
+    vol = hist["Volume"].astype(float) if "Volume" in hist.columns else None
+    vol_last = float(vol.iloc[-1]) if vol is not None and len(vol) else np.nan
+    vol_ma20 = float(np.nan_to_num(f.vol_ma20, nan=0.0))
+    b_ok = (
+        np.isfinite(f.hh20) and price >= f.hh20 and
+        np.isfinite(vol_last) and np.isfinite(vol_ma20) and vol_ma20 > 0 and
+        vol_last >= 1.5 * vol_ma20
+    )
     if b_ok:
-        return SetupResult(setup_type="B", reasons=reasons)
+        return SetupResult(setup="B", breakout_line=float(f.hh20), reason="ブレイク初動")
 
-    return SetupResult(setup_type=None, reasons=["setup条件外"])
+    return None
