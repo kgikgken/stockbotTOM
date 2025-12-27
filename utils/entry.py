@@ -1,60 +1,60 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional
 
 import numpy as np
+import pandas as pd
 
-from utils.features import FeaturePack
+from utils.features import Features
+from utils.setup import SetupResult
 
-@dataclass
+@dataclass(frozen=True)
 class EntryPlan:
     in_center: float
     in_low: float
     in_high: float
     gu_flag: bool
-    dist_atr: float
-    action: str  # "EXEC_NOW" | "LIMIT_WAIT" | "WATCH_ONLY"
-    action_jp: str
+    in_distance_atr: float
+    action: str
 
-def build_entry_plan(feat: FeaturePack, setup_type: str) -> EntryPlan:
-    atr = feat.atr14 if np.isfinite(feat.atr14) and feat.atr14 > 0 else max(feat.close * 0.01, 1.0)
+def calc_entry(hist: pd.DataFrame, f: Features, s: SetupResult) -> Optional[EntryPlan]:
+    if hist is None or len(hist) < 30:
+        return None
+    close = hist["Close"].astype(float)
+    open_ = hist["Open"].astype(float)
+    prev_close = float(close.iloc[-2]) if len(close) >= 2 else float(close.iloc[-1])
+    today_open = float(open_.iloc[-1]) if len(open_) else float(close.iloc[-1])
 
-    if setup_type == "A":
-        center = float(feat.sma20)
+    atr = float(f.atr)
+    if not (np.isfinite(atr) and atr > 0):
+        return None
+
+    if s.setup == "A":
+        center = float(f.ma20)
         band = 0.5 * atr
-    else:  # "B"
-        center = float(feat.hh20)
+    else:
+        center = float(s.breakout_line)
         band = 0.3 * atr
 
     in_low = center - band
     in_high = center + band
 
-    # GU判定（仕様通り）
-    gu = bool(np.isfinite(feat.open) and np.isfinite(feat.prev_close) and (feat.open > feat.prev_close + 1.0 * atr))
+    gu_flag = bool(np.isfinite(today_open) and np.isfinite(prev_close) and (today_open > prev_close + 1.0 * atr))
 
-    # 乖離率
-    dist = float(abs(feat.close - center) / atr) if atr > 0 else 999.0
+    price = float(f.price)
+    in_distance_atr = float(abs(price - center) / atr) if atr > 0 else 999.0
 
-    # Action
-    if gu or dist > 0.8:
+    if gu_flag or in_distance_atr > 0.8:
         action = "WATCH_ONLY"
-        jp = "監視のみ"
     else:
-        # 帯の中なら即IN、外なら指値
-        if in_low <= feat.close <= in_high and dist <= 0.3:
-            action = "EXEC_NOW"
-            jp = "即IN可"
-        else:
-            action = "LIMIT_WAIT"
-            jp = "指値待ち"
+        action = "EXEC_NOW" if (in_low <= price <= in_high) else "LIMIT_WAIT"
 
     return EntryPlan(
         in_center=float(center),
         in_low=float(in_low),
         in_high=float(in_high),
-        gu_flag=bool(gu),
-        dist_atr=float(dist),
-        action=str(action),
-        action_jp=str(jp),
+        gu_flag=gu_flag,
+        in_distance_atr=float(in_distance_atr),
+        action=action,
     )
