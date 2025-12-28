@@ -1,51 +1,49 @@
 from __future__ import annotations
 
 import os
+from typing import Any, Dict, List
 
-from utils.util import jst_today_str, jst_today_date
-from utils.market import enhance_market_score
-from utils.events import build_event_warnings
-from utils.position import load_positions, analyze_positions
-from utils.screener import run_swing
-from utils.report import build_report
+from utils.util import jst_today_str, jst_today
 from utils.line import send_line
+from utils.position import analyze_positions
+from utils.report import build_report
 
-UNIVERSE_PATH = "universe_jpx.csv"
-POSITIONS_PATH = "positions.csv"
-EVENTS_PATH = "events.csv"
+# 1〜2ブロック目（中核ロジック）で作った想定
+# - utils/market.py : build_market_context(today_date) -> dict
+# - utils/screener.py : run_swing_screener(today_date, market_ctx) -> (swing_list, watch_list)
+from utils.market import build_market_context
+from utils.screener import run_swing_screener
+
 
 def main() -> None:
+    # 日付
     today_str = jst_today_str()
-    today_date = jst_today_date()
+    today_date = jst_today()
 
-    mkt = enhance_market_score()
+    # 地合い（NO-TRADE判定までここで確定）
+    market: Dict[str, Any] = build_market_context(today_date)
 
-    pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset = analyze_positions(pos_df)
-    if total_asset <= 0:
-        total_asset = 2_000_000.0
+    # スクリーニング（仕様書：順張り / 追いかけ禁止 / 速度重視 / EV補正 / NO-TRADE強制）
+    swing: List[Dict[str, Any]]
+    watch: List[Dict[str, Any]]
+    swing, watch = run_swing_screener(today_date, market)
 
-    swing_result = run_swing(
-        universe_path=UNIVERSE_PATH,
-        events_path=EVENTS_PATH,
-        today_date=today_date,
-        mkt_score=int(mkt.get("score", 50)),
-        delta3d=int(mkt.get("delta3d", 0)),
-    )
+    # ポジション表示
+    pos_text = analyze_positions()
 
-    events = build_event_warnings(EVENTS_PATH, today_date)
-
+    # レポート
     report = build_report(
-        today_str=today_str,
-        mkt=mkt,
-        swing_result=swing_result,
-        events=events,
-        pos_text=pos_text,
-        total_asset=total_asset,
+        date_str=today_str,
+        market=market,
+        swing=swing,
+        watch=watch,
+        positions=pos_text,
     )
 
+    # 表示 & LINE
     print(report)
-    send_line(report, worker_url=os.getenv("WORKER_URL"))
+    send_line(report)
+
 
 if __name__ == "__main__":
     main()
