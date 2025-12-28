@@ -1,109 +1,67 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
-
-import numpy as np
-import pandas as pd
 import yfinance as yf
+import pandas as pd
+import numpy as np
 
-from utils.util import sma, rsi14, atr
 
-def _fetch_index(symbol: str, period: str = "180d") -> pd.DataFrame | None:
-    try:
-        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
-        if df is None or df.empty or len(df) < 80:
-            return None
-        return df
-    except Exception:
-        return None
+INDEX_TICKER = "^N225"   # 日経平均（TOPIXに替えてもOK）
 
-def _score_from_df(df: pd.DataFrame, idx: int) -> int:
-    close = df["Close"].astype(float)
-    c = float(close.iloc[idx])
-    sub = df.iloc[: idx + 1].copy()
-    csub = sub["Close"].astype(float)
 
-    ma20 = sma(csub, 20)
-    ma50 = sma(csub, 50)
-    rsi = rsi14(csub)
-    a = atr(sub, 14)
+def evaluate_market() -> dict:
+    df = yf.download(INDEX_TICKER, period="6mo", auto_adjust=True)
+    close = df["Close"]
 
-    ma20v = float(ma20.iloc[-1]) if len(ma20) else c
-    ma50v = float(ma50.iloc[-1]) if len(ma50) else c
-    rsiv = float(rsi.iloc[-1]) if len(rsi) else 50.0
-    atrv = float(a.iloc[-1]) if len(a) else (c * 0.015)
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean()
 
-    trend = 0.2
-    if np.isfinite(ma20v) and np.isfinite(ma50v):
-        if c > ma20v > ma50v:
-            trend = 1.0
-        elif c > ma20v:
-            trend = 0.6
-        elif ma20v > ma50v:
-            trend = 0.4
+    score = 50
 
-    mom = 0.5
-    if np.isfinite(rsiv):
-        if rsiv >= 60:
-            mom = 0.8
-        elif rsiv >= 50:
-            mom = 0.6
-        elif rsiv >= 40:
-            mom = 0.45
-        else:
-            mom = 0.3
+    # トレンド構造
+    if close.iloc[-1] > sma50.iloc[-1]:
+        score += 10
+    if sma20.iloc[-1] > sma50.iloc[-1]:
+        score += 10
 
-    atr_pct = atrv / c if (np.isfinite(atrv) and np.isfinite(c) and c > 0) else 0.02
-    risk = 0.6
-    if atr_pct >= 0.03:
-        risk = 0.4
-    if atr_pct >= 0.05:
-        risk = 0.25
+    # モメンタム
+    ret5 = (close.iloc[-1] / close.iloc[-6] - 1) * 100
+    ret20 = (close.iloc[-1] / close.iloc[-21] - 1) * 100
+    score += np.clip(ret5, -5, 5)
+    score += np.clip(ret20 / 2, -5, 5)
 
-    s = 50.0
-    s += (trend - 0.5) * 30.0
-    s += (mom - 0.5) * 25.0
-    s += (risk - 0.5) * 20.0
+    # 変化率
+    delta_3d = score - (
+        50
+        + np.clip(
+            ((close.iloc[-4] / close.iloc[-9]) - 1) * 100, -5, 5
+        )
+    )
 
-    if len(csub) >= 6:
-        r5 = float(csub.iloc[-1] / csub.iloc[-6] - 1.0)
-        s += float(np.clip(r5 * 100.0, -6.0, 6.0))
+    # NO-TRADE判定
+    no_trade = False
+    reason = ""
 
-    return int(np.clip(round(s), 0, 100))
+    if score < 45:
+        no_trade = True
+        reason = "MarketScore<45"
+    elif delta_3d <= -5 and score < 55:
+        no_trade = True
+        reason = "Δ3d<=-5 & MarketScore<55"
 
-def enhance_market_score() -> Dict:
-    topix = _fetch_index("^TOPX")
-    nikkei = _fetch_index("^N225")
-
-    if topix is None and nikkei is None:
-        return {"score": 50, "comment": "中立", "delta3d": 0}
-
-    def _calc(df: pd.DataFrame) -> Tuple[int, int]:
-        now = _score_from_df(df, -1)
-        prev = _score_from_df(df, -4) if len(df) >= 10 else now
-        return now, now - prev
-
-    scores = []
-    deltas = []
-    for df in (topix, nikkei):
-        if df is None:
-            continue
-        s, d = _calc(df)
-        scores.append(s)
-        deltas.append(d)
-
-    score = int(np.clip(round(float(np.mean(scores))), 0, 100))
-    delta3d = int(np.clip(round(float(np.mean(deltas))), -20, 20))
-
-    if score >= 70:
-        comment = "強め"
-    elif score >= 60:
-        comment = "やや強め"
-    elif score >= 50:
-        comment = "中立"
-    elif score >= 40:
-        comment = "弱め"
+    # レバ調整
+    if score >= 65:
+        leverage = "2.0倍（強気）"
+    elif score >= 55:
+        leverage = "1.5倍（中立）"
     else:
-        comment = "弱い"
+        leverage = "1.1倍（守り）"
 
-    return {"score": score, "comment": comment, "delta3d": delta3d}
+    return {
+        "score": int(score),
+        "delta_3d": int(delta_3d),
+        "no_trade": no_trade,
+        "no_trade_reason": reason,
+        "leverage": leverage,
+        "comment": "強め" if score >= 60 else "中立" if score >= 50 else "弱め",
+        "regime_multiplier": 1.05 if score >= 60 else 0.8 if score < 50 else 1.0,
+    }
