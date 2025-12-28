@@ -1,19 +1,28 @@
 from __future__ import annotations
 
-import os
-from typing import List
-
 import requests
+import os
+import time
 
-def send_line(text: str, worker_url: str | None = None) -> None:
-    url = worker_url or os.getenv("WORKER_URL")
-    if not url:
+
+WORKER_URL = os.getenv("WORKER_URL")
+CHUNK = 3800
+
+
+def send_line(text: str):
+    if not WORKER_URL:
         print(text)
         return
 
-    chunk_size = 3800
-    chunks: List[str] = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+    parts = [text[i:i + CHUNK] for i in range(0, len(text), CHUNK)]
 
-    for ch in chunks:
-        r = requests.post(url, json={"text": ch}, timeout=20)
-        print("[LINE]", r.status_code)
+    for p in parts:
+        try:
+            r = requests.post(
+                WORKER_URL,
+                json={"text": p},
+                timeout=20
+            )
+            time.sleep(0.5)
+        except Exception as e:
+            print("LINE ERROR:", e)
