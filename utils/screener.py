@@ -1,71 +1,71 @@
+from __future__ import annotations
+
 import pandas as pd
-import yfinance as yf
-import numpy as np
+from typing import Dict, List
 
-from utils.features import add_features
-from utils.setup import detect_setup
-from utils.entry import decide_action
-from utils.rr_ev import calc_rr_ev
-from utils.diversify import apply_sector_limit
+from utils.market import evaluate_market
+from utils.events import load_events
+from utils.setup import judge_setup
+from utils.entry import judge_entry_action
+from utils.rr_ev import calc_rr_ev_speed
+from utils.diversify import apply_diversification
 
 
-def run_swing_screener(universe_path, today_date, market_score, delta_3d, top_sectors):
-    dfu = pd.read_csv(universe_path)
-    tcol = "ticker" if "ticker" in dfu.columns else "code"
+UNIVERSE_PATH = "universe_jpx.csv"
 
-    cands = []
 
-    for _, r in dfu.iterrows():
-        t = str(r[tcol])
-        sec = r.get("sector", r.get("industry_big", "不明"))
+def run_screening() -> Dict:
+    """
+    スクリーニング全体統括
+    """
+    universe = pd.read_csv(UNIVERSE_PATH)
 
-        if sec not in top_sectors:
+    # --- 地合い判定 ---
+    market = evaluate_market()
+
+    # --- NO-TRADE 判定 ---
+    no_trade_reason = None
+    if market["no_trade"]:
+        no_trade_reason = market["no_trade_reason"]
+
+    # --- イベント ---
+    events = load_events()
+
+    candidates: List[Dict] = []
+    watchlist: List[Dict] = []
+
+    for _, row in universe.iterrows():
+        ticker = row["ticker"]
+        sector = row.get("sector", "不明")
+
+        setup = judge_setup(ticker)
+        if not setup["valid"]:
             continue
 
-        try:
-            h = yf.Ticker(t).history(period="260d", auto_adjust=True)
-        except Exception:
-            continue
-        if len(h) < 120:
-            continue
+        entry = judge_entry_action(ticker, setup)
+        rr_ev = calc_rr_ev_speed(ticker, setup, entry, market)
 
-        h = add_features(h)
-        adv = h["adv20"].iloc[-1]
-        if adv < 200_000_000:
+        if not rr_ev["valid"]:
+            watchlist.append({**rr_ev, "ticker": ticker, "sector": sector})
             continue
 
-        setup = detect_setup(h)
-        if setup != "A":
-            continue
-
-        price = h["Close"].iloc[-1]
-        atr = h["atr"].iloc[-1]
-        entry = h["ma20"].iloc[-1]
-
-        stop = entry - 1.2 * atr
-        tp2 = entry + 3.0 * (entry - stop)
-
-        r, ev = calc_rr_ev(entry, stop, tp2, pwin=0.45)
-
-        exp_days = (tp2 - entry) / (0.9 * atr)
-        r_day = r / exp_days if exp_days > 0 else 0
-
-        action = decide_action(price, entry, atr, gu=False)
-
-        cands.append({
-            "ticker": t,
-            "sector": sec,
-            "setup": setup,
-            "entry": entry,
-            "price": price,
-            "stop": stop,
-            "tp2": tp2,
-            "rr": r,
-            "ev": ev,
-            "r_day": r_day,
-            "action": action,
+        candidates.append({
+            "ticker": ticker,
+            "sector": sector,
+            **setup,
+            **entry,
+            **rr_ev,
         })
 
-    cands.sort(key=lambda x: x["r_day"], reverse=True)
-    cands = apply_sector_limit(cands)
-    return cands[:5]
+    # --- 分散制御 ---
+    final, dropped = apply_diversification(candidates)
+
+    watchlist.extend(dropped)
+
+    return {
+        "market": market,
+        "events": events,
+        "no_trade": no_trade_reason,
+        "candidates": final,
+        "watchlist": watchlist,
+    }
