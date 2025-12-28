@@ -1,4 +1,4 @@
-　from __future__ import annotations
+from __future__ import annotations
 
 from utils.market import build_market_context
 from utils.screener import run_screener
