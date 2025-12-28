@@ -1,19 +1,35 @@
-import pandas as pd
+from __future__ import annotations
 
-def load_positions(path):
+import pandas as pd
+import yfinance as yf
+
+
+POSITIONS_PATH = "positions.csv"
+
+
+def load_positions():
     try:
-        return pd.read_csv(path)
+        return pd.read_csv(POSITIONS_PATH)
     except Exception:
         return pd.DataFrame()
 
-def analyze_positions(df, mkt_score):
-    if df is None or len(df) == 0:
-        return "ノーポジション", 2_000_000
+
+def analyze_positions() -> str:
+    df = load_positions()
+    if df.empty:
+        return "ノーポジション"
 
     lines = []
-    total = 0
     for _, r in df.iterrows():
-        lines.append(f"- {r.get('ticker')}: 損益 {r.get('pnl_pct', 0):.2f}%")
-        total += r.get("value", 0)
+        ticker = r["ticker"]
+        entry = r["entry_price"]
+        qty = r["quantity"]
 
-    return "\n".join(lines), total if total > 0 else 2_000_000
+        try:
+            cur = yf.download(ticker, period="5d", auto_adjust=True)["Close"].iloc[-1]
+            pnl = (cur - entry) / entry * 100
+            lines.append(f"- {ticker}: 損益 {pnl:.2f}%")
+        except Exception:
+            lines.append(f"- {ticker}: 取得失敗")
+
+    return "\n".join(lines)
