@@ -1,54 +1,58 @@
 from __future__ import annotations
 
-import yfinance as yf
+from typing import Dict, Tuple
 import numpy as np
+import pandas as pd
+
+from utils.util import safe_float
+from utils.features import add_indicators, atr
 
 
-def judge_setup(ticker: str) -> dict:
-    df = yf.download(ticker, period="1y", auto_adjust=True)
-    if len(df) < 100:
-        return {"valid": False}
+def detect_setup(df_raw: pd.DataFrame) -> Dict:
+    """
+    Setup A/B（順張りのみ）
+    A: トレンド押し目（優先）
+    B: ブレイク初動（追いかけ禁止 → entry側で制御）
+    """
+    df = add_indicators(df_raw)
+    close = df["Close"].astype(float)
+    c = safe_float(close.iloc[-1])
 
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-    vol = df["Volume"]
+    ma20 = safe_float(df["ma20"].iloc[-1])
+    ma50 = safe_float(df["ma50"].iloc[-1])
+    slope5 = safe_float(df["ma20_slope5"].iloc[-1])
+    rsi = safe_float(df["rsi14"].iloc[-1])
+    a = atr(df_raw, 14)
+    adv20 = safe_float(df["adv20"].iloc[-1])
 
-    sma20 = close.rolling(20).mean()
-    sma50 = close.rolling(50).mean()
+    setup = "-"
+    setup_reason = ""
 
-    atr = (high - low).rolling(14).mean().iloc[-1]
+    # Setup A: 強トレンド + 押し目（MA20周辺〜MA50寄りも許容）
+    if np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(slope5) and np.isfinite(rsi) and np.isfinite(a):
+        trend_ok = (c > ma20 > ma50) and (slope5 > 0)
+        pullback_ok = abs(c - ma20) <= 0.8 * a
+        rsi_ok = 40 <= rsi <= 62
 
-    # RSI
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rsi = 100 - (100 / (1 + gain / loss))
-    rsi_val = rsi.iloc[-1]
+        if trend_ok and pullback_ok and rsi_ok:
+            setup = "A"
+            setup_reason = "trend_pullback"
 
-    # Setup A（押し目）
-    if (
-        close.iloc[-1] > sma20.iloc[-1] > sma50.iloc[-1]
-        and abs(close.iloc[-1] - sma20.iloc[-1]) <= 0.8 * atr
-        and 40 <= rsi_val <= 62
-    ):
-        return {
-            "valid": True,
-            "setup_type": "A",
-            "atr": atr,
-            "sma20": sma20.iloc[-1],
-        }
+    # Setup B: 20日高値ブレイク（厳選）
+    if setup == "-":
+        if len(close) >= 25 and np.isfinite(adv20) and np.isfinite(c):
+            hh20 = float(close.iloc[-21:-1].max())
+            # ブレイク判定（終値）
+            if c > hh20:
+                setup = "B"
+                setup_reason = "breakout_20d"
 
-    # Setup B（ブレイク）
-    hh20 = high.rolling(20).max().iloc[-2]
-    vol_ma = vol.rolling(20).mean().iloc[-1]
-
-    if close.iloc[-1] > hh20 and vol.iloc[-1] >= 1.5 * vol_ma:
-        return {
-            "valid": True,
-            "setup_type": "B",
-            "break_line": hh20,
-            "atr": atr,
-        }
-
-    return {"valid": False}
+    return {
+        "setup": setup,
+        "setup_reason": setup_reason,
+        "ma20": ma20,
+        "ma50": ma50,
+        "rsi14": rsi,
+        "atr14": float(a) if np.isfinite(a) else None,
+        "adv20": adv20,
+    }
