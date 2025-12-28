@@ -1,46 +1,54 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
-
+import yfinance as yf
 import numpy as np
-import pandas as pd
 
-from utils.features import Features
 
-@dataclass(frozen=True)
-class SetupResult:
-    setup: str
-    breakout_line: float
-    reason: str
+def judge_setup(ticker: str) -> dict:
+    df = yf.download(ticker, period="1y", auto_adjust=True)
+    if len(df) < 100:
+        return {"valid": False}
 
-def detect_setup(hist: pd.DataFrame, f: Features) -> Optional[SetupResult]:
-    price = f.price
-    if not (np.isfinite(price) and price > 0):
-        return None
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    vol = df["Volume"]
 
-    near = abs(price - f.ma20) <= 0.8 * f.atr
-    a_ok = (
-        np.isfinite(f.ma20) and np.isfinite(f.ma50) and
-        price > f.ma20 > f.ma50 and
-        np.isfinite(f.slope20_5d) and f.slope20_5d > 0 and
-        np.isfinite(f.rsi) and 40 <= f.rsi <= 62 and
-        near
-    )
-    if a_ok:
-        return SetupResult(setup="A", breakout_line=float(f.ma20), reason="トレンド押し目")
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean()
 
-    if hist is None or len(hist) < 60:
-        return None
-    vol = hist["Volume"].astype(float) if "Volume" in hist.columns else None
-    vol_last = float(vol.iloc[-1]) if vol is not None and len(vol) else np.nan
-    vol_ma20 = float(np.nan_to_num(f.vol_ma20, nan=0.0))
-    b_ok = (
-        np.isfinite(f.hh20) and price >= f.hh20 and
-        np.isfinite(vol_last) and np.isfinite(vol_ma20) and vol_ma20 > 0 and
-        vol_last >= 1.5 * vol_ma20
-    )
-    if b_ok:
-        return SetupResult(setup="B", breakout_line=float(f.hh20), reason="ブレイク初動")
+    atr = (high - low).rolling(14).mean().iloc[-1]
 
-    return None
+    # RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    rsi = 100 - (100 / (1 + gain / loss))
+    rsi_val = rsi.iloc[-1]
+
+    # Setup A（押し目）
+    if (
+        close.iloc[-1] > sma20.iloc[-1] > sma50.iloc[-1]
+        and abs(close.iloc[-1] - sma20.iloc[-1]) <= 0.8 * atr
+        and 40 <= rsi_val <= 62
+    ):
+        return {
+            "valid": True,
+            "setup_type": "A",
+            "atr": atr,
+            "sma20": sma20.iloc[-1],
+        }
+
+    # Setup B（ブレイク）
+    hh20 = high.rolling(20).max().iloc[-2]
+    vol_ma = vol.rolling(20).mean().iloc[-1]
+
+    if close.iloc[-1] > hh20 and vol.iloc[-1] >= 1.5 * vol_ma:
+        return {
+            "valid": True,
+            "setup_type": "B",
+            "break_line": hh20,
+            "atr": atr,
+        }
+
+    return {"valid": False}
