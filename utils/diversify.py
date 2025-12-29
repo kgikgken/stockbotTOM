@@ -1,65 +1,97 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
+
 import numpy as np
 import pandas as pd
 
 
-def corr20(a_close: pd.Series, b_close: pd.Series) -> float:
+@dataclass
+class DiversifyDecision:
+    ok: bool
+    reason: str
+
+
+def _corr(a: pd.Series, b: pd.Series) -> float:
     try:
-        if a_close is None or b_close is None:
-            return 0.0
-        if len(a_close) < 25 or len(b_close) < 25:
-            return 0.0
-        a = a_close.pct_change(fill_method=None).tail(20)
-        b = b_close.pct_change(fill_method=None).tail(20)
-        df = pd.concat([a, b], axis=1).dropna()
-        if len(df) < 10:
-            return 0.0
-        c = float(df.corr().iloc[0, 1])
-        if not np.isfinite(c):
-            return 0.0
-        return c
+        x = a.astype(float).pct_change().dropna().tail(20)
+        y = b.astype(float).pct_change().dropna().tail(20)
+        if len(x) < 10 or len(y) < 10:
+            return float("nan")
+        m = pd.concat([x, y], axis=1).dropna()
+        if len(m) < 10:
+            return float("nan")
+        return float(m.corr().iloc[0, 1])
     except Exception:
-        return 0.0
+        return float("nan")
 
 
-def apply_diversify(cands: List[Dict], sector_cap: int = 2, corr_cap: float = 0.75) -> Tuple[List[Dict], List[Dict]]:
-    """
-    同一セクター最大2、相関>0.75 同時採用禁止
-    戻り: (selected, dropped_with_reason)
-    """
-    selected: List[Dict] = []
-    dropped: List[Dict] = []
-    sector_counts: Dict[str, int] = {}
+def select_with_constraints(
+    candidates: List[dict],
+    max_final: int,
+    max_same_sector: int,
+    corr_max: float,
+) -> Tuple[List[dict], List[dict]]:
+    """AdjEV降順で、セクター上限/相関上限を守って採用。落ちたものは watch に理由を付ける。"""
+    picked: List[dict] = []
+    watch: List[dict] = []
 
-    for c in cands:
-        sec = str(c.get("sector", "不明"))
-        if sector_counts.get(sec, 0) >= sector_cap:
+    sector_cnt: Dict[str, int] = {}
+    closes: Dict[str, pd.Series] = {}  # ticker -> close series（20d相関用）
+
+    for c in candidates:
+        t = c["ticker"]
+        sec = c.get("sector", "不明")
+        sector_cnt.setdefault(sec, 0)
+
+        # セクター上限
+        if sector_cnt[sec] >= max_same_sector:
             c2 = dict(c)
-            c2["drop_reason"] = "セクター上限"
-            dropped.append(c2)
+            c2["reason"] = "セクター上限"
+            watch.append(c2)
             continue
 
-        # correlation check
-        too_corr = False
-        for s in selected:
-            ca = c.get("_close_series")
-            cb = s.get("_close_series")
-            if ca is None or cb is None:
+        # 相関上限
+        corr_ng = False
+        worst = 0.0
+        worst_t = ""
+        if c.get("_close_series") is not None:
+            closes[t] = c["_close_series"]
+        for p in picked:
+            t2 = p["ticker"]
+            s1 = closes.get(t)
+            s2 = closes.get(t2)
+            if s1 is None or s2 is None:
                 continue
-            co = corr20(ca, cb)
-            if co > corr_cap:
-                too_corr = True
+            cc = _corr(s1, s2)
+            if np.isfinite(cc) and cc > corr_max:
+                corr_ng = True
+                worst = cc
+                worst_t = t2
                 break
 
-        if too_corr:
+        if corr_ng:
             c2 = dict(c)
-            c2["drop_reason"] = f"相関高({corr_cap:.2f}超)"
-            dropped.append(c2)
+            c2["reason"] = f"相関高({worst:.2f})"
+            c2["corr_with"] = worst_t
+            watch.append(c2)
             continue
 
-        selected.append(c)
-        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        picked.append(c)
+        sector_cnt[sec] += 1
+        if len(picked) >= max_final:
+            break
 
-    return selected, dropped
+    # 余った候補を監視へ（理由付きで）
+    for c in candidates[len(picked):]:
+        if len(watch) >= 50:
+            break
+        if c.get("reason"):
+            watch.append(c)
+        else:
+            c2 = dict(c)
+            c2["reason"] = "採用枠外"
+            watch.append(c2)
+
+    return picked, watch
