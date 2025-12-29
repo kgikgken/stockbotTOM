@@ -1,58 +1,54 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import numpy as np
-import pandas as pd
 
-from utils.util import safe_float
-from utils.features import add_indicators, atr
+from utils.features import Feat
 
 
-def detect_setup(df_raw: pd.DataFrame) -> Dict:
-    """
-    Setup A/B（順張りのみ）
-    A: トレンド押し目（優先）
-    B: ブレイク初動（追いかけ禁止 → entry側で制御）
-    """
-    df = add_indicators(df_raw)
-    close = df["Close"].astype(float)
-    c = safe_float(close.iloc[-1])
+@dataclass
+class SetupResult:
+    setup_type: str   # "A" / "B" / "-"
+    reason_ng: str    # NG理由（通過時は ""）
 
-    ma20 = safe_float(df["ma20"].iloc[-1])
-    ma50 = safe_float(df["ma50"].iloc[-1])
-    slope5 = safe_float(df["ma20_slope5"].iloc[-1])
-    rsi = safe_float(df["rsi14"].iloc[-1])
-    a = atr(df_raw, 14)
-    adv20 = safe_float(df["adv20"].iloc[-1])
+    # A/B共通
+    trend_ok: bool
+    pullback_ok: bool
+    breakout_ok: bool
+    volume_ok: bool
 
-    setup = "-"
-    setup_reason = ""
 
-    # Setup A: 強トレンド + 押し目（MA20周辺〜MA50寄りも許容）
-    if np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(slope5) and np.isfinite(rsi) and np.isfinite(a):
-        trend_ok = (c > ma20 > ma50) and (slope5 > 0)
-        pullback_ok = abs(c - ma20) <= 0.8 * a
-        rsi_ok = 40 <= rsi <= 62
+def judge_setup(feat: Feat) -> SetupResult:
+    """仕様書v2.0の Setup A/B 判定（逆張りOFF）。"""
+    if feat is None:
+        return SetupResult("-", "データ不足", False, False, False, False)
 
-        if trend_ok and pullback_ok and rsi_ok:
-            setup = "A"
-            setup_reason = "trend_pullback"
+    c = feat.close
+    ma20 = feat.ma20
+    ma50 = feat.ma50
+    slope = feat.ma20_slope_5d
+    rsi14 = feat.rsi14
+    atr = feat.atr14
 
-    # Setup B: 20日高値ブレイク（厳選）
-    if setup == "-":
-        if len(close) >= 25 and np.isfinite(adv20) and np.isfinite(c):
-            hh20 = float(close.iloc[-21:-1].max())
-            # ブレイク判定（終値）
-            if c > hh20:
-                setup = "B"
-                setup_reason = "breakout_20d"
+    trend_ok = bool(np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and c > ma20 > ma50 and slope > 0)
+    # 押し目：abs(Close-MA20) <= 0.8ATR & RSI 40-62
+    pullback_ok = bool(trend_ok and np.isfinite(atr) and abs(c - ma20) <= 0.8 * atr and 40 <= rsi14 <= 62)
 
-    return {
-        "setup": setup,
-        "setup_reason": setup_reason,
-        "ma20": ma20,
-        "ma50": ma50,
-        "rsi14": rsi,
-        "atr14": float(a) if np.isfinite(a) else None,
-        "adv20": adv20,
-    }
+    # ブレイク：Close > HH20 & Volume >= 1.5*VolMA20
+    breakout_ok = bool(trend_ok and np.isfinite(feat.hh20) and c > feat.hh20)
+    volume_ok = bool(np.isfinite(feat.volume) and np.isfinite(feat.vol_ma20) and feat.vol_ma20 > 0 and feat.volume >= 1.5 * feat.vol_ma20)
+
+    # Setup選択（A優先）
+    if pullback_ok:
+        return SetupResult("A", "", trend_ok, pullback_ok, breakout_ok, volume_ok)
+    if breakout_ok and volume_ok:
+        return SetupResult("B", "", trend_ok, pullback_ok, breakout_ok, volume_ok)
+
+    # NG理由（最短で）
+    if not trend_ok:
+        return SetupResult("-", "トレンド条件NG", trend_ok, pullback_ok, breakout_ok, volume_ok)
+    if breakout_ok and not volume_ok:
+        return SetupResult("-", "出来高不足", trend_ok, pullback_ok, breakout_ok, volume_ok)
+    return SetupResult("-", "形が弱い", trend_ok, pullback_ok, breakout_ok, volume_ok)
