@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import os
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Iterable, List, Tuple, Any, Dict
-
-import numpy as np
-import pandas as pd
-import yfinance as yf
+from typing import Optional
 
 JST = timezone(timedelta(hours=9))
 
@@ -25,24 +19,22 @@ def jst_today_date():
     return jst_now().date()
 
 
-def safe_float(x: Any, default: float = np.nan) -> float:
+def safe_float(x, default=float("nan")) -> float:
     try:
         v = float(x)
-        if not np.isfinite(v):
+        if v != v:  # nan
+            return float(default)
+        if v == float("inf") or v == float("-inf"):
             return float(default)
         return float(v)
     except Exception:
         return float(default)
 
 
-def clamp(x: float, lo: float, hi: float) -> float:
-    return float(max(lo, min(hi, x)))
-
-
-def chunk_text(text: str, chunk_size: int = 3800) -> List[str]:
-    if not text:
-        return [""]
-    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+def clamp(v: float, lo: float, hi: float) -> float:
+    if v != v:
+        return v
+    return float(max(lo, min(hi, v)))
 
 
 def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str: str | None) -> Optional[datetime]:
@@ -73,48 +65,43 @@ def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str:
     return None
 
 
-def yf_history(
-    ticker: str,
-    period: str = "260d",
-    interval: str = "1d",
-    auto_adjust: bool = True,
-    tries: int = 2,
-    sleep: float = 0.4,
-) -> Optional[pd.DataFrame]:
-    for _ in range(max(1, tries)):
-        try:
-            df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=auto_adjust)
-            if df is not None and not df.empty:
-                df = df.copy()
-                for c in ("Open", "High", "Low", "Close"):
-                    if c in df.columns:
-                        df[c] = pd.to_numeric(df[c], errors="coerce")
-                if "Volume" in df.columns:
-                    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0.0)
-                return df
-        except Exception:
-            time.sleep(sleep)
-    return None
+@dataclass(frozen=True)
+class Config:
+    # スイング
+    SWING_MAX_FINAL: int = 5
+    WATCH_MAX: int = 10
 
+    # 決算
+    EARNINGS_EXCLUDE_DAYS: int = 3
 
-def read_csv_safely(path: str) -> pd.DataFrame:
-    try:
-        if not os.path.exists(path):
-            return pd.DataFrame()
-        return pd.read_csv(path)
-    except Exception:
-        return pd.DataFrame()
+    # Universe足切り（トレード候補のみ）
+    PRICE_MIN: float = 200.0
+    PRICE_MAX: float = 15000.0
+    ADV20_MIN_JPY: float = 200_000_000.0  # 200M（最低100Mは許容するが監視寄り）
+    ADV20_WARN_JPY: float = 100_000_000.0
+    ATRPCT_MIN: float = 0.015            # 1.5%
+    ATRPCT_MAX: float = 0.06             # 6% 事故ゾーン
+    STOPLIM_HIT_60D_EXCLUDE: int = 2      # 任意。データが無ければ無視
 
+    # 地合いNO-TRADE
+    NOTRADE_SCORE_LT: int = 45
+    NOTRADE_DELTA3D_LE: int = -5
+    NOTRADE_SCORE_LT_2: int = 55
 
-def pick_ticker_column(df: pd.DataFrame) -> Optional[str]:
-    for col in ("ticker", "code", "Ticker", "Code"):
-        if col in df.columns:
-            return col
-    return None
+    # RR/EV/速度
+    RR_MIN: float = 1.8
+    EV_MIN_R: float = 0.30
+    EV_MIN_R_NEUTRAL: float = 0.40
+    EXPECTED_DAYS_MAX: float = 5.0
+    RPDAY_MIN: float = 0.50
 
+    # 分散
+    MAX_SAME_SECTOR: int = 2
+    CORR_MAX: float = 0.75
 
-def pick_sector_column(df: pd.DataFrame) -> Optional[str]:
-    for col in ("sector", "industry_big", "Sector", "Industry"):
-        if col in df.columns:
-            return col
-    return None
+    # リスク管理（ロット事故）
+    RISK_PER_TRADE: float = 0.015
+    MAX_PORTFOLIO_RISK_PCT: float = 0.05  # 5%超なら警告
+
+    # セクター採用
+    SECTOR_TOP_N: int = 5
