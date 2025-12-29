@@ -1,152 +1,169 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Tuple
+
 import numpy as np
 import pandas as pd
 
-from utils.util import safe_float, clamp
-from utils.features import atr, add_indicators
+from utils.features import Feat
+from utils.util import clamp
 
 
-def compute_rr_targets(df_raw: pd.DataFrame, setup: str, entry: Dict) -> Dict:
-    """
-    STOP/TP1/TP2（構造＋ATR）
-    RR = (TP2-IN)/(IN-STOP)
-    """
-    df = add_indicators(df_raw)
-    close = df["Close"].astype(float)
+@dataclass
+class RREV:
+    stop: float
+    tp1: float
+    tp2: float
+    rr: float
 
-    in_center = safe_float(entry.get("in_center"))
-    in_low = safe_float(entry.get("in_low"))
-    a = safe_float(entry.get("atr"))
-    if not np.isfinite(a) or a <= 0:
-        a = atr(df_raw, 14)
-    if not np.isfinite(a) or a <= 0:
-        a = max(safe_float(close.iloc[-1]) * 0.01, 1.0)
+    pwin: float
+    ev_r: float
+    adj_ev: float
+
+    expected_days: float
+    r_per_day: float
+
+    regime_mult: float
+
+
+def _swing_low(hist: pd.DataFrame, lookback: int = 12) -> float:
+    try:
+        low = hist["Low"].astype(float).tail(lookback)
+        v = float(low.min())
+        return v if np.isfinite(v) else float("nan")
+    except Exception:
+        return float("nan")
+
+
+def regime_multiplier(market_score: int, delta3d: int, major_event: bool) -> float:
+    mult = 1.0
+    if market_score >= 60 and delta3d >= 0:
+        mult *= 1.05
+    if delta3d <= -5:
+        mult *= 0.70
+    if major_event:
+        mult *= 0.75
+    return float(clamp(mult, 0.50, 1.10))
+
+
+def compute_rr_ev(
+    hist: pd.DataFrame,
+    feat: Feat,
+    setup_type: str,
+    in_center: float,
+    in_low: float,
+    market_score: int,
+    delta3d: int,
+    major_event: bool,
+) -> RREV:
+    """仕様書v2.0：STOP/TP（2段階） + RR/EV + 速度"""
+    atr = feat.atr14
+    if not np.isfinite(atr) or atr <= 0:
+        atr = max(feat.close * 0.01, 1.0)
 
     # STOP
-    lookback = 12
-    swing_low = float(df_raw["Low"].astype(float).tail(lookback).min()) if len(df_raw) >= lookback else float(df_raw["Low"].astype(float).min())
-
-    if setup == "A":
-        # STOP = IN_low - 0.7ATR（≒ center - 1.2ATR）
-        stop = in_low - 0.7 * a
-    elif setup == "B":
-        # STOP = BreakLine - 1.0ATR（center を BreakLine とみなす）
-        stop = in_center - 1.0 * a
+    if setup_type == "A":
+        stop = in_low - 0.7 * atr  # IN_low - 0.7ATR
+        # 直近安値が近い場合（より下へ）
+        sl = _swing_low(hist, lookback=12)
+        if np.isfinite(sl):
+            stop = min(stop, sl - 0.2 * atr)
+    elif setup_type == "B":
+        stop = in_center - 1.0 * atr
+        sl = _swing_low(hist, lookback=12)
+        if np.isfinite(sl):
+            stop = min(stop, sl - 0.2 * atr)
     else:
-        stop = in_center - 1.2 * a
+        stop = in_low - 0.7 * atr
 
-    # 構造安値が近いならさらに下へ
-    stop = min(stop, swing_low - 0.2 * a)
+    # STOPの下限（近すぎ事故を避ける）
+    stop = float(min(stop, in_center - 0.3 * atr))
+    if stop >= in_center:
+        stop = float(in_center - 1.0 * atr)
 
     risk = in_center - stop
-    if risk <= 0:
-        return {"rr": 0.0, "stop": float(stop), "tp1": float(in_center), "tp2": float(in_center), "r": float(risk)}
+    risk = risk if risk > 0 else max(atr * 0.8, 1.0)
 
-    # TP（2段階）
+    # TP1/TP2
     tp1 = in_center + 1.5 * risk
     tp2 = in_center + 3.0 * risk
 
-    rr = (tp2 - in_center) / risk
+    # 地合いで現実補正（TPは地合い悪いほど控えめ）
+    if market_score <= 45 or delta3d <= -5:
+        tp1 *= 0.98
+        tp2 *= 0.96
+    elif market_score >= 70 and delta3d >= 0:
+        tp1 *= 1.01
+        tp2 *= 1.02
 
-    return {
-        "stop": float(stop),
-        "tp1": float(tp1),
-        "tp2": float(tp2),
-        "rr": float(rr),
-        "risk_yen": float(risk),
-    }
+    rr = (tp2 - in_center) / risk if risk > 0 else 0.0
+    rr = float(rr)
 
-
-def pwin_proxy(
-    df_raw: pd.DataFrame,
-    setup: str,
-    rs20: float,
-    sector_rank: int | None,
-    adv20: float,
-    gu: bool,
-) -> float:
-    """
-    ログ無しでの “代理Pwin”。
-    0〜1（過剰に高くしない。現実寄せ）
-    """
-    df = add_indicators(df_raw)
-    close = df["Close"].astype(float)
-    c = safe_float(close.iloc[-1])
-
-    ma20 = safe_float(df["ma20"].iloc[-1])
-    ma50 = safe_float(df["ma50"].iloc[-1])
-    slope5 = safe_float(df["ma20_slope5"].iloc[-1])
-    rsi = safe_float(df["rsi14"].iloc[-1])
-
-    score = 0.0
-
-    # TrendStrength
-    if np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50):
-        if c > ma20 > ma50:
-            score += 0.22
-        elif c > ma20:
-            score += 0.12
-
-    if np.isfinite(slope5):
-        score += clamp(slope5 * 12.0, -0.08, 0.12)
-
-    # RSI（過熱は減点）
-    if np.isfinite(rsi):
-        if 40 <= rsi <= 62:
-            score += 0.12
-        elif rsi >= 70 or rsi <= 35:
-            score -= 0.10
-
-    # RS（強いほど加点）
-    if np.isfinite(rs20):
-        score += clamp(rs20 / 40.0, -0.08, 0.12)
-
-    # SectorRank（上位ほど微加点：ただし理由にしない）
-    if sector_rank is not None and sector_rank > 0:
-        # 1位=+0.08, 5位=+0.04, 10位=+0.02, それ以降ほぼ0
-        score += clamp(0.10 * (1.0 / (1.0 + (sector_rank - 1) / 4.0)), 0.0, 0.08)
-
-    # Liquidity（ADV）
-    if np.isfinite(adv20) and adv20 > 0:
-        if adv20 >= 1e9:
-            score += 0.06
-        elif adv20 >= 2e8:
-            score += 0.03
-
-    # GapRisk
-    if gu:
-        score -= 0.18
-
-    # setup補正（Bは難易度高いので保守的）
-    if setup == "B":
-        score -= 0.05
-
-    # ベース勝率（現実寄せ）
-    base = 0.34
-    p = base + score
-    return float(clamp(p, 0.18, 0.55))
-
-
-def ev_and_speed(rr: float, pwin: float, atr_yen: float, in_price: float, tp2: float) -> Dict:
-    """
-    EV(R) と ExpectedDays / Rday
-    """
-    if rr <= 0:
-        return {"ev": -999.0, "exp_days": 999.0, "r_day": 0.0}
-
-    ev = pwin * rr - (1.0 - pwin) * 1.0
-
-    # ExpectedDays = (TP2-IN)/(k*ATR)
-    k = 1.0
-    move = tp2 - in_price
-    if not np.isfinite(move) or move <= 0 or not np.isfinite(atr_yen) or atr_yen <= 0:
-        exp_days = 999.0
+    # Pwin推定（代理特徴）
+    p = 0.30
+    # TrendStrength: MA20上&傾き
+    if feat.close > feat.ma20 > feat.ma50:
+        p += 0.08
+    if np.isfinite(feat.ma20_slope_5d) and feat.ma20_slope_5d > 0:
+        p += float(clamp(feat.ma20_slope_5d * 10.0, 0.0, 0.06))
+    # RSI（過熱なし）
+    if 40 <= feat.rsi14 <= 62:
+        p += 0.06
+    elif 62 < feat.rsi14 <= 70:
+        p += 0.02
     else:
-        exp_days = float(move / (k * atr_yen))
-        exp_days = clamp(exp_days, 0.5, 30.0)
+        p -= 0.03
 
-    r_day = float(rr / exp_days) if exp_days > 0 else 0.0
+    # VolumeQuality（A:押しで枯れ、B:ブレイクで増）
+    if setup_type == "A":
+        if np.isfinite(feat.volume) and np.isfinite(feat.vol_ma20) and feat.vol_ma20 > 0:
+            if feat.volume < feat.vol_ma20:
+                p += 0.03
+    if setup_type == "B":
+        if np.isfinite(feat.volume) and np.isfinite(feat.vol_ma20) and feat.vol_ma20 > 0:
+            if feat.volume >= 1.5 * feat.vol_ma20:
+                p += 0.04
 
-    return {"ev": float(ev), "exp_days": float(exp_days), "r_day": float(r_day)}
+    # Liquidity（ADV20で微加点）
+    adv = feat.turnover_ma20
+    if np.isfinite(adv):
+        if adv >= 1e9:
+            p += 0.03
+        elif adv >= 2e8:
+            p += 0.015
+
+    # Risk（地合い悪化・イベント）
+    if market_score < 50:
+        p -= 0.03
+    if delta3d <= -5:
+        p -= 0.05
+    if major_event:
+        p -= 0.04
+
+    p = float(clamp(p, 0.15, 0.60))
+
+    ev = p * rr - (1.0 - p) * 1.0
+    ev = float(ev)
+
+    mult = regime_multiplier(market_score, delta3d, major_event)
+    adj_ev = float(ev * mult)
+
+    # 速度：ExpectedDays = (TP2-IN)/(k*ATR) k=1.0
+    expected_days = float((tp2 - in_center) / (1.0 * atr)) if atr > 0 else 999.0
+    expected_days = float(clamp(expected_days, 0.5, 30.0))
+
+    r_per_day = float(rr / expected_days) if expected_days > 0 else 0.0
+
+    return RREV(
+        stop=float(round(stop, 1)),
+        tp1=float(round(tp1, 1)),
+        tp2=float(round(tp2, 1)),
+        rr=float(rr),
+        pwin=float(p),
+        ev_r=float(ev),
+        adj_ev=float(adj_ev),
+        expected_days=float(expected_days),
+        r_per_day=float(r_per_day),
+        regime_mult=float(mult),
+    )
