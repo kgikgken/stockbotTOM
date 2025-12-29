@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import os
-from typing import List, Dict, Tuple
+from typing import Dict, List
+
 import pandas as pd
 
-from utils.util import parse_event_datetime_jst, jst_today_date
+from utils.util import parse_event_datetime_jst
 
 
-EVENTS_PATH = "events.csv"
-
-
-def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
-    if not os.path.exists(path):
+def load_events(path: str) -> List[Dict[str, str]]:
+    if not path or not os.path.exists(path):
         return []
     try:
         df = pd.read_csv(path)
@@ -23,25 +21,21 @@ def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
         label = str(row.get("label", "")).strip()
         if not label:
             continue
-        kind = str(row.get("kind", "")).strip()
-        date_str = str(row.get("date", "")).strip()
-        time_str = str(row.get("time", "")).strip()
-        dt_str = str(row.get("datetime", "")).strip()
-        out.append({"label": label, "kind": kind, "date": date_str, "time": time_str, "datetime": dt_str})
+        out.append(
+            {
+                "label": label,
+                "kind": str(row.get("kind", "")).strip(),
+                "date": str(row.get("date", "")).strip(),
+                "time": str(row.get("time", "")).strip(),
+                "datetime": str(row.get("datetime", "")).strip(),
+            }
+        )
     return out
 
 
-def build_event_warnings(today_date=None) -> Tuple[List[str], bool]:
-    """
-    returns: (lines, is_risk_day)
-      - is_risk_day: FOMC/日銀 など大イベント近接を True
-    """
-    if today_date is None:
-        today_date = jst_today_date()
-
-    events = load_events()
-    lines: List[str] = []
-    risk = False
+def build_event_warnings(events_path: str, today_date) -> List[str]:
+    events = load_events(events_path)
+    warns: List[str] = []
 
     for ev in events:
         dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
@@ -49,16 +43,26 @@ def build_event_warnings(today_date=None) -> Tuple[List[str], bool]:
             continue
         d = dt.date()
         delta = (d - today_date).days
-
         if -1 <= delta <= 2:
             when = "本日" if delta == 0 else ("直近" if delta < 0 else f"{delta}日後")
             dt_disp = dt.strftime("%Y-%m-%d %H:%M JST")
-            lines.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
+            warns.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
 
-            key = (ev.get("label", "") + " " + ev.get("kind", "")).lower()
-            if ("fomc" in key) or ("fed" in key) or ("日銀" in key) or ("boj" in key) or ("cpi" in key):
-                risk = True
+    if not warns:
+        warns.append("- 特になし")
+    return warns
 
-    if not lines:
-        lines.append("- 特になし")
-    return lines, risk
+
+def is_major_event_day(events_path: str, today_date) -> bool:
+    """重要イベント前後は RegimeMultiplier で吸収するためのフラグ"""
+    events = load_events(events_path)
+    for ev in events:
+        label = str(ev.get("label", "")).upper()
+        if any(k in label for k in ("FOMC", "日銀", "BOJ", "CPI", "雇用", "GDP", "PCE")):
+            dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
+            if dt is None:
+                continue
+            delta = (dt.date() - today_date).days
+            if -1 <= delta <= 1:
+                return True
+    return False
