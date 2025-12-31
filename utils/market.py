@@ -1,125 +1,175 @@
-from typing import Dict, List
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from utils.util import clamp
 
-def _hist(symbol: str, days: int = 80) -> pd.DataFrame:
+
+def _rsi14(close: pd.Series) -> float:
+    if close is None or len(close) < 20:
+        return 50.0
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.rolling(14).mean().iloc[-1]
+    avg_loss = loss.rolling(14).mean().iloc[-1]
+    rs = float(avg_gain) / (float(avg_loss) + 1e-9)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    if not np.isfinite(rsi):
+        return 50.0
+    return float(rsi)
+
+
+def _fetch_index(symbol: str, period: str = "120d") -> pd.DataFrame:
     try:
-        df = yf.Ticker(symbol).history(period=f"{days}d", auto_adjust=True)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        return df
+        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
+        return df if df is not None else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
 
-def _sma(s: pd.Series, n: int) -> pd.Series:
-    return s.rolling(n).mean()
-
-
-def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
-    d = close.diff()
-    up = d.clip(lower=0)
-    dn = (-d).clip(lower=0)
-    rs = up.rolling(n).mean() / (dn.rolling(n).mean() + 1e-9)
-    return 100 - (100 / (1 + rs))
-
-
-def _score_from_index(close: pd.Series) -> pd.Series:
-    """0-100。Trend/Momentum/Risk を簡易合成。"""
+def _score_from_close(close: pd.Series) -> int:
+    # 0-100
     if close is None or len(close) < 60:
-        return pd.Series(dtype=float)
+        return 50
 
     c = close.astype(float)
-    sma20 = _sma(c, 20)
-    sma50 = _sma(c, 50)
-    sma10 = _sma(c, 10)
+    last = float(c.iloc[-1])
+    sma20 = float(c.rolling(20).mean().iloc[-1])
+    sma50 = float(c.rolling(50).mean().iloc[-1])
 
-    r5 = c.pct_change(5)
-    r20 = c.pct_change(20)
-    rsi14 = _rsi(c, 14)
+    # momentum
+    r5 = float(c.iloc[-1] / c.iloc[-6] - 1.0) * 100.0 if len(c) >= 6 else 0.0
+    r20 = float(c.iloc[-1] / c.iloc[-21] - 1.0) * 100.0 if len(c) >= 21 else 0.0
+    rsi = _rsi14(c)
 
-    # Risk: 短期ボラ上昇、急落
-    ret = c.pct_change()
-    vola20 = ret.rolling(20).std()
-    drop = ret.rolling(2).sum()  # 2日落ち
+    base = 50.0
 
-    score = pd.Series(50.0, index=c.index)
+    # trend component
+    if last > sma50:
+        base += 10.0
+    else:
+        base -= 10.0
 
-    # Trend
-    trend = (c > sma50).astype(float) + (sma20 > sma50).astype(float)
-    score += (trend - 1.0) * 12.0
+    if sma20 > sma50:
+        base += 10.0
+    else:
+        base -= 10.0
 
-    # Momentum
-    score += np.clip(r5 * 100 * 0.7, -10, 10)
-    score += np.clip(r20 * 100 * 0.4, -8, 8)
-    score += np.clip((rsi14 - 50) * 0.20, -6, 6)
+    # momentum component
+    base += clamp(r5 / 2.0, -8.0, 8.0)
+    base += clamp(r20 / 4.0, -8.0, 8.0)
 
-    # Risk
-    score -= np.clip((vola20 - vola20.rolling(60).mean()) * 200, -0, 10)
-    score -= np.clip((-drop) * 250, 0, 12)
+    # rsi stability
+    if 45 <= rsi <= 65:
+        base += 6.0
+    elif rsi < 35:
+        base -= 8.0
+    elif rsi > 75:
+        base -= 6.0
 
-    # Close vs SMA10（短期の警戒）
-    score -= ((c < sma10) & (c > 0)).astype(float) * 6.0
-
-    return score.clip(0, 100)
-
-
-def calc_market_score() -> Dict:
-    """TOPIX/N225の合成で MarketScore と Δ3d を返す。"""
-    topx = _hist("^TOPX", days=120)
-    n225 = _hist("^N225", days=120)
-
-    if topx.empty and n225.empty:
-        return {"score": 50, "delta3d": 0, "comment": "中立"}
-
-    scores: List[pd.Series] = []
-    if not topx.empty:
-        scores.append(_score_from_index(topx["Close"]))
-    if not n225.empty:
-        scores.append(_score_from_index(n225["Close"]))
-
-    s = pd.concat(scores, axis=1).mean(axis=1).dropna()
-    if s.empty:
-        return {"score": 50, "delta3d": 0, "comment": "中立"}
-
-    score_now = int(np.clip(round(float(s.iloc[-1])), 0, 100))
-    score_3d = float(s.iloc[-4]) if len(s) >= 4 else float(s.iloc[0])
-    delta3d = int(round(score_now - score_3d))
-
-    comment = "強め" if score_now >= 70 else ("やや強め" if score_now >= 60 else ("中立" if score_now >= 50 else ("弱め" if score_now >= 40 else "弱い")))
-
-    return {"score": score_now, "delta3d": delta3d, "comment": comment}
+    score = int(round(clamp(base, 0.0, 100.0)))
+    return score
 
 
-def enhance_market_score() -> Dict:
-    """MarketScore に SOX/NVDA など Risk-on/off を薄く反映。"""
-    mkt = calc_market_score()
-    score = float(mkt.get("score", 50))
+def _comment(score: int) -> str:
+    if score >= 70:
+        return "強め"
+    if score >= 60:
+        return "やや強め"
+    if score >= 50:
+        return "中立"
+    if score >= 40:
+        return "弱め"
+    return "弱い"
 
-    # SOX
-    try:
-        sox = _hist("^SOX", days=10)
-        if not sox.empty and len(sox) >= 6:
-            chg = float(sox["Close"].iloc[-1] / sox["Close"].iloc[-6] - 1.0) * 100.0
-            score += float(np.clip(chg / 2.0, -5.0, 5.0))
-            mkt["sox_5d"] = chg
-    except Exception:
-        pass
 
-    # NVDA
-    try:
-        nv = _hist("NVDA", days=10)
-        if not nv.empty and len(nv) >= 6:
-            chg = float(nv["Close"].iloc[-1] / nv["Close"].iloc[-6] - 1.0) * 100.0
-            score += float(np.clip(chg / 3.0, -4.0, 4.0))
-            mkt["nvda_5d"] = chg
-    except Exception:
-        pass
+def _recommend_leverage(score: int) -> Tuple[float, str]:
+    if score >= 70:
+        return 2.0, "強気（押し目＋一部ブレイク）"
+    if score >= 60:
+        return 1.7, "やや強気（押し目メイン）"
+    if score >= 50:
+        return 1.3, "中立（厳選・押し目中心）"
+    if score >= 40:
+        return 1.1, "やや守り（新規ロット小さめ）"
+    return 1.0, "守り（新規かなり絞る）"
 
-    mkt["score"] = int(np.clip(round(score), 0, 100))
 
-    # delta3d は calc_market_score のまま（強化分は補助情報扱い）
-    return mkt
+def build_market_context() -> Dict:
+    # Use TOPIX primarily; fallback N225
+    topx = _fetch_index("^TOPX", period="160d")
+    n225 = _fetch_index("^N225", period="160d")
+
+    # Choose series
+    close = None
+    if topx is not None and not topx.empty and "Close" in topx.columns:
+        close = topx["Close"]
+        idx_name = "TOPIX"
+    elif n225 is not None and not n225.empty and "Close" in n225.columns:
+        close = n225["Close"]
+        idx_name = "N225"
+    else:
+        score = 50
+        delta3d = 0
+        lev, lev_comment = _recommend_leverage(score)
+        return {
+            "index": "N/A",
+            "score": score,
+            "comment": _comment(score),
+            "delta3d": delta3d,
+            "lev": lev,
+            "lev_comment": lev_comment,
+            "allow_new": True,
+            "no_trade_reasons": [],
+            "regime_multiplier": 1.0,
+        }
+
+    score_today = _score_from_close(close)
+
+    # Delta3d: compute score 3 trading days ago (slice)
+    if len(close) >= 8:
+        close_past = close.iloc[:-3]
+        score_past = _score_from_close(close_past)
+        delta3d = int(score_today - score_past)
+    else:
+        delta3d = 0
+
+    # NO-TRADE mechanical
+    reasons = []
+    allow_new = True
+    if score_today < 45:
+        allow_new = False
+        reasons.append("MarketScore<45")
+    if delta3d <= -5 and score_today < 55:
+        allow_new = False
+        reasons.append("Δ3d<=-5 & MarketScore<55")
+
+    # Regime multiplier for AdjEV
+    mult = 1.0
+    if score_today >= 60 and delta3d >= 0:
+        mult = 1.05
+    if delta3d <= -5:
+        mult *= 0.70
+    if score_today < 45:
+        mult *= 0.65
+    mult = float(clamp(mult, 0.50, 1.10))
+
+    lev, lev_comment = _recommend_leverage(score_today)
+
+    return {
+        "index": idx_name,
+        "score": int(score_today),
+        "comment": _comment(int(score_today)),
+        "delta3d": int(delta3d),
+        "lev": float(lev),
+        "lev_comment": lev_comment,
+        "allow_new": bool(allow_new),
+        "no_trade_reasons": reasons,
+        "regime_multiplier": mult,
+    }
