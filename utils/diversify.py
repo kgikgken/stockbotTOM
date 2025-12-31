@@ -1,95 +1,81 @@
-from dataclasses import dataclass
+from __future__ import annotations
+
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
 
-@dataclass
-class DiversifyDecision:
-    ok: bool
-    reason: str
-
-
-def _corr(a: pd.Series, b: pd.Series) -> float:
+def _corr20(a: pd.Series, b: pd.Series) -> float:
     try:
         x = a.astype(float).pct_change().dropna().tail(20)
         y = b.astype(float).pct_change().dropna().tail(20)
-        if len(x) < 10 or len(y) < 10:
-            return float("nan")
-        m = pd.concat([x, y], axis=1).dropna()
-        if len(m) < 10:
-            return float("nan")
-        return float(m.corr().iloc[0, 1])
+        n = min(len(x), len(y))
+        if n < 10:
+            return 0.0
+        c = float(np.corrcoef(x[-n:], y[-n:])[0, 1])
+        if not np.isfinite(c):
+            return 0.0
+        return c
     except Exception:
-        return float("nan")
+        return 0.0
 
 
-def select_with_constraints(
-    candidates: List[dict],
-    max_final: int,
-    max_same_sector: int,
-    corr_max: float,
-) -> Tuple[List[dict], List[dict]]:
-    """AdjEV降順で、セクター上限/相関上限を守って採用。落ちたものは watch に理由を付ける。"""
-    picked: List[dict] = []
-    watch: List[dict] = []
+def diversify_candidates(
+    candidates: List[Dict],
+    max_per_sector: int = 2,
+    corr_threshold: float = 0.75,
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Keep list with sector cap and high-corr removal.
+    Returns: (kept, moved_to_watch)
+    candidates must include:
+      - sector
+      - adj_ev
+      - hist_close (pd.Series) for corr
+    """
+    kept: List[Dict] = []
+    watch: List[Dict] = []
 
-    sector_cnt: Dict[str, int] = {}
-    closes: Dict[str, pd.Series] = {}  # ticker -> close series（20d相関用）
+    sector_count: Dict[str, int] = {}
 
     for c in candidates:
-        t = c["ticker"]
-        sec = c.get("sector", "不明")
-        sector_cnt.setdefault(sec, 0)
-
-        # セクター上限
-        if sector_cnt[sec] >= max_same_sector:
+        sec = str(c.get("sector", "不明"))
+        if sector_count.get(sec, 0) >= max_per_sector:
             c2 = dict(c)
-            c2["reason"] = "セクター上限"
+            c2["watch_reason"] = "セクター上限"
             watch.append(c2)
             continue
 
-        # 相関上限
-        corr_ng = False
-        worst = 0.0
-        worst_t = ""
-        if c.get("_close_series") is not None:
-            closes[t] = c["_close_series"]
-        for p in picked:
-            t2 = p["ticker"]
-            s1 = closes.get(t)
-            s2 = closes.get(t2)
-            if s1 is None or s2 is None:
-                continue
-            cc = _corr(s1, s2)
-            if np.isfinite(cc) and cc > corr_max:
-                corr_ng = True
-                worst = cc
-                worst_t = t2
+        # correlation check against kept
+        too_corr = False
+        worst_pair = None
+        for k in kept:
+            corr = _corr20(c["hist_close"], k["hist_close"])
+            if corr > corr_threshold:
+                too_corr = True
+                worst_pair = (k, corr)
                 break
 
-        if corr_ng:
-            c2 = dict(c)
-            c2["reason"] = f"相関高({worst:.2f})"
-            c2["corr_with"] = worst_t
-            watch.append(c2)
+        if too_corr and worst_pair is not None:
+            k, corr = worst_pair
+            # keep higher adjEV
+            if c["adj_ev"] > k["adj_ev"]:
+                # move existing kept to watch
+                kept.remove(k)
+                k2 = dict(k)
+                k2["watch_reason"] = f"相関高({corr:.2f})"
+                watch.append(k2)
+
+                kept.append(c)
+                sector_count[sec] = sector_count.get(sec, 0) + 1
+            else:
+                c2 = dict(c)
+                c2["watch_reason"] = f"相関高({corr:.2f})"
+                watch.append(c2)
             continue
 
-        picked.append(c)
-        sector_cnt[sec] += 1
-        if len(picked) >= max_final:
-            break
+        kept.append(c)
+        sector_count[sec] = sector_count.get(sec, 0) + 1
 
-    # 余った候補を監視へ（理由付きで）
-    for c in candidates[len(picked):]:
-        if len(watch) >= 50:
-            break
-        if c.get("reason"):
-            watch.append(c)
-        else:
-            c2 = dict(c)
-            c2["reason"] = "採用枠外"
-            watch.append(c2)
-
-    return picked, watch
+    return kept, watch
