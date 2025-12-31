@@ -1,52 +1,44 @@
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from __future__ import annotations
+
+from typing import Tuple
 
 import numpy as np
 
-from utils.features import Feat
+from utils.util import clamp
 
 
-@dataclass
-class SetupResult:
-    setup_type: str   # "A" / "B" / "-"
-    reason_ng: str    # NG理由（通過時は ""）
+def detect_setup(feat: dict) -> Tuple[str, str]:
+    """
+    Return: (setup_type, reason_if_fail)
+    setup_type: "A" | "B" | "-"
+    """
+    c = feat["close"]
+    ma20 = feat["ma20"]
+    ma50 = feat["ma50"]
+    atr = feat["atr"]
+    rsi = feat["rsi"]
+    ma20_slope5 = feat["ma20_slope5"]
 
-    # A/B共通
-    trend_ok: bool
-    pullback_ok: bool
-    breakout_ok: bool
-    volume_ok: bool
+    if not (np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(atr) and np.isfinite(rsi)):
+        return "-", "データ不足"
 
+    # Setup A: trend pullback
+    cond_trend = (c > ma20 > ma50) and (ma20_slope5 > 0)
+    cond_pullback = abs(c - ma20) <= 0.8 * atr
+    cond_rsi = (40 <= rsi <= 62)
 
-def judge_setup(feat: Feat) -> SetupResult:
-    """仕様書v2.0の Setup A/B 判定（逆張りOFF）。"""
-    if feat is None:
-        return SetupResult("-", "データ不足", False, False, False, False)
+    if cond_trend and cond_pullback and cond_rsi:
+        return "A", ""
 
-    c = feat.close
-    ma20 = feat.ma20
-    ma50 = feat.ma50
-    slope = feat.ma20_slope_5d
-    rsi14 = feat.rsi14
-    atr = feat.atr14
+    # Setup B: breakout
+    hh20 = feat["hh20"]
+    vol_last = feat["vol_last"]
+    vol_ma20 = feat["vol_ma20"]
 
-    trend_ok = bool(np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and c > ma20 > ma50 and slope > 0)
-    # 押し目：abs(Close-MA20) <= 0.8ATR & RSI 40-62
-    pullback_ok = bool(trend_ok and np.isfinite(atr) and abs(c - ma20) <= 0.8 * atr and 40 <= rsi14 <= 62)
+    cond_break = np.isfinite(hh20) and (c > hh20)
+    cond_vol = np.isfinite(vol_last) and np.isfinite(vol_ma20) and (vol_ma20 > 0) and (vol_last >= 1.5 * vol_ma20)
 
-    # ブレイク：Close > HH20 & Volume >= 1.5*VolMA20
-    breakout_ok = bool(trend_ok and np.isfinite(feat.hh20) and c > feat.hh20)
-    volume_ok = bool(np.isfinite(feat.volume) and np.isfinite(feat.vol_ma20) and feat.vol_ma20 > 0 and feat.volume >= 1.5 * feat.vol_ma20)
+    if cond_break and cond_vol and (c > ma50):
+        return "B", ""
 
-    # Setup選択（A優先）
-    if pullback_ok:
-        return SetupResult("A", "", trend_ok, pullback_ok, breakout_ok, volume_ok)
-    if breakout_ok and volume_ok:
-        return SetupResult("B", "", trend_ok, pullback_ok, breakout_ok, volume_ok)
-
-    # NG理由（最短で）
-    if not trend_ok:
-        return SetupResult("-", "トレンド条件NG", trend_ok, pullback_ok, breakout_ok, volume_ok)
-    if breakout_ok and not volume_ok:
-        return SetupResult("-", "出来高不足", trend_ok, pullback_ok, breakout_ok, volume_ok)
-    return SetupResult("-", "形が弱い", trend_ok, pullback_ok, breakout_ok, volume_ok)
+    return "-", "形(A/B)不一致"
