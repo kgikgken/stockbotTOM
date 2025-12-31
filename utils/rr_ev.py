@@ -1,167 +1,196 @@
-from dataclasses import dataclass
+from __future__ import annotations
+
 from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
 
-from utils.features import Feat
 from utils.util import clamp
 
 
-@dataclass
-class RREV:
-    stop: float
-    tp1: float
-    tp2: float
-    rr: float
-
-    pwin: float
-    ev_r: float
-    adj_ev: float
-
-    expected_days: float
-    r_per_day: float
-
-    regime_mult: float
+def _swing_low(df: pd.DataFrame, lookback: int = 12) -> float:
+    low = df["Low"].astype(float)
+    if len(low) < 5:
+        return float(low.min())
+    return float(low.tail(lookback).min())
 
 
-def _swing_low(hist: pd.DataFrame, lookback: int = 12) -> float:
-    try:
-        low = hist["Low"].astype(float).tail(lookback)
-        v = float(low.min())
-        return v if np.isfinite(v) else float("nan")
-    except Exception:
-        return float("nan")
+def _stock_vs_index_rs20(stock_close: pd.Series, index_close: pd.Series) -> float:
+    # RS proxy: (stock 20d return - index 20d return)
+    if stock_close is None or index_close is None:
+        return 0.0
+    if len(stock_close) < 21 or len(index_close) < 21:
+        return 0.0
+    s = stock_close.astype(float)
+    i = index_close.astype(float)
+    sret = float(s.iloc[-1] / s.iloc[-21] - 1.0)
+    iret = float(i.iloc[-1] / i.iloc[-21] - 1.0)
+    v = (sret - iret) * 100.0
+    if not np.isfinite(v):
+        return 0.0
+    return float(v)
 
 
-def regime_multiplier(market_score: int, delta3d: int, major_event: bool) -> float:
-    mult = 1.0
-    if market_score >= 60 and delta3d >= 0:
-        mult *= 1.05
-    if delta3d <= -5:
-        mult *= 0.70
-    if major_event:
-        mult *= 0.75
-    return float(clamp(mult, 0.50, 1.10))
+def _pwin_proxy(setup_type: str, feat: dict, rs20: float) -> float:
+    """
+    Pwin proxy 0.25-0.55
+    Uses:
+      - trend strength (ma structure + slope)
+      - RSI in sweet spot
+      - liquidity (adv20)
+      - volume quality (for B)
+      - RS20
+      - GU risk
+    """
+    c = feat["close"]
+    ma20 = feat["ma20"]
+    ma50 = feat["ma50"]
+    slope = feat["ma20_slope5"]
+    rsi = feat["rsi"]
+    adv20 = feat["adv20"]
+
+    base = 0.30
+
+    # trend
+    if c > ma20 > ma50:
+        base += 0.06
+    if slope > 0:
+        base += clamp(slope * 4.0, 0.0, 0.06)
+
+    # RSI sweet
+    if 42 <= rsi <= 62:
+        base += 0.05
+    elif rsi < 35:
+        base -= 0.04
+    elif rsi > 75:
+        base -= 0.03
+
+    # RS20
+    base += clamp(rs20 / 100.0, -0.04, 0.06)
+
+    # liquidity (adv20 in JPY)
+    if np.isfinite(adv20):
+        if adv20 >= 1_000_000_000:
+            base += 0.05
+        elif adv20 >= 200_000_000:
+            base += 0.03
+        elif adv20 >= 100_000_000:
+            base += 0.01
+        else:
+            base -= 0.04
+
+    # setup bonus
+    if setup_type == "A":
+        base += 0.02
+    else:
+        base += 0.00
+
+    return float(clamp(base, 0.25, 0.55))
 
 
 def compute_rr_ev(
     hist: pd.DataFrame,
-    feat: Feat,
+    feat: dict,
     setup_type: str,
-    in_center: float,
-    in_low: float,
-    market_score: int,
-    delta3d: int,
-    major_event: bool,
-) -> RREV:
-    """仕様書v2.0：STOP/TP（2段階） + RR/EV + 速度"""
-    atr = feat.atr14
+    entry_zone: dict,
+    market_ctx: dict,
+    index_close: pd.Series | None,
+) -> Dict:
+    """
+    STOP/TP:
+      - stop uses structure + ATR
+      - TP1/TP2 uses R multiple but capped by resistance (HH60)
+    RR not fixed: TP2 capped -> RR changes.
+    ExpectedDays and R/day (priority)
+    EV and AdjEV (regime multiplier)
+    """
+    df = hist.copy()
+    close = df["Close"].astype(float)
+    c = float(feat["close"])
+    atr = float(feat["atr"])
     if not np.isfinite(atr) or atr <= 0:
-        atr = max(feat.close * 0.01, 1.0)
+        atr = max(c * 0.01, 1.0)
+
+    entry = float(entry_zone["center"])
+    in_low = float(entry_zone["in_low"])
+
+    swing_low = _swing_low(df, lookback=12)
 
     # STOP
     if setup_type == "A":
-        stop = in_low - 0.7 * atr  # IN_low - 0.7ATR
-        # 直近安値が近い場合（より下へ）
-        sl = _swing_low(hist, lookback=12)
-        if np.isfinite(sl):
-            stop = min(stop, sl - 0.2 * atr)
-    elif setup_type == "B":
-        stop = in_center - 1.0 * atr
-        sl = _swing_low(hist, lookback=12)
-        if np.isfinite(sl):
-            stop = min(stop, sl - 0.2 * atr)
-    else:
         stop = in_low - 0.7 * atr
-
-    # STOPの下限（近すぎ事故を避ける）
-    stop = float(min(stop, in_center - 0.3 * atr))
-    if stop >= in_center:
-        stop = float(in_center - 1.0 * atr)
-
-    risk = in_center - stop
-    risk = risk if risk > 0 else max(atr * 0.8, 1.0)
-
-    # TP1/TP2
-    tp1 = in_center + 1.5 * risk
-    tp2 = in_center + 3.0 * risk
-
-    # 地合いで現実補正（TPは地合い悪いほど控えめ）
-    if market_score <= 45 or delta3d <= -5:
-        tp1 *= 0.98
-        tp2 *= 0.96
-    elif market_score >= 70 and delta3d >= 0:
-        tp1 *= 1.01
-        tp2 *= 1.02
-
-    rr = (tp2 - in_center) / risk if risk > 0 else 0.0
-    rr = float(rr)
-
-    # Pwin推定（代理特徴）
-    p = 0.30
-    # TrendStrength: MA20上&傾き
-    if feat.close > feat.ma20 > feat.ma50:
-        p += 0.08
-    if np.isfinite(feat.ma20_slope_5d) and feat.ma20_slope_5d > 0:
-        p += float(clamp(feat.ma20_slope_5d * 10.0, 0.0, 0.06))
-    # RSI（過熱なし）
-    if 40 <= feat.rsi14 <= 62:
-        p += 0.06
-    elif 62 < feat.rsi14 <= 70:
-        p += 0.02
     else:
-        p -= 0.03
+        stop = entry - 1.0 * atr
+    # structural protection
+    stop = min(stop, swing_low - 0.2 * atr)
 
-    # VolumeQuality（A:押しで枯れ、B:ブレイクで増）
-    if setup_type == "A":
-        if np.isfinite(feat.volume) and np.isfinite(feat.vol_ma20) and feat.vol_ma20 > 0:
-            if feat.volume < feat.vol_ma20:
-                p += 0.03
-    if setup_type == "B":
-        if np.isfinite(feat.volume) and np.isfinite(feat.vol_ma20) and feat.vol_ma20 > 0:
-            if feat.volume >= 1.5 * feat.vol_ma20:
-                p += 0.04
+    # clamp stop distance
+    stop_dist = entry - stop
+    min_dist = 0.02 * entry
+    max_dist = 0.10 * entry
+    if stop_dist < min_dist:
+        stop = entry - min_dist
+    if stop_dist > max_dist:
+        stop = entry - max_dist
 
-    # Liquidity（ADV20で微加点）
-    adv = feat.turnover_ma20
-    if np.isfinite(adv):
-        if adv >= 1e9:
-            p += 0.03
-        elif adv >= 2e8:
-            p += 0.015
+    stop_dist = entry - stop
 
-    # Risk（地合い悪化・イベント）
-    if market_score < 50:
-        p -= 0.03
-    if delta3d <= -5:
-        p -= 0.05
-    if major_event:
-        p -= 0.04
+    # Base R plan
+    r = stop_dist
+    tp1 = entry + 1.5 * r
+    tp2 = entry + 3.0 * r
 
-    p = float(clamp(p, 0.15, 0.60))
+    # Cap TP2 by resistance (HH60)
+    hh60 = float(feat["hh60"]) if np.isfinite(feat["hh60"]) else float(df["High"].astype(float).max())
+    cap = hh60 * 0.995
+    # Also cap insane TP
+    cap2 = entry * 1.25
+    tp2 = min(tp2, cap, cap2)
 
-    ev = p * rr - (1.0 - p) * 1.0
-    ev = float(ev)
+    # Recompute RR
+    rr = (tp2 - entry) / (entry - stop) if (entry - stop) > 0 else 0.0
+    rr = float(rr) if np.isfinite(rr) else 0.0
 
-    mult = regime_multiplier(market_score, delta3d, major_event)
-    adj_ev = float(ev * mult)
+    # ExpectedDays (market adaptive k)
+    mkt_score = int(market_ctx["score"])
+    k = 1.0
+    if mkt_score >= 70:
+        k = 1.15
+    elif mkt_score >= 60:
+        k = 1.05
+    elif mkt_score >= 50:
+        k = 1.00
+    else:
+        k = 0.90
 
-    # 速度：ExpectedDays = (TP2-IN)/(k*ATR) k=1.0
-    expected_days = float((tp2 - in_center) / (1.0 * atr)) if atr > 0 else 999.0
-    expected_days = float(clamp(expected_days, 0.5, 30.0))
+    expected_days = (tp2 - entry) / (k * atr) if atr > 0 else 99.0
+    expected_days = float(clamp(expected_days, 1.0, 10.0))
 
-    r_per_day = float(rr / expected_days) if expected_days > 0 else 0.0
+    r_per_day = rr / expected_days if expected_days > 0 else 0.0
 
-    return RREV(
-        stop=float(round(stop, 1)),
-        tp1=float(round(tp1, 1)),
-        tp2=float(round(tp2, 1)),
-        rr=float(rr),
-        pwin=float(p),
-        ev_r=float(ev),
-        adj_ev=float(adj_ev),
-        expected_days=float(expected_days),
-        r_per_day=float(r_per_day),
-        regime_mult=float(mult),
-    )
+    # Pwin proxy
+    rs20 = 0.0
+    if index_close is not None and len(index_close) > 0:
+        rs20 = _stock_vs_index_rs20(close, index_close)
+    pwin = _pwin_proxy(setup_type=setup_type, feat=feat, rs20=rs20)
+
+    ev = pwin * rr - (1.0 - pwin) * 1.0
+    reg_mult = float(market_ctx.get("regime_multiplier", 1.0))
+    adj_ev = ev * reg_mult
+
+    return {
+        "entry": float(round(entry, 1)),
+        "in_low": float(round(entry_zone["in_low"], 1)),
+        "in_high": float(round(entry_zone["in_high"], 1)),
+        "stop": float(round(stop, 1)),
+        "tp1": float(round(tp1, 1)),
+        "tp2": float(round(tp2, 1)),
+        "rr": float(rr),
+        "expected_days": float(expected_days),
+        "r_per_day": float(r_per_day),
+        "pwin": float(pwin),
+        "ev": float(ev),
+        "adj_ev": float(adj_ev),
+        "atr": float(round(atr, 1)),
+        "rs20": float(rs20),
+    }
