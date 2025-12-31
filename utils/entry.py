@@ -1,70 +1,57 @@
-from dataclasses import dataclass
-from typing import Tuple
+from __future__ import annotations
+
+from typing import Dict, Tuple
 
 import numpy as np
 
-from utils.features import Feat
 
-
-@dataclass
-class EntryPlan:
-    in_center: float
-    in_low: float
-    in_high: float
-    deviation_atr: float     # distance(Close, center)/ATR
-    gu_flag: bool
-    action: str              # EXEC_NOW / LIMIT_WAIT / WATCH_ONLY
-
-
-def _safe(v: float) -> float:
-    return float(v) if np.isfinite(v) else float("nan")
-
-
-def make_entry_plan(feat: Feat, setup_type: str) -> EntryPlan:
-    atr = feat.atr14
-    c = feat.close
-    pc = feat.prev_close
-    o = feat.open_ if np.isfinite(feat.open_) else c
+def compute_entry_zone(setup_type: str, feat: dict) -> Dict:
+    """
+    IN_center + band
+    A: center=MA20, band=±0.5ATR
+    B: center=HH20, band=±0.3ATR
+    GU_flag = Open > PrevClose + 1.0ATR
+    distance_atr = abs(Close-center)/ATR
+    Action:
+      EXEC_NOW: within band & not GU & distance<=0.8
+      LIMIT_WAIT: outside band but distance<=0.8 & not GU
+      WATCH_ONLY: GU or distance>0.8
+    """
+    c = float(feat["close"])
+    atr = float(feat["atr"])
+    o = float(feat["open"])
+    prev = float(feat["prev_close"])
 
     if not np.isfinite(atr) or atr <= 0:
         atr = max(c * 0.01, 1.0)
 
     if setup_type == "A":
-        center = feat.ma20
+        center = float(feat["ma20"])
         band = 0.5 * atr
-    elif setup_type == "B":
-        center = feat.hh20
-        band = 0.3 * atr
     else:
-        center = c
-        band = 0.5 * atr
+        center = float(feat["hh20"])
+        band = 0.3 * atr
 
     in_low = center - band
     in_high = center + band
 
-    # GU判定：Open > PrevClose + 1ATR（Openが無いケースは Close で近似）
-    gu_flag = bool(np.isfinite(o) and np.isfinite(pc) and o > pc + 1.0 * atr)
-    if not np.isfinite(o) and np.isfinite(c) and np.isfinite(pc):
-        gu_flag = bool(c > pc + 1.0 * atr)
+    gu_flag = bool(o > (prev + 1.0 * atr))
 
-    deviation = abs(c - center) / atr if np.isfinite(c) else 999.0
+    dist_atr = abs(c - center) / atr if atr > 0 else 999.0
 
-    # 行動分類（仕様書）
-    if gu_flag:
-        action = "WATCH_ONLY"
+    if gu_flag or dist_atr > 0.8:
+        action = "監視のみ"
     else:
-        if in_low <= c <= in_high and deviation <= 0.8:
-            action = "EXEC_NOW"
-        elif deviation <= 0.8:
-            action = "LIMIT_WAIT"
+        if in_low <= c <= in_high:
+            action = "即IN可"
         else:
-            action = "WATCH_ONLY"
+            action = "指値待ち"
 
-    return EntryPlan(
-        in_center=_safe(center),
-        in_low=_safe(in_low),
-        in_high=_safe(in_high),
-        deviation_atr=float(deviation),
-        gu_flag=gu_flag,
-        action=action,
-    )
+    return {
+        "center": float(round(center, 1)),
+        "in_low": float(round(in_low, 1)),
+        "in_high": float(round(in_high, 1)),
+        "gu_flag": gu_flag,
+        "dist_atr": float(dist_atr),
+        "action": action,
+    }
