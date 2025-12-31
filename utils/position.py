@@ -1,57 +1,63 @@
-import os
+from __future__ import annotations
+
 from typing import Tuple
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 
 def load_positions(path: str) -> pd.DataFrame:
-    if not path or not os.path.exists(path):
-        return pd.DataFrame()
     try:
-        df = pd.read_csv(path)
-        return df
+        return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
 
 
-def analyze_positions(pos_df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
-    """positions.csv を軽く要約。total_asset はあれば列から推定。"""
-    if pos_df is None or pos_df.empty:
-        return "- なし", 0.0
-
-    # total_asset を推定（あれば）
-    total_asset = 0.0
-    for col in ("total_asset", "asset", "equity"):
-        if col in pos_df.columns:
-            try:
-                v = float(pos_df[col].dropna().iloc[0])
-                if np.isfinite(v) and v > 0:
-                    total_asset = v
-                    break
-            except Exception:
-                pass
+def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
+    """
+    positions.csv expects at least ticker, entry_price, quantity (optional).
+    If missing or empty -> returns "ノーポジション", 2,000,000
+    """
+    if df is None or df.empty:
+        return "ノーポジション", 2_000_000.0
 
     lines = []
-    # 想定列：ticker, pnl_pct, rr
-    for _, r in pos_df.iterrows():
-        t = str(r.get("ticker", "")).strip()
-        if not t:
+    total_value = 0.0
+
+    for _, row in df.iterrows():
+        ticker = str(row.get("ticker", "")).strip()
+        if not ticker:
             continue
-        pnl = r.get("pnl_pct", r.get("pnl", ""))
-        rr = r.get("rr", "")
+
+        entry_price = float(row.get("entry_price", 0) or 0)
+        qty = float(row.get("quantity", 0) or 0)
+
+        # current
+        cur = entry_price if entry_price > 0 else 0.0
         try:
-            pnl_f = float(pnl)
-            pnl_s = f"{pnl_f:.2f}%"
+            h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
+            if h is not None and not h.empty:
+                cur = float(h["Close"].iloc[-1])
         except Exception:
-            pnl_s = str(pnl) if str(pnl) else "n/a"
-        rr_s = f"{float(rr):.2f}R" if str(rr).strip() not in ("", "nan", "None") else ""
-        if rr_s:
-            lines.append(f"- {t}: 損益 {pnl_s} RR:{rr_s}")
+            pass
+
+        pnl = "n/a"
+        if entry_price > 0 and np.isfinite(cur):
+            pnl_pct = (cur - entry_price) / entry_price * 100.0
+            pnl = f"{pnl_pct:.2f}%"
+
+        value = cur * qty if (np.isfinite(cur) and qty > 0) else 0.0
+        if np.isfinite(value) and value > 0:
+            total_value += value
+
+        if pnl != "n/a":
+            lines.append(f"- {ticker}: 損益 {pnl}")
         else:
-            lines.append(f"- {t}: 損益 {pnl_s}")
+            lines.append(f"- {ticker}: 損益 n/a")
 
     if not lines:
-        lines = ["- なし"]
+        return "ノーポジション", 2_000_000.0
 
-    return "\n".join(lines), float(total_asset)
+    asset_est = total_value if total_value > 0 else 2_000_000.0
+    return "\n".join(lines), float(asset_est)
