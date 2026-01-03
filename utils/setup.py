@@ -1,44 +1,43 @@
 from __future__ import annotations
 
-from typing import Tuple
-
 import numpy as np
+import pandas as pd
 
-from utils.util import clamp
+from utils.features import sma, rsi, atr
 
 
-def detect_setup(feat: dict) -> Tuple[str, str]:
+def detect_setup_type(df: pd.DataFrame) -> str:
     """
-    Return: (setup_type, reason_if_fail)
-    setup_type: "A" | "B" | "-"
+    A: トレンド押し目
+    B: ブレイク初動（厳選）
     """
-    c = feat["close"]
-    ma20 = feat["ma20"]
-    ma50 = feat["ma50"]
-    atr = feat["atr"]
-    rsi = feat["rsi"]
-    ma20_slope5 = feat["ma20_slope5"]
+    if df is None or len(df) < 80:
+        return "-"
 
-    if not (np.isfinite(c) and np.isfinite(ma20) and np.isfinite(ma50) and np.isfinite(atr) and np.isfinite(rsi)):
-        return "-", "データ不足"
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
 
-    # Setup A: trend pullback
-    cond_trend = (c > ma20 > ma50) and (ma20_slope5 > 0)
-    cond_pullback = abs(c - ma20) <= 0.8 * atr
-    cond_rsi = (40 <= rsi <= 62)
+    c = float(close.iloc[-1])
+    ma20 = sma(close, 20)
+    ma50 = sma(close, 50)
+    r = rsi(close, 14)
+    a = atr(df, 14)
+    if not np.isfinite(a) or a <= 0:
+        return "-"
 
-    if cond_trend and cond_pullback and cond_rsi:
-        return "A", ""
+    # A: MA構造 + 押し目(20-50付近) + 過熱なし
+    if np.isfinite(ma20) and np.isfinite(ma50) and c > ma20 > ma50 and 35 <= r <= 70:
+        # 押し目：|Close - MA20| <= 0.8ATR
+        if abs(c - ma20) <= 0.8 * a:
+            return "A"
 
-    # Setup B: breakout
-    hh20 = feat["hh20"]
-    vol_last = feat["vol_last"]
-    vol_ma20 = feat["vol_ma20"]
+    # B: 20日高値ブレイク + 出来高増（追いかけ禁止なので“形だけ”）
+    if len(close) >= 25:
+        hh20 = float(high.iloc[-21:-1].max())
+        vol_ma20 = float((vol * close).rolling(20).mean().iloc[-1]) if len(close) >= 20 else np.nan
+        value_now = float(vol.iloc[-1] * close.iloc[-1]) if np.isfinite(vol.iloc[-1]) else np.nan
+        if c > hh20 and np.isfinite(value_now) and np.isfinite(vol_ma20) and value_now >= 1.5 * vol_ma20:
+            return "B"
 
-    cond_break = np.isfinite(hh20) and (c > hh20)
-    cond_vol = np.isfinite(vol_last) and np.isfinite(vol_ma20) and (vol_ma20 > 0) and (vol_last >= 1.5 * vol_ma20)
-
-    if cond_break and cond_vol and (c > ma50):
-        return "B", ""
-
-    return "-", "形(A/B)不一致"
+    return "-"
