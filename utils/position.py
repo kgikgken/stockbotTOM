@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from utils.util import safe_float
+
 
 def load_positions(path: str) -> pd.DataFrame:
     try:
@@ -17,7 +19,7 @@ def load_positions(path: str) -> pd.DataFrame:
 def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
     """
     positions.csv は最低限 ticker, entry_price, quantity を想定（無くても落ちない）
-    戻り: (pos_text, total_asset_est)
+    total_asset は「保有評価額」推定（ノーポジなら 2,000,000）
     """
     if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
@@ -30,15 +32,14 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         if not ticker:
             continue
 
-        entry_price = float(row.get("entry_price", 0) or 0)
-        qty = float(row.get("quantity", 0) or 0)
+        entry_price = safe_float(row.get("entry_price", 0) or 0, 0.0)
+        qty = safe_float(row.get("quantity", 0) or 0, 0.0)
 
-        # 現値
         cur = entry_price
         try:
-            h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
+            h = yf.Ticker(ticker).history(period="10d", auto_adjust=True)
             if h is not None and not h.empty:
-                cur = float(h["Close"].iloc[-1])
+                cur = safe_float(h["Close"].iloc[-1], entry_price)
         except Exception:
             pass
 
