@@ -2,23 +2,33 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# ============================================================
-# Config
-# ============================================================
 UNIVERSE_PATH = "universe_jpx.csv"
-MAX_TICKERS_PER_SECTOR = 25      # 代表性確保（過学習防止）
-ADV20_MIN_JPY = 100_000_000      # 表示用の最低流動性（選定理由には使わない）
+
+# セクター統一カラム候補
+SECTOR_COL_CANDIDATES = ["sector", "industry_big", "industry", "sector_name"]
 
 
-def _fetch_ohlcv(ticker: str, period: str = "40d") -> pd.DataFrame | None:
+def _safe_float(x, default=np.nan) -> float:
     try:
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+        v = float(x)
+        if not np.isfinite(v):
+            return float(default)
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _load_universe(path: str = UNIVERSE_PATH) -> Optional[pd.DataFrame]:
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
         if df is None or df.empty:
             return None
         return df
@@ -26,93 +36,122 @@ def _fetch_ohlcv(ticker: str, period: str = "40d") -> pd.DataFrame | None:
         return None
 
 
-def _pct_5d(df: pd.DataFrame) -> float:
-    if df is None or len(df) < 6:
-        return float("nan")
-    c0 = float(df["Close"].iloc[-6])
-    c1 = float(df["Close"].iloc[-1])
-    if not np.isfinite(c0) or not np.isfinite(c1) or c0 <= 0:
-        return float("nan")
-    return float((c1 / c0 - 1.0) * 100.0)
-
-
-def _adv20_jpy(df: pd.DataFrame) -> float:
-    if df is None or "Close" not in df.columns or "Volume" not in df.columns or len(df) < 20:
-        return float("nan")
-    v = (df["Close"].astype(float) * df["Volume"].astype(float)).rolling(20).mean().iloc[-1]
-    return float(v) if np.isfinite(v) else float("nan")
-
-
-def _load_universe() -> pd.DataFrame:
-    if not os.path.exists(UNIVERSE_PATH):
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(UNIVERSE_PATH)
-    except Exception:
-        return pd.DataFrame()
-
-
-def top_sectors_5d(top_n: int = 5) -> List[Tuple[str, float]]:
+def _infer_cols(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     """
-    5日リターンでのセクター上位表示（判断補助のみ）。
-    ・母集団は universe_jpx.csv の全銘柄
-    ・各セクターは代表銘柄を最大 MAX_TICKERS_PER_SECTOR 抽出
-    ・極端な薄商いは平均算出から除外（表示品質向上）
-    戻り：[(sector, avg_5d_pct), ...]
+    returns: (ticker_col, sector_col)
+    """
+    if df is None or df.empty:
+        return None, None
+
+    ticker_col = None
+    if "ticker" in df.columns:
+        ticker_col = "ticker"
+    elif "code" in df.columns:
+        ticker_col = "code"
+
+    sector_col = None
+    for c in SECTOR_COL_CANDIDATES:
+        if c in df.columns:
+            sector_col = c
+            break
+
+    return ticker_col, sector_col
+
+
+def _fetch_change_pct(ticker: str, days: int = 5) -> float:
+    """
+    days=5 なら「直近6営業日」から最初と最後で変化率
+    """
+    try:
+        df = yf.Ticker(ticker).history(period=f"{days+1}d", auto_adjust=True)
+        if df is None or df.empty or len(df) < 2:
+            return np.nan
+        c = df["Close"].astype(float)
+        return float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0)
+    except Exception:
+        return np.nan
+
+
+def build_sector_rank_5d(
+    top_n: int = 5,
+    max_tickers_per_sector: int = 25,
+    min_valid: int = 5
+) -> Tuple[List[Tuple[str, float]], Dict[str, int], Dict[str, float]]:
+    """
+    セクターは「選定理由」ではなく、判断補助/制約用。
+    - 上位表示: top_n
+    - 各セクターの平均5日リターンでランキング
+    戻り：
+      top_list: [(sector, avg5d), ...]
+      rank_map: {sector: rank(1..)}
+      score_map:{sector: avg5d}
     """
     uni = _load_universe()
-    if uni.empty:
-        return []
+    if uni is None:
+        return [], {}, {}
 
-    # column resolve
-    if "sector" in uni.columns:
-        sec_col = "sector"
-    elif "industry_big" in uni.columns:
-        sec_col = "industry_big"
-    else:
-        return []
+    t_col, s_col = _infer_cols(uni)
+    if t_col is None or s_col is None:
+        return [], {}, {}
 
-    if "ticker" in uni.columns:
-        t_col = "ticker"
-    elif "code" in uni.columns:
-        t_col = "code"
-    else:
-        return []
+    # セクター別に最大max_tickers_per_sectorだけ取得して平均（計算負荷を抑える）
+    sector_scores: Dict[str, float] = {}
+    rank_map: Dict[str, int] = {}
 
-    results: List[Tuple[str, float]] = []
-
-    for sec, sub in uni.groupby(sec_col):
-        tickers = [str(x) for x in sub[t_col].dropna().tolist()][:MAX_TICKERS_PER_SECTOR]
+    for sec, sub in uni.groupby(s_col):
+        sec_name = str(sec).strip() if str(sec).strip() else "不明"
+        tickers = sub[t_col].astype(str).tolist()
         if not tickers:
             continue
 
+        tickers = tickers[:max_tickers_per_sector]
+
         vals = []
         for t in tickers:
-            df = _fetch_ohlcv(t, "40d")
-            if df is None:
-                continue
-            adv = _adv20_jpy(df)
-            # 表示の質を上げるため、極端な薄商いは除外
-            if np.isfinite(adv) and adv < ADV20_MIN_JPY:
-                continue
-            p = _pct_5d(df)
-            if np.isfinite(p):
-                vals.append(p)
+            chg = _fetch_change_pct(t, days=5)
+            if np.isfinite(chg):
+                vals.append(chg)
 
-        if vals:
-            results.append((str(sec), float(np.mean(vals))))
+        if len(vals) < min_valid:
+            continue
 
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results[:top_n]
+        sector_scores[sec_name] = float(np.mean(vals))
+
+    if not sector_scores:
+        return [], {}, {}
+
+    # rank作成
+    sorted_items = sorted(sector_scores.items(), key=lambda x: x[1], reverse=True)
+    for i, (sec, v) in enumerate(sorted_items, start=1):
+        rank_map[sec] = i
+
+    top_list = [(sec, v) for sec, v in sorted_items[:top_n]]
+    return top_list, rank_map, sector_scores
 
 
-def sector_rank_map(top_n: int = 10) -> Dict[str, int]:
+def get_sector_rank(sector: str, rank_map: Dict[str, int]) -> int:
+    if not sector:
+        return 999
+    return int(rank_map.get(str(sector), 999))
+
+
+def sector_constraint_reason(
+    sector: str,
+    rank_map: Dict[str, int],
+    *,
+    top_k: int = 5,
+    enforce: bool = False
+) -> Optional[str]:
     """
-    セクター順位マップ（1位が最強）。
-    EV補正や説明用に利用。
+    v2方針：
+    - セクターは判断補助。選定理由ではない。
+    - ただし「制約」として使いたい場合のみ reason を返す。
+    enforce=False なら理由は返さない（=落とさない）
     """
-    ranked = top_sectors_5d(top_n=top_n)
-    out: Dict[str, int] = {}
-    for i, (sec, _) in enumerate(ranked, start=1):
-        out[sec] = i
-    return out
+    if not enforce:
+        return None
+
+    r = get_sector_rank(sector, rank_map)
+    if r <= top_k:
+        return None
+    return f"セクター順位圏外(>{top_k})"
