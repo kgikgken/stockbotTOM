@@ -1,155 +1,155 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Dict, Tuple
+
 import numpy as np
 import pandas as pd
 
-from utils.features import atr, sma, rsi, turnover_avg
-from utils.util import clamp
+from utils.features import FeaturePack, estimate_pwin
+from utils.util import safe_float
 
 
-def gu_flag(df: pd.DataFrame) -> bool:
-    """
-    GU判定（概算）:
-      Open > PrevClose + 1.0ATR
-    """
-    if df is None or len(df) < 3:
-        return False
-    a = atr(df, 14)
-    if not np.isfinite(a) or a <= 0:
-        return False
-    prev_close = float(df["Close"].astype(float).iloc[-2])
-    op = float(df["Open"].astype(float).iloc[-1])
-    return bool(op > prev_close + 1.0 * a)
-
-
-def calc_stop_tp(df: pd.DataFrame, setup_type: str, in_center: float, in_low: float) -> tuple[float, float, float]:
-    """
-    Stop/TP1/TP2 を“仕様書寄せ”で決める
-    - Stop:
-      A: IN_low - 0.7ATR（≒ center - 1.2ATR）
-      B: BreakLine - 1.0ATR
-    - TP1: 1.5R, TP2: 3.0R
-    """
-    c = float(df["Close"].astype(float).iloc[-1])
-    a = atr(df, 14)
-    if not np.isfinite(a) or a <= 0:
-        a = max(c * 0.01, 1.0)
-
-    if setup_type == "B":
-        stop = in_center - 1.0 * a
-    else:
-        stop = in_low - 0.7 * a
-
-    # 直近安値バッファ
-    lookback = 12
-    swing_low = float(df["Low"].astype(float).tail(lookback).min())
-    stop = min(stop, swing_low - 0.2 * a)
-
-    # クランプ（事故防止）
-    stop = float(in_center * (1.0 - 0.12)) if stop < in_center * (1.0 - 0.12) else float(stop)
-    stop = float(in_center * (1.0 - 0.02)) if stop > in_center * (1.0 - 0.02) else float(stop)
-
-    risk = max(1e-9, in_center - stop)
-    tp1 = in_center + 1.5 * risk
-    tp2 = in_center + 3.0 * risk
-    return float(stop), float(tp1), float(tp2)
-
-
-def estimate_pwin(df: pd.DataFrame, sector_rank: int | None, adv20: float, gu: bool, mkt_score: int) -> float:
-    """
-    ログ無しの“代理Pwin”推定（0-1）
-    - TrendStrength: MA位置/傾き
-    - RSI: 過熱回避
-    - Liquidity: ADV20
-    - SectorRank: 上位ほど少し加点（選定理由ではなく補助）
-    - GU: 強烈減点
-    - Market: 地合い
-    """
+def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    if df is None or len(df) < period + 2:
+        return float("nan")
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
     close = df["Close"].astype(float)
-    c = float(close.iloc[-1])
-    ma20 = sma(close, 20)
-    ma50 = sma(close, 50)
-    r = rsi(close, 14)
-
-    p = 0.35
-
-    if np.isfinite(ma20) and np.isfinite(ma50):
-        if c > ma20 > ma50:
-            p += 0.10
-        elif c > ma20:
-            p += 0.05
-
-        # ma20 slope（5日）
-        if len(close) >= 26:
-            ma20_prev = float(close.rolling(20).mean().iloc[-6])
-            if np.isfinite(ma20_prev) and ma20_prev > 0:
-                slope = (ma20 - ma20_prev) / ma20_prev
-                p += float(clamp(slope * 2.5, -0.05, 0.08))
-
-    if np.isfinite(r):
-        if 40 <= r <= 62:
-            p += 0.08
-        elif r < 35 or r > 75:
-            p -= 0.06
-
-    # 流動性（200M以上を基準）
-    if np.isfinite(adv20):
-        if adv20 >= 1e9:
-            p += 0.06
-        elif adv20 >= 2e8:
-            p += 0.03
-        else:
-            p -= 0.05
-
-    # セクター補助（上位5以内だけ微加点）
-    if sector_rank is not None and 1 <= sector_rank <= 5:
-        p += 0.02 * (6 - sector_rank) / 5.0
-
-    # 地合い
-    p += float(clamp((mkt_score - 50) * 0.0025, -0.08, 0.10))
-
-    # GU
-    if gu:
-        p -= 0.25
-
-    return float(clamp(p, 0.05, 0.80))
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    v = tr.rolling(period).mean().iloc[-1]
+    return safe_float(v)
 
 
-def calc_ev(rr: float, pwin: float) -> float:
+@dataclass
+class RRResult:
+    stop: float
+    tp1: float
+    tp2: float
+    rr: float
+    expected_days: float
+    r_per_day: float
+    ev: float
+    adj_ev: float
+    reason: str
+
+
+def compute_rr_ev(
+    hist: pd.DataFrame,
+    fp: FeaturePack,
+    entry_center: float,
+    setup_type: str,
+    sector_rank: int | None,
+    regime_multiplier: float,
+    rday_cap_when_weak: float,
+    mkt_score: int,
+) -> RRResult:
     """
+    固定RR禁止（RRは結果）
+    Stop:
+      A：STOP = IN_low − 0.7ATR（≒ IN_center - 1.2ATR）
+      B：STOP = BreakLine − 1.0ATR
+      + 直近安値が近い場合 min(...)
+    Target:
+      TP2 = min(レジスタンス, measured_move, IN + 3.5ATR)
+      TP1 = IN + 1.5R
+    RR = (TP2-IN)/R
     EV = Pwin*RR - (1-Pwin)*1
+    AdjEV = EV * regime_multiplier
     """
-    rr = float(rr)
-    p = float(pwin)
-    return float(p * rr - (1.0 - p) * 1.0)
+    df = hist.copy()
+    close = df["Close"].astype(float)
 
+    atr = fp.atr if np.isfinite(fp.atr) and fp.atr > 0 else _atr(df, 14)
+    if not np.isfinite(atr) or atr <= 0:
+        atr = max(fp.close * 0.01, 1.0)
 
-def regime_multiplier(mkt_score: int, delta3d: float, event_risk: bool) -> float:
-    mult = 1.00
-    if mkt_score >= 60 and delta3d >= 0:
-        mult *= 1.05
-    if delta3d <= -5:
-        mult *= 0.70
-    if event_risk:
-        mult *= 0.75
-    return float(mult)
+    in_center = float(entry_center)
 
+    # swing low
+    lookback = 12
+    swing_low = safe_float(df["Low"].astype(float).tail(lookback).min())
 
-def expected_days(tp2: float, entry: float, a: float) -> float:
-    """
-    ExpectedDays = (TP2-Entry)/(k*ATR), k=1.0固定（ログ無し）
-    """
-    if not np.isfinite(tp2) or not np.isfinite(entry) or not np.isfinite(a) or a <= 0:
-        return 9.9
-    return float((tp2 - entry) / (1.0 * a))
+    # stop
+    if setup_type == "B":
+        stop_base = in_center - 1.0 * atr
+    else:
+        stop_base = in_center - 1.2 * atr
 
+    # structure stop: swing_low buffer
+    stop = min(stop_base, swing_low - 0.2 * atr) if np.isfinite(swing_low) else stop_base
 
-def r_per_day(rr: float, exp_days: float) -> float:
-    if exp_days <= 0:
-        return 0.0
-    return float(rr / exp_days)
+    # clamp stop distance
+    r = in_center - stop
+    if not np.isfinite(r) or r <= 0:
+        return RRResult(0, 0, 0, 0, 99, 0, -9, -9, "STOP算出失敗")
+    if r / in_center < 0.02:
+        stop = in_center * (1 - 0.02)
+        r = in_center - stop
+    if r / in_center > 0.10:
+        stop = in_center * (1 - 0.10)
+        r = in_center - stop
 
+    # resistance (60d high)
+    hi_window = 60 if len(close) >= 60 else len(close)
+    resistance = safe_float(close.tail(hi_window).max())
 
-def adv20_from_df(df: pd.DataFrame) -> float:
-    t = turnover_avg(df, 20)
-    return float(t) if np.isfinite(t) else float("nan")
+    # measured move: (20d high - 20d low) added to entry
+    mm_win = 20 if len(close) >= 20 else len(close)
+    mm_hi = safe_float(df["High"].astype(float).tail(mm_win).max())
+    mm_lo = safe_float(df["Low"].astype(float).tail(mm_win).min())
+    measured_move = in_center + max(0.0, (mm_hi - mm_lo))
+
+    tp2_candidates = []
+    if np.isfinite(resistance) and resistance > 0:
+        tp2_candidates.append(resistance * 0.995)
+    if np.isfinite(measured_move) and measured_move > 0:
+        tp2_candidates.append(measured_move)
+    tp2_candidates.append(in_center + 3.5 * atr)
+
+    tp2 = float(min(tp2_candidates))
+    if tp2 <= in_center:
+        tp2 = in_center + 2.2 * r  # fail-safe
+
+    rr = (tp2 - in_center) / r
+
+    # tp1 = in + 1.5R
+    tp1 = in_center + 1.5 * r
+
+    # expected days: (TP2-IN)/(k*ATR)
+    k = 1.0
+    expected_days = (tp2 - in_center) / (k * atr) if atr > 0 else 99.0
+    expected_days = float(np.clip(expected_days, 1.0, 7.0))
+    r_per_day = float(rr / expected_days) if expected_days > 0 else 0.0
+
+    # Pwin & EV
+    pwin = estimate_pwin(fp, sector_rank)
+    ev = float(pwin * rr - (1.0 - pwin) * 1.0)
+    adj_ev = float(ev * regime_multiplier)
+
+    # 地合い弱い時の速度上限制御（仕様③）
+    if mkt_score < 55 and r_per_day > rday_cap_when_weak:
+        return RRResult(
+            stop=stop,
+            tp1=tp1,
+            tp2=tp2,
+            rr=float(rr),
+            expected_days=float(expected_days),
+            r_per_day=float(r_per_day),
+            ev=float(ev),
+            adj_ev=float(adj_ev),
+            reason="R/day過大(地合い弱)→WATCH_ONLY",
+        )
+
+    return RRResult(
+        stop=stop,
+        tp1=tp1,
+        tp2=tp2,
+        rr=float(rr),
+        expected_days=float(expected_days),
+        r_per_day=float(r_per_day),
+        ev=float(ev),
+        adj_ev=float(adj_ev),
+        reason="ok",
+    )
