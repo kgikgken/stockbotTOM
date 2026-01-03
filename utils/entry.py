@@ -1,35 +1,72 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Tuple
+
 import numpy as np
-import pandas as pd
 
-from utils.features import sma, atr
+from utils.features import FeaturePack
 
 
-def calc_in_band(df: pd.DataFrame, setup_type: str) -> tuple[float, float, float]:
+@dataclass
+class EntryPlan:
+    in_center: float
+    band_low: float
+    band_high: float
+    dist_atr: float
+    gu_flag: bool
+    action: str  # EXEC_NOW / LIMIT_WAIT / WATCH_ONLY
+    reason: str
+
+
+def build_entry_plan(fp: FeaturePack, setup_type: str, hh20: float) -> EntryPlan:
     """
-    IN_center と帯 (low, high)
-    A: SMA20 ± 0.5ATR
-    B: HH20 ± 0.3ATR
+    仕様：
+      A：IN_center=MA20、帯=±0.5ATR
+      B：IN_center=HH20、帯=±0.3ATR
+      GU_flag：Open > PrevClose + 1.0ATR（proxy）
+      乖離率：distance(Close, IN_center)/ATR
+      行動：
+        EXEC_NOW：帯の中 & GUなし & 乖離小 &（追加）当日出来高<20日平均出来高
+        LIMIT_WAIT：帯の外だが 0.8以内（指値）
+        WATCH_ONLY：GU or 乖離>0.8
     """
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
+    atr = fp.atr if np.isfinite(fp.atr) and fp.atr > 0 else max(fp.close * 0.01, 1.0)
 
-    c = float(close.iloc[-1])
-    a = atr(df, 14)
-    if not np.isfinite(a) or a <= 0:
-        a = max(c * 0.01, 1.0)
-
-    if setup_type == "B" and len(high) >= 25:
-        hh20 = float(high.iloc[-21:-1].max())
-        center = hh20
-        w = 0.3 * a
+    if setup_type == "B":
+        in_center = float(hh20)
+        w = 0.3 * atr
     else:
-        center = sma(close, 20)
-        if not np.isfinite(center):
-            center = c
-        w = 0.5 * a
+        in_center = float(fp.ma20) if np.isfinite(fp.ma20) else float(fp.close)
+        w = 0.5 * atr
 
-    low = float(center - w)
-    high_ = float(center + w)
-    return float(center), low, high_
+    band_low = in_center - w
+    band_high = in_center + w
+
+    dist_atr = abs(fp.close - in_center) / atr if atr > 0 else 999.0
+
+    gu_flag = False
+    if np.isfinite(fp.gap_atr):
+        gu_flag = bool(fp.gap_atr >= 1.0)
+
+    # basic action
+    if gu_flag:
+        return EntryPlan(in_center, band_low, band_high, float(dist_atr), True, "WATCH_ONLY", "GU危険域")
+
+    if dist_atr > 0.8:
+        return EntryPlan(in_center, band_low, band_high, float(dist_atr), False, "WATCH_ONLY", "乖離>0.8ATR")
+
+    in_band = (band_low <= fp.close <= band_high)
+
+    # EXEC_NOW 厳格化（出来高条件）
+    vol_quiet_ok = False
+    if np.isfinite(fp.vol_last) and np.isfinite(fp.vol_ma20) and fp.vol_ma20 > 0:
+        vol_quiet_ok = bool(fp.vol_last < fp.vol_ma20)
+
+    if in_band and vol_quiet_ok:
+        return EntryPlan(in_center, band_low, band_high, float(dist_atr), False, "EXEC_NOW", "帯内+GUなし+出来高枯れ")
+
+    # それ以外は基本 LIMIT_WAIT
+    if in_band and not vol_quiet_ok:
+        return EntryPlan(in_center, band_low, band_high, float(dist_atr), False, "LIMIT_WAIT", "帯内だが出来高が枯れてない")
+    return EntryPlan(in_center, band_low, band_high, float(dist_atr), False, "LIMIT_WAIT", "帯外→指値待ち")
