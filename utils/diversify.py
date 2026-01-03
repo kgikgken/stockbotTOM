@@ -1,137 +1,80 @@
-# utils/diversify.py
 from __future__ import annotations
 
-from typing import List, Dict
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
+
 import numpy as np
 import pandas as pd
 
 
-# -------------------------------------------------
-# 相関計算（20日リターン）
-# -------------------------------------------------
-def calc_corr_matrix(
-    price_df: pd.DataFrame,
-    lookback: int = 20,
-) -> pd.DataFrame:
-    """
-    price_df:
-        index = date
-        columns = ticker
-        values = Close
-    """
-    if price_df is None or price_df.shape[1] < 2:
-        return pd.DataFrame()
-
-    returns = price_df.pct_change().dropna()
-    returns = returns.tail(lookback)
-    if len(returns) < lookback // 2:
-        return pd.DataFrame()
-
-    return returns.corr()
+@dataclass
+class DiversifyConfig:
+    max_per_sector: int = 2
+    corr_lookback: int = 20
+    corr_limit: float = 0.75
 
 
-# -------------------------------------------------
-# 分散ルール適用
-# -------------------------------------------------
-def apply_diversification(
+def _corr(a: pd.Series, b: pd.Series) -> float:
+    try:
+        x = a.pct_change(fill_method=None).dropna()
+        y = b.pct_change(fill_method=None).dropna()
+        n = min(len(x), len(y))
+        if n < 10:
+            return 0.0
+        return float(np.corrcoef(x.tail(n), y.tail(n))[0, 1])
+    except Exception:
+        return 0.0
+
+
+def apply_diversify(
     candidates: List[Dict],
-    *,
-    price_df: pd.DataFrame | None,
-    max_per_sector: int = 2,
-    corr_threshold: float = 0.75,
-    max_final: int = 5,
-) -> List[Dict]:
+    price_hist_map: Dict[str, pd.DataFrame],
+    cfg: DiversifyConfig = DiversifyConfig(),
+) -> Tuple[List[Dict], List[Dict]]:
     """
-    candidates:
-        Sorted by priority already (AdjEV desc, R/day desc, etc)
-
-        必須キー:
-          - ticker
-          - sector
-          - adj_ev
-          - r_per_day
-
-    ルール:
-      1. 同一セクター最大 max_per_sector
-      2. corr > threshold の銘柄は同時採用禁止
-      3. 上から順に機械的に採用
+    - 同一セクター最大2
+    - 20日相関 > 0.75 は同時採用しない
+    戻り: (selected, rejected_with_reason)
     """
-
-    if not candidates:
-        return []
-
     selected: List[Dict] = []
+    rejected: List[Dict] = []
+
     sector_count: Dict[str, int] = {}
 
-    corr_mat = None
-    if price_df is not None and price_df.shape[1] >= 2:
-        corr_mat = calc_corr_matrix(price_df)
+    for c in candidates:
+        sec = str(c.get("sector", "不明"))
+        ticker = str(c.get("ticker", ""))
 
-    for cand in candidates:
-        if len(selected) >= max_final:
-            break
-
-        ticker = cand.get("ticker")
-        sector = cand.get("sector", "UNKNOWN")
-
-        # ---- セクター上限 ----
-        cnt = sector_count.get(sector, 0)
-        if cnt >= max_per_sector:
-            cand["drop_reason"] = "セクター上限"
+        # セクター上限
+        if sector_count.get(sec, 0) >= cfg.max_per_sector:
+            rc = dict(c)
+            rc["reject_reason"] = "セクター上限"
+            rejected.append(rc)
             continue
 
-        # ---- 相関チェック ----
-        high_corr = False
-        if corr_mat is not None and ticker in corr_mat.columns:
-            for sel in selected:
-                t2 = sel.get("ticker")
-                if t2 in corr_mat.columns:
-                    corr = corr_mat.loc[ticker, t2]
-                    if np.isfinite(corr) and corr >= corr_threshold:
-                        high_corr = True
-                        cand["drop_reason"] = f"相関高({corr:.2f})"
-                        break
+        # 相関チェック
+        ok = True
+        for s in selected:
+            t2 = str(s.get("ticker", ""))
+            h1 = price_hist_map.get(ticker)
+            h2 = price_hist_map.get(t2)
+            if h1 is None or h2 is None:
+                continue
+            if "Close" not in h1.columns or "Close" not in h2.columns:
+                continue
+            corr = _corr(h1["Close"].astype(float).tail(cfg.corr_lookback),
+                         h2["Close"].astype(float).tail(cfg.corr_lookback))
+            if corr >= cfg.corr_limit:
+                ok = False
+                rc = dict(c)
+                rc["reject_reason"] = f"相関高({corr:.2f})"
+                rejected.append(rc)
+                break
 
-        if high_corr:
+        if not ok:
             continue
 
-        # ---- 採用 ----
-        selected.append(cand)
-        sector_count[sector] = cnt + 1
+        selected.append(c)
+        sector_count[sec] = sector_count.get(sec, 0) + 1
 
-    return selected
-
-
-# -------------------------------------------------
-# 監視リスト理由付け（落ちた理由を整理）
-# -------------------------------------------------
-def build_watchlist(
-    all_candidates: List[Dict],
-    selected: List[Dict],
-    *,
-    max_watch: int = 10,
-) -> List[Dict]:
-    """
-    採用されなかったが、
-    形・RRはOK → 今日は入らない銘柄を整理
-    """
-
-    selected_tickers = {c["ticker"] for c in selected}
-    watch: List[Dict] = []
-
-    for c in all_candidates:
-        if c["ticker"] in selected_tickers:
-            continue
-
-        reason = c.get("drop_reason", "")
-        if not reason:
-            continue
-
-        c2 = c.copy()
-        c2["watch_reason"] = reason
-        watch.append(c2)
-
-        if len(watch) >= max_watch:
-            break
-
-    return watch
+    return selected, rejected
