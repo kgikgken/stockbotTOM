@@ -2,98 +2,80 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Optional
-
-import pandas as pd
 
 from utils.util import jst_today_str, jst_today_date
-from utils.market import build_market_context
+from utils.market import enhance_market_score, recommend_leverage, calc_max_position
 from utils.sector import top_sectors_5d
 from utils.events import build_event_warnings
 from utils.position import load_positions, analyze_positions
-from utils.screener import run_screening
+from utils.screener import run_swing_screening
 from utils.report import build_report
-from utils.line import send_line_message
+from utils.line import send_line
 
 
 UNIVERSE_PATH = "universe_jpx.csv"
 POSITIONS_PATH = "positions.csv"
 EVENTS_PATH = "events.csv"
-
 WORKER_URL = os.getenv("WORKER_URL")
-
-
-def _load_universe(path: str) -> pd.DataFrame:
-    try:
-        df = pd.read_csv(path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to read {path}: {e}") from e
-
-    # Accept "ticker" or "code"
-    if "ticker" not in df.columns and "code" not in df.columns:
-        raise RuntimeError("universe_jpx.csv must have 'ticker' or 'code' column")
-
-    # Normalize ticker column name
-    if "ticker" not in df.columns and "code" in df.columns:
-        df = df.rename(columns={"code": "ticker"})
-
-    # Optional cols
-    if "name" not in df.columns:
-        df["name"] = df["ticker"].astype(str)
-    if "sector" not in df.columns and "industry_big" in df.columns:
-        df["sector"] = df["industry_big"]
-    if "sector" not in df.columns:
-        df["sector"] = "不明"
-
-    return df
 
 
 def main() -> None:
     today_str = jst_today_str()
     today_date = jst_today_date()
 
-    uni = _load_universe(UNIVERSE_PATH)
+    # 市況
+    mkt = enhance_market_score()
+    mkt_score = int(mkt.get("score", 50))
+    delta3d = float(mkt.get("delta3d", 0.0))
 
-    mkt = build_market_context()
-
-    sectors = top_sectors_5d(universe_path=UNIVERSE_PATH, top_n=5)
-    events = build_event_warnings(events_path=EVENTS_PATH, today_date=today_date)
-
+    # ポジション
     pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset_est = analyze_positions(pos_df, mkt_score=int(mkt["score"]))
+    pos_text, total_asset = analyze_positions(pos_df, mkt_score=mkt_score)
+    if total_asset <= 0:
+        total_asset = 2_000_000.0
 
-    # Safety fallback
-    if total_asset_est is None or total_asset_est <= 0:
-        total_asset_est = 2_000_000.0
+    # レバ/建玉
+    lev, lev_comment = recommend_leverage(mkt_score, delta3d=delta3d)
+    max_pos = calc_max_position(total_asset, lev)
 
-    screening = run_screening(
-        universe_df=uni,
+    # セクター / イベント
+    sectors = top_sectors_5d(top_n=5)
+    events = build_event_warnings(today_date, events_path=EVENTS_PATH)
+
+    # スクリーニング
+    swing_result = run_swing_screening(
         today_date=today_date,
-        market_ctx=mkt,
-        total_asset=total_asset_est,
+        universe_path=UNIVERSE_PATH,
+        mkt=mkt,
+        positions_df=pos_df,
     )
 
+    # レポート
     report = build_report(
         today_str=today_str,
-        market_ctx=mkt,
+        mkt=mkt,
+        lev=lev,
+        lev_comment=lev_comment,
+        max_position=max_pos,
         sectors=sectors,
         events=events,
-        screening=screening,
+        swing=swing_result,
         pos_text=pos_text,
-        total_asset=total_asset_est,
+        total_asset=total_asset,
     )
 
     print(report)
 
-    # Send LINE (same "delivered" spec)
-    send_line_message(text=report, worker_url=WORKER_URL)
+    # LINE送信（届く方式：json={"text": "..."} を分割送信）
+    if WORKER_URL:
+        send_line(WORKER_URL, report)
+    else:
+        # WORKER_URL無いときは標準出力のみ
+        pass
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
-        # Never crash silently in Actions; print error block
-        print("=== stockbotTOM ERROR ===")
-        print(str(e))
-        raise
+    except KeyboardInterrupt:
+        sys.exit(130)
