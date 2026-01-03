@@ -16,10 +16,10 @@ def load_positions(path: str) -> pd.DataFrame:
 
 def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
     """
-    positions.csv expects at least ticker, entry_price, quantity (optional).
-    If missing or empty -> returns "ノーポジション", 2,000,000
+    positions.csv は最低限 ticker, entry_price, quantity を想定（無くても落ちない）
+    戻り: (pos_text, total_asset_est)
     """
-    if df is None or df.empty:
+    if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
 
     lines = []
@@ -33,8 +33,8 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         entry_price = float(row.get("entry_price", 0) or 0)
         qty = float(row.get("quantity", 0) or 0)
 
-        # current
-        cur = entry_price if entry_price > 0 else 0.0
+        # 現値
+        cur = entry_price
         try:
             h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
             if h is not None and not h.empty:
@@ -42,17 +42,13 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         except Exception:
             pass
 
-        pnl = "n/a"
-        if entry_price > 0 and np.isfinite(cur):
-            pnl_pct = (cur - entry_price) / entry_price * 100.0
-            pnl = f"{pnl_pct:.2f}%"
-
-        value = cur * qty if (np.isfinite(cur) and qty > 0) else 0.0
+        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else float("nan")
+        value = cur * qty
         if np.isfinite(value) and value > 0:
             total_value += value
 
-        if pnl != "n/a":
-            lines.append(f"- {ticker}: 損益 {pnl}")
+        if np.isfinite(pnl_pct):
+            lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%")
         else:
             lines.append(f"- {ticker}: 損益 n/a")
 
