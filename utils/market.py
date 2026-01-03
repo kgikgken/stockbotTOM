@@ -1,90 +1,34 @@
-# utils/market.py
 from __future__ import annotations
-
-from typing import Dict
 
 import numpy as np
 import yfinance as yf
 
-# ============================================================
-# Helpers
-# ============================================================
-def _fetch(symbol: str, period: str = "80d"):
+
+def _chg(symbol: str, days: int) -> float:
+    # days=5 -> "6d" で両端取る
+    period = f"{days+1}d"
     try:
         df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        return df
+        if df is None or df.empty or len(df) < 2:
+            return 0.0
+        c = df["Close"].astype(float)
+        return float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0)
     except Exception:
-        return None
-
-
-def _pct(a: float, b: float) -> float:
-    if not np.isfinite(a) or not np.isfinite(b) or b <= 0:
         return 0.0
-    return float((a / b - 1.0) * 100.0)
 
 
-def _sma(series, n: int):
-    if series is None or len(series) < n:
-        return np.nan
-    return float(series.rolling(n).mean().iloc[-1])
-
-
-# ============================================================
-# Market Regime
-# ============================================================
-def calc_market_score() -> Dict:
+def calc_market_score() -> dict:
     """
-    0-100 の MarketScore（短期スイング用）
-    構成：
-      - Trend: Close > SMA20 > SMA50
-      - Momentum: 5d / 20d リターン
-      - Risk: 直近ボラ上昇・急落の抑制
+    0-100 の“シンプル地合い”
+    - 日経+TOPIXの短期変化を中心に作る
     """
-    idx = _fetch("^TOPX")  # TOPIX 優先
-    if idx is None or len(idx) < 60:
-        return {"score": 50, "comment": "中立", "detail": {}}
+    nk5 = _chg("^N225", 5)
+    tp5 = _chg("^TOPX", 5)
 
-    close = idx["Close"].astype(float)
-    c = float(close.iloc[-1])
-    c5 = float(close.iloc[-6]) if len(close) >= 6 else c
-    c20 = float(close.iloc[-21]) if len(close) >= 21 else c
+    base = 50.0
+    base += float(np.clip((nk5 + tp5) / 2.0, -20, 20))
 
-    sma20 = _sma(close, 20)
-    sma50 = _sma(close, 50)
-
-    score = 50.0
-    detail = {}
-
-    # --- Trend ---
-    if np.isfinite(sma20) and np.isfinite(sma50):
-        if c > sma20 > sma50:
-            score += 10
-            detail["trend"] = "up"
-        elif c < sma20 < sma50:
-            score -= 10
-            detail["trend"] = "down"
-        else:
-            detail["trend"] = "side"
-
-    # --- Momentum ---
-    r5 = _pct(c, c5)
-    r20 = _pct(c, c20)
-    score += np.clip((r5 + r20) * 0.5, -10, 10)
-    detail["r5"] = r5
-    detail["r20"] = r20
-
-    # --- Risk (vol expansion / drawdown) ---
-    ret = close.pct_change(fill_method=None)
-    vola20 = ret.rolling(20).std().iloc[-1]
-    vola5 = ret.rolling(5).std().iloc[-1]
-    if np.isfinite(vola20) and np.isfinite(vola5) and vola5 > vola20 * 1.6:
-        score -= 5
-        detail["risk"] = "vola_up"
-
-    # clamp
-    score = int(np.clip(round(score), 0, 100))
+    score = int(np.clip(round(base), 0, 100))
 
     if score >= 70:
         comment = "強め"
@@ -97,33 +41,72 @@ def calc_market_score() -> Dict:
     else:
         comment = "弱い"
 
-    return {
-        "score": score,
-        "comment": comment,
-        "detail": detail,
-    }
+    return {"score": score, "comment": comment, "n225_5d": nk5, "topix_5d": tp5}
 
 
-def enhance_market_score(prev_score: int | None = None) -> Dict:
+def enhance_market_score() -> dict:
     """
-    calc_market_score + 変化速度（Δ3d）
+    calc_market_score + SOX/NVDA を軽く反映 + Δ3d（推定）
     """
     mkt = calc_market_score()
-    score = mkt["score"]
+    score = float(mkt.get("score", 50))
 
-    # Δ3d（3営業日前との差）
-    idx = _fetch("^TOPX", period="20d")
-    delta3 = 0
-    if idx is not None and len(idx) >= 4:
-        c = float(idx["Close"].iloc[-1])
-        c3 = float(idx["Close"].iloc[-4])
-        delta3 = int(np.clip(round(_pct(c, c3)), -20, 20))
+    # SOX
+    try:
+        chg = _chg("^SOX", 5)
+        score += float(np.clip(chg / 2.0, -5.0, 5.0))
+        mkt["sox_5d"] = chg
+    except Exception:
+        pass
 
-    mkt["delta3d"] = delta3
+    # NVDA
+    try:
+        chg = _chg("NVDA", 5)
+        score += float(np.clip(chg / 3.0, -4.0, 4.0))
+        mkt["nvda_5d"] = chg
+    except Exception:
+        pass
 
-    # NO-TRADE 判定用フラグ
-    mkt["no_trade"] = bool(
-        score < 45 or (delta3 <= -5 and score < 55)
-    )
+    score = int(np.clip(round(score), 0, 100))
+    mkt["score"] = score
+
+    # Δ3d（指数変化から推定）
+    nk3 = _chg("^N225", 3)
+    tp3 = _chg("^TOPX", 3)
+    delta3d = float(np.clip((nk3 + tp3) / 2.0 * 2.0, -25, 25))
+    mkt["delta3d"] = delta3d
 
     return mkt
+
+
+def recommend_leverage(mkt_score: int, delta3d: float = 0.0) -> tuple[float, str]:
+    """
+    基本は地合い。delta3d で崩れ初動を弱める。
+    """
+    if mkt_score >= 70:
+        lev = 2.0
+        comment = "強気（押し目＋一部ブレイク）"
+    elif mkt_score >= 60:
+        lev = 1.7
+        comment = "やや強気（押し目メイン）"
+    elif mkt_score >= 50:
+        lev = 1.3
+        comment = "中立（厳選・押し目中心）"
+    elif mkt_score >= 40:
+        lev = 1.1
+        comment = "やや守り（新規ロット小さめ）"
+    else:
+        lev = 1.0
+        comment = "守り（新規かなり絞る）"
+
+    if delta3d <= -8 and mkt_score < 60:
+        lev = max(1.0, lev - 0.2)
+        comment += " / 崩れ初動でレバ抑制"
+
+    return float(round(lev, 1)), comment
+
+
+def calc_max_position(total_asset: float, lev: float) -> int:
+    if not (np.isfinite(total_asset) and total_asset > 0 and lev > 0):
+        return 0
+    return int(round(total_asset * lev))
