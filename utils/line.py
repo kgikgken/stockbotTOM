@@ -1,19 +1,28 @@
+# utils/line.py
 from __future__ import annotations
 
-from typing import Optional, List
+import json
 import requests
+from typing import Optional
 
 
-def send_line(text: str, worker_url: Optional[str], chunk_size: int = 3800) -> None:
+def line_notify(worker_url: str, message: str, timeout: int = 25) -> None:
     """
-    Cloudflare Worker 側が json={"text": "..."} を受け取る想定
+    Cloudflare Worker にPOSTしてLINEへ送る。
+    Worker側は {"message": "..."} を受け取り、LINE Notify/APIへ配送する想定。
     """
+    payload = {"message": message}
+
+    r = requests.post(worker_url, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=timeout)
+    r.raise_for_status()
+
+
+def line_notify_safe(worker_url: Optional[str], message: str) -> None:
     if not worker_url:
-        print(text)
+        print(message)
         return
-
-    chunks: List[str] = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
-
-    for ch in chunks:
-        r = requests.post(worker_url, json={"text": ch}, timeout=25)
-        print("[LINE RESULT]", r.status_code, str(r.text)[:200])
+    try:
+        line_notify(worker_url, message)
+    except Exception:
+        # 送れない時も落とさない（ジョブ全体を殺さない）
+        print(message)
