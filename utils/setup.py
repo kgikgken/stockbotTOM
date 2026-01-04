@@ -1,77 +1,55 @@
 from __future__ import annotations
-from dataclasses import dataclass
+
+import numpy as np
+
+from utils.features import atr_percent, setup_type
 
 
-@dataclass(frozen=True)
-class Config:
-    # Paths
-    UNIVERSE_PATH: str = "universe_jpx.csv"
-    POSITIONS_PATH: str = "positions.csv"
-    EVENTS_PATH: str = "events.csv"
+def universe_filter(ind: dict) -> tuple[bool, str]:
+    """
+    母集団：全銘柄OK、ただし “入らない理由” を明確化
+    """
+    c = float(ind.get("close", np.nan))
+    adv20 = float(ind.get("adv20", np.nan))
+    atrp = float(atr_percent(ind))
 
-    # Index
-    TOPIX_TICKER: str = "998405.T"
+    # 価格レンジ（事故回避）
+    if not (np.isfinite(c) and 200 <= c <= 15000):
+        return False, "価格レンジ外"
 
-    # Universe
-    PRICE_MIN: float = 200.0
-    PRICE_MAX: float = 15000.0
-    ADV20_MIN_JPY: float = 100_000_000.0
-    ATRPCT_MIN: float = 0.015
+    # 流動性
+    if not (np.isfinite(adv20) and adv20 >= 200_000_000):
+        return False, "流動性弱(ADV20<200M)"
 
-    # Earnings
-    EARNINGS_EXCLUDE_DAYS: int = 3
+    # ボラ
+    if atrp < 1.5:
+        return False, "ボラ不足(ATR%<1.5)"
 
-    # Output sizes
-    MAX_FINAL_STOCKS: int = 5
-    MAX_WATCHLIST: int = 10
-    SECTOR_TOP_K: int = 5
+    # 高ボラ事故ゾーン（除外に近い扱い）
+    if atrp >= 6.0:
+        return False, "事故ゾーン(ATR%>=6)"
 
-    # NO-TRADE
-    NO_TRADE_MKT_SCORE_LT: float = 45.0
-    NO_TRADE_MKT_SCORE_LT_WHEN_MOM_DOWN: float = 55.0
-    NO_TRADE_MOMENTUM_3D_LTE: float = -5.0
-    NO_TRADE_AVG_ADJEV_LT_R: float = 0.3
-    NO_TRADE_GU_RATIO_GTE: float = 0.60
+    # Setup（A/Bのみ）
+    st = setup_type(ind)
+    if st not in ("A", "B"):
+        return False, "形不一致"
 
-    # Entry
-    GU_ATR_MULT: float = 1.0
-    IN_PULLBACK_ATR_HALF_BAND: float = 0.5
-    IN_BREAKOUT_ATR_BAND: float = 0.3
-    IN_DIST_MONITOR_ATR: float = 0.8
-
-    # Stops / Targets
-    STOP_PULLBACK_EXTRA_ATR: float = 0.7
-    STOP_BREAKOUT_ATR: float = 1.0
-    TP1_R: float = 1.5
-    TP2_R: float = 3.0
-
-    # EV / RR
-    RR_MIN: float = 2.2
-    EV_MIN_R: float = 0.4
-    EV_MIN_R_NEUTRAL: float = 0.5
-
-    # Time efficiency
-    EXP_DAYS_MAX: float = 5.0
-    R_PER_DAY_MIN: float = 0.5
-    EXP_DAYS_K_ATR: float = 1.0
-
-    # Diversification
-    MAX_PER_SECTOR: int = 2
-    CORR_WINDOW: int = 20
-    CORR_MAX: float = 0.75
-
-    # Market
-    MKT_SMA_FAST: int = 20
-    MKT_SMA_SLOW: int = 50
-    MKT_SMA_RISK: int = 10
-
-    # Multipliers
-    MULT_STRONG_UP: float = 1.05
-    MULT_MOM_DOWN: float = 0.70
-    MULT_EVENT_EVE: float = 0.75
-
-    WORKER_TIMEOUT_SEC: int = 20
+    return True, ""
 
 
-def load_config() -> Config:
-    return Config()
+def gu_flag(hist) -> bool:
+    """
+    GU_flag = Open > PrevClose + 1.0ATR
+    """
+    try:
+        if hist is None or len(hist) < 3:
+            return False
+        o = float(hist["Open"].iloc[-1])
+        pc = float(hist["Close"].iloc[-2])
+        # ATR proxy: TrueRange rollingはfeatures側で取ってるのでここは安全に近似
+        atr = float((hist["High"] - hist["Low"]).rolling(14).mean().iloc[-1])
+        if not all(np.isfinite([o, pc, atr])) or atr <= 0:
+            return False
+        return bool(o > pc + 1.0 * atr)
+    except Exception:
+        return False
