@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import pandas as pd
-import numpy as np
+from datetime import date
 from typing import Tuple
-from datetime import timedelta
-
+import numpy as np
+import pandas as pd
 import yfinance as yf
 
-from utils.util import safe_float
+from utils.util import weekday_monday
 
 
 def load_positions(path: str) -> pd.DataFrame:
@@ -17,22 +16,70 @@ def load_positions(path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def calc_weekly_new_count(df: pd.DataFrame, today_date: date) -> int:
+    """
+    positions.csv に entry_date(YYYY-MM-DD) がある場合のみカウント
+    無ければ 0（裁量で盛らない）
+    """
+    if df is None or df.empty or "entry_date" not in df.columns:
+        return 0
+
+    mon = weekday_monday(today_date)
+    cnt = 0
+    for v in df["entry_date"].astype(str).tolist():
+        try:
+            d = pd.to_datetime(v, errors="coerce").date()
+        except Exception:
+            continue
+        if d is None or pd.isna(d):
+            continue
+        if mon <= d <= today_date:
+            cnt += 1
+    return int(cnt)
+
+
 def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float]:
-    if df is None or len(df) == 0:
+    """
+    positions.csv 最低限:
+      ticker, entry_price, quantity
+    追加で:
+      asset_total があればそれ優先
+      risk_per_trade があれば警告計算に使う（無ければ簡易）
+
+    出力は report の “保有ポジション” に貼られるので日本語で
+    """
+    if df is None or df.empty:
         return "ノーポジション", 2_000_000.0
+
+    # total asset（列があるなら最優先）
+    total_asset = None
+    for col in ["asset_total", "total_asset", "asset"]:
+        if col in df.columns:
+            try:
+                v = float(df[col].iloc[0])
+                if np.isfinite(v) and v > 0:
+                    total_asset = v
+                    break
+            except Exception:
+                pass
 
     lines = []
     total_value = 0.0
+    max_loss_est = 0.0  # “想定最大損失”を荒く出す（ロット事故警告）
 
     for _, row in df.iterrows():
         ticker = str(row.get("ticker", "")).strip()
         if not ticker:
             continue
 
-        entry = safe_float(row.get("entry_price", 0), 0.0)
-        qty = safe_float(row.get("quantity", 0), 0.0)
+        entry_price = float(row.get("entry_price", 0) or 0)
+        qty = float(row.get("quantity", 0) or 0)
+        if entry_price <= 0 or qty <= 0:
+            lines.append(f"- {ticker}: 損益 n/a")
+            continue
 
-        cur = entry
+        # current price
+        cur = entry_price
         try:
             h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
             if h is not None and not h.empty:
@@ -40,63 +87,42 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int = 50) -> Tuple[str, float
         except Exception:
             pass
 
-        pnl_pct = (cur - entry) / entry * 100.0 if entry > 0 else np.nan
+        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else np.nan
         value = cur * qty
         if np.isfinite(value) and value > 0:
             total_value += value
+
+        # 簡易“最大損失”見積り：entryの -4% を仮定（本当は銘柄別STOPに合わせたいが positions.csv にstop無い想定）
+        # stop_price列があればそれを使う
+        stop_price = None
+        if "stop_price" in df.columns:
+            try:
+                sp = float(row.get("stop_price", 0) or 0)
+                if np.isfinite(sp) and sp > 0:
+                    stop_price = sp
+            except Exception:
+                stop_price = None
+
+        if stop_price is None:
+            stop_price = entry_price * 0.96
+
+        loss = max(0.0, (entry_price - stop_price) * qty)
+        max_loss_est += loss
 
         if np.isfinite(pnl_pct):
             lines.append(f"- {ticker}: 損益 {pnl_pct:.2f}%")
         else:
             lines.append(f"- {ticker}: 損益 n/a")
 
-    if not lines:
-        return "ノーポジション", 2_000_000.0
+    # asset estimate
+    asset_est = float(total_asset) if (total_asset is not None) else (float(total_value) if total_value > 0 else 2_000_000.0)
 
-    asset_est = total_value if total_value > 0 else 2_000_000.0
-    return "\n".join(lines), float(asset_est)
+    # ロット事故警告（資産比 8%超えたら出す）
+    warn = ""
+    if asset_est > 0 and np.isfinite(max_loss_est) and max_loss_est > 0:
+        ratio = max_loss_est / asset_est
+        if ratio >= 0.08:
+            warn = f"\n\n⚠ ロット事故警告\n想定最大損失: 約{int(round(max_loss_est)):,}円（資産比 {ratio*100:.2f}%）"
 
-
-def weekly_new_count(df: pd.DataFrame, today_date) -> int:
-    """
-    positions.csv に open_date (YYYY-MM-DD) がある想定。
-    無い場合は 0 扱い（安全側）
-    """
-    if df is None or len(df) == 0:
-        return 0
-    if "open_date" not in df.columns:
-        return 0
-
-    try:
-        d = pd.to_datetime(df["open_date"], errors="coerce").dt.date
-    except Exception:
-        return 0
-
-    # 直近7日（暦週に厳密でなく、運用上の“週次制限”として安全側）
-    start = today_date - timedelta(days=7)
-    c = 0
-    for x in d:
-        if x is None or pd.isna(x):
-            continue
-        if start <= x <= today_date:
-            c += 1
-    return int(c)
-
-
-def lot_accident_warning(picked, total_asset: float, risk_per_trade: float = 0.015) -> str:
-    """
-    “最大同時損失” を雑に見積もって事故を警告
-    - 1銘柄の想定損失 = 資産 * risk_per_trade
-    - 同時に最大5銘柄が逆行したら？を表示
-    """
-    if not picked:
-        return ""
-
-    n = len(picked)
-    max_loss = float(total_asset * risk_per_trade * n)
-    pct = (max_loss / total_asset * 100.0) if total_asset > 0 else 0.0
-
-    # 8%超で強警戒
-    if pct >= 8.0:
-        return f"⚠ ロット事故警告：想定最大損失 ≈ {int(max_loss):,}円（資産比 {pct:.2f}%）"
-    return ""
+    text = "\n".join(lines) if lines else "ノーポジション"
+    return text + warn, asset_est
