@@ -1,125 +1,130 @@
+# utils/market.py
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from datetime import datetime
+from typing import Tuple
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.util import clamp
+from utils.util import DEFAULT_TZ, MarketState, clamp
 
 
-def _fetch_index(symbol: str, period: str = "80d") -> pd.DataFrame:
-    try:
-        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
-        return df if df is not None else pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-
-def _rsi(close: pd.Series, period: int = 14) -> float:
-    if close is None or len(close) < period + 2:
-        return float("nan")
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / (loss.replace(0, np.nan))
     rsi = 100 - (100 / (1 + rs))
-    v = float(rsi.iloc[-1])
-    return v if np.isfinite(v) else float("nan")
+    return rsi.fillna(50)
 
 
-def _score_from_index(df: pd.DataFrame) -> Tuple[float, float, float, float]:
+def _sma(series: pd.Series, n: int) -> pd.Series:
+    return series.rolling(n).mean()
+
+
+def _score_trend(close: pd.Series) -> float:
+    sma20 = _sma(close, 20)
+    sma50 = _sma(close, 50)
+    last = close.iloc[-1]
+    s20 = sma20.iloc[-1]
+    s50 = sma50.iloc[-1]
+
+    score = 50.0
+    if last > s50:
+        score += 10
+    if s20 > s50:
+        score += 10
+    if last > s20:
+        score += 5
+    return score
+
+
+def _score_momentum(close: pd.Series) -> float:
+    r5 = close.pct_change(5).iloc[-1]
+    r20 = close.pct_change(20).iloc[-1]
+    rsi = _rsi(close, 14).iloc[-1]
+    score = 0.0
+    score += clamp(r5 * 200, -10, 10)
+    score += clamp(r20 * 150, -10, 10)
+    score += clamp((rsi - 50) * 0.4, -10, 10)
+    return score
+
+
+def calc_market_state(ticker: str = "^TOPX", lookback: str = "1y") -> MarketState:
     """
-    return: (score_component, ret5, ret20, rsi14)
+    TOPIX（^TOPX）を基本に地合いを算出。
     """
-    if df is None or df.empty or len(df) < 55:
-        return 0.0, 0.0, 0.0, 50.0
-
-    close = df["Close"].astype(float)
-    c = float(close.iloc[-1])
-    ma20 = float(close.rolling(20).mean().iloc[-1])
-    ma50 = float(close.rolling(50).mean().iloc[-1])
-
-    ret5 = float((close.iloc[-1] / close.iloc[-6] - 1.0) * 100.0) if len(close) >= 6 else 0.0
-    ret20 = float((close.iloc[-1] / close.iloc[-21] - 1.0) * 100.0) if len(close) >= 21 else 0.0
-    rsi14 = _rsi(close, 14)
-
-    sc = 0.0
-    # Trend
-    if c > ma50:
-        sc += 10
-    if ma20 > ma50:
-        sc += 10
-    # Momentum
-    sc += clamp(ret5, -6, 6) * 1.5
-    sc += clamp(ret20, -12, 12) * 0.8
-    # RSI (過熱/弱さ)
-    if np.isfinite(rsi14):
-        if 45 <= rsi14 <= 65:
-            sc += 6
-        elif rsi14 < 40:
-            sc -= 6
-        elif rsi14 > 75:
-            sc -= 4
-
-    return sc, ret5, ret20, (float(rsi14) if np.isfinite(rsi14) else 50.0)
-
-
-def build_market_context() -> Dict:
-    """
-    MarketScore(0-100) と Δ3d を作る
-    """
-    n225 = _fetch_index("^N225")
-    topx = _fetch_index("^TOPX")
-
-    sc1, n225_5d, n225_20d, n225_rsi = _score_from_index(n225)
-    sc2, topx_5d, topx_20d, topx_rsi = _score_from_index(topx)
-
-    base = 50.0 + (sc1 + sc2) / 2.0
-    score = int(clamp(round(base), 0, 100))
-
-    # Δ3d（スコア変化）
-    # “3日前”のスコアを再計算して差を取る（粗いが安定）
-    delta3d = 0
     try:
-        if n225 is not None and len(n225) >= 10 and topx is not None and len(topx) >= 10:
-            n225_past = n225.iloc[:-3]
-            topx_past = topx.iloc[:-3]
-            sc1p, _, _, _ = _score_from_index(n225_past)
-            sc2p, _, _, _ = _score_from_index(topx_past)
-            past = int(clamp(round(50.0 + (sc1p + sc2p) / 2.0), 0, 100))
-            delta3d = int(score - past)
+        df = yf.download(ticker, period=lookback, interval="1d", auto_adjust=True, progress=False)
+        df = df.dropna()
+        close = df["Close"]
+        if len(close) < 80:
+            raise RuntimeError("not enough data")
     except Exception:
-        delta3d = 0
+        # 取得できない時は中立で落とさない
+        return MarketState(
+            score=55,
+            delta_3d=0,
+            regime="neutral",
+            macro_caution=False,
+            leverage=1.3,
+            max_gross=2_600_000,
+            no_trade=False,
+            reason="(market data unavailable)",
+        )
 
-    # コメント
-    if score >= 70:
-        comment = "強い"
-        phase = "上昇基調"
-    elif score >= 60:
-        comment = "やや強い"
-        phase = "上昇基調"
+    base = _score_trend(close)
+    mom = _score_momentum(close)
+    score = clamp(base + mom, 0, 100)
+
+    # 3日変化（点差）
+    # ざっくり：3日前時点のスコアとの差分
+    close3 = close.iloc[:-3]
+    base3 = _score_trend(close3)
+    mom3 = _score_momentum(close3)
+    score3 = clamp(base3 + mom3, 0, 100)
+    delta_3d = float(score - score3)
+
+    # regime
+    if score >= 65:
+        regime = "bull"
     elif score >= 50:
-        comment = "中立"
-        phase = "不安定"
-    elif score >= 45:
-        comment = "弱い"
-        phase = "下落警戒"
+        regime = "neutral"
     else:
-        comment = "かなり弱い"
-        phase = "下落警戒"
+        regime = "bear"
 
-    return {
-        "score": score,
-        "delta3d": int(delta3d),
-        "comment": comment,
-        "phase": phase,
-        "n225_5d": float(n225_5d),
-        "topix_5d": float(topx_5d),
-        "n225_20d": float(n225_20d),
-        "topix_20d": float(topx_20d),
-        "n225_rsi": float(n225_rsi),
-        "topix_rsi": float(topx_rsi),
-    }
+    # NO-TRADE（完全機械化）
+    no_trade = (score < 45) or (delta_3d <= -5 and score < 55)
+    reason = ""
+    if score < 45:
+        reason = "MarketScore<45"
+    elif delta_3d <= -5 and score < 55:
+        reason = "Δ3d<=-5 & MarketScore<55"
+
+    # レバ：地合いに連動（上限は守る）
+    if no_trade:
+        leverage = 1.0
+    else:
+        if score >= 70:
+            leverage = 2.0
+        elif score >= 60:
+            leverage = 1.7
+        else:
+            leverage = 1.3
+
+    # 建玉目安（基準資金2,000,000を想定）
+    base_cap = 2_000_000
+    max_gross = base_cap * leverage
+
+    return MarketState(
+        score=float(score),
+        delta_3d=float(delta_3d),
+        regime=regime,
+        macro_caution=False,
+        leverage=float(leverage),
+        max_gross=float(max_gross),
+        no_trade=bool(no_trade),
+        reason=reason,
+    )
