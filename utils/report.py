@@ -1,149 +1,140 @@
 from __future__ import annotations
 
+from datetime import date
+from typing import Dict, List, Tuple
 import numpy as np
 
-from utils.position import lot_accident_warning
+
+def _fmt_money(yen: int) -> str:
+    return f"{yen:,}円"
 
 
-def _fmt_float(x, nd=2) -> str:
-    try:
-        return f"{float(x):.{nd}f}"
-    except Exception:
+def _fmt_float(x: float, nd: int = 2) -> str:
+    if not np.isfinite(x):
         return "n/a"
+    return f"{x:.{nd}f}"
 
 
-def build_report(
+def build_daily_report(
     today_str: str,
-    today_date,
-    mkt: dict,
-    delta3d: int,
-    weekly_used: int,
-    weekly_limit: int,
-    macro_danger: bool,
-    sectors,
-    event_lines,
-    swing: dict,
-    pos_text: str,
+    today_date: date,
+    market: Dict,
+    macro_caution: bool,
+    weekly_new: int,
     total_asset: float,
-    regime_mul: float,
+    sector_rank: List[Tuple[str, float]],
+    event_lines: List[str],
+    swing: Dict,
+    pos_text: str,
 ) -> str:
-    mkt_score = int(mkt.get("score", 50))
-    comment = str(mkt.get("comment", "中立"))
+    m = int(market.get("score", 50))
+    d3 = int(market.get("delta3d", 0))
+    comment = str(market.get("comment", "中立"))
+    phase = str(market.get("phase", "不安定"))
 
-    picked = swing.get("picked", [])
-    stats = swing.get("stats", {})
+    no_trade = bool(swing.get("no_trade", False))
+    reasons = swing.get("no_trade_reasons", []) or []
+    lev = float(swing.get("lev", 1.0))
+    lev_reason = str(swing.get("lev_reason", ""))
 
-    # NO-TRADE機械化（ここは “出力理由” のみ。判定は report側でも再確認する）
-    no_trade = False
-    reasons = []
-    if mkt_score < 45:
-        no_trade = True
-        reasons.append("MarketScore<45")
-    if delta3d <= -5 and mkt_score < 55:
-        no_trade = True
-        reasons.append("Δ3d<=-5 & MarketScore<55")
-    if macro_danger:
-        no_trade = True
-        reasons.append("イベント接近")
-    if weekly_used >= weekly_limit:
-        no_trade = True
-        reasons.append("週次制限")
-    if float(stats.get("avg_adj_ev", 0.0)) < 0.3 and picked:
-        no_trade = True
-        reasons.append("平均AdjEV<0.3")
+    max_pos = int(round(total_asset * lev)) if (np.isfinite(total_asset) and total_asset > 0 and lev > 0) else 0
 
-    # レバ（reportは表示だけ）
-    if no_trade:
-        lev = 1.0
-        lev_comment = "守り（新規禁止）"
-    else:
-        if mkt_score >= 70:
-            lev = 2.0
-            lev_comment = "強気（押し目＋一部ブレイク）"
-        elif mkt_score >= 60:
-            lev = 1.7
-            lev_comment = "やや強気（押し目メイン）"
-        elif mkt_score >= 50:
-            lev = 1.3
-            lev_comment = "中立（厳選・押し目中心）"
-        elif mkt_score >= 40:
-            lev = 1.1
-            lev_comment = "やや守り（新規ロット小さめ）"
-        else:
-            lev = 1.0
-            lev_comment = "守り"
-
-    max_pos = int(round(total_asset * lev))
-
-    lines = []
+    lines: List[str] = []
     lines.append(f"📅 {today_str} stockbotTOM 日報")
     lines.append("")
     lines.append("◆ 今日の結論（Swing専用 / 1〜7日）")
+
     if no_trade:
-        lines.append(f"🚫 新規見送り（{' & '.join(reasons)}）")
+        if reasons:
+            lines.append(f"🚫 新規見送り（{'・'.join(reasons)}）")
+        else:
+            lines.append("🚫 新規見送り（条件該当）")
     else:
         lines.append("✅ 新規可（条件クリア）")
 
-    lines.append(f"- 地合い: {mkt_score}点 ({comment})")
-    lines.append(f"- ΔMarketScore_3d: {delta3d:+d}")
-    lines.append(f"- 週次新規カウント: {weekly_used} / {weekly_limit}")
-    if macro_danger:
-        lines.append("- マクロ警戒: ON（イベント接近）")
-    lines.append(f"- レバ: {lev:.1f}倍（{lev_comment}）")
-    lines.append(f"- MAX建玉: 約{max_pos:,}円")
+    lines.append(f"- 地合い: {m}点（{comment}）")
+    lines.append(f"- 地合い変化: Δ{d3:+d}")
+    lines.append(f"- 相場判断: {phase}")
+    lines.append(f"- 週次新規回数: {weekly_new} / 3")
+    lines.append(f"- マクロ警戒: {'ON' if macro_caution else 'OFF'}")
+    lines.append(f"- 推奨レバレッジ: {lev:.1f}倍（{lev_reason}）")
+    lines.append(f"- 最大建玉目安: 約{_fmt_money(max_pos)}")
     lines.append("")
 
-    lines.append("📈 セクター（5日）")
-    if sectors:
-        for i, (s, p) in enumerate(sectors, 1):
-            lines.append(f"{i}. {s} ({p:+.2f}%)")
+    lines.append("📈 セクター動向（直近5日）")
+    if sector_rank:
+        for i, (s, pct) in enumerate(sector_rank[:5]):
+            lines.append(f"{i+1}. {s} ({pct:+.2f}%)")
     else:
         lines.append("- データ不足")
     lines.append("")
 
-    lines.append("⚠ イベント")
-    lines.extend(event_lines if event_lines else ["- 特になし"])
+    lines.append("⚠ 重要イベント")
+    for ev in event_lines:
+        lines.append(ev)
     lines.append("")
 
-    lines.append("🏆 Swing（順張りのみ / 追いかけ禁止 / 速度重視）")
-    if picked:
-        lines.append(
-            f"  候補数:{len(picked)}銘柄 / 平均RR:{_fmt_float(stats.get('avg_rr',0),2)} / 平均EV:{_fmt_float(stats.get('avg_ev',0),2)}"
-            f" / 平均AdjEV:{_fmt_float(stats.get('avg_adj_ev',0),2)} / 平均R/day:{_fmt_float(stats.get('avg_rday',0),2)}"
-        )
-        lines.append("")
-        for c in picked:
-            lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
-            lines.append(f"  形:{c['setup']}  RR:{c['rr']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['r_per_day']:.2f}")
-            lines.append(
-                f"  IN:{c['in_center']:.1f}（帯:{c['in_low']:.1f}〜{c['in_high']:.1f}） 現在:{c['price_now']:.1f}  ATR:{c['atr']:.1f}  GU:{'Y' if c['gu'] else 'N'}"
-            )
-            lines.append(
-                f"  STOP:{c['stop']:.1f}  TP1:{c['tp1']:.1f}  TP2:{c['tp2']:.1f}  ExpectedDays:{c['expected_days']:.1f}  行動:{c['action']}"
-            )
-            lines.append("")
-    else:
+    # Swing
+    lines.append("🏆 Swing候補（順張りのみ / 追いかけ禁止 / 速度重視）")
+    summ = swing.get("summary", {}) or {}
+    cnt = int(summ.get("count", 0))
+    lines.append(
+        f"  候補数:{cnt}銘柄"
+        f"  平均RR:{_fmt_float(float(summ.get('avg_rr', 0.0)),2)}"
+        f" / 平均EV:{_fmt_float(float(summ.get('avg_ev', 0.0)),2)}"
+        f" / 平均補正EV:{_fmt_float(float(summ.get('avg_adjev', 0.0)),2)}"
+        f" / 平均R/日:{_fmt_float(float(summ.get('avg_rday', 0.0)),2)}"
+    )
+
+    if bool(macro_caution):
+        lines.append("※ イベント接近のため、候補は最大2銘柄までに制限")
+
+    lines.append("")
+
+    cands = swing.get("candidates", []) or []
+    if not cands:
         lines.append("- 該当なし")
         lines.append("")
+    else:
+        for c in cands:
+            gu = "あり" if c.get("gu") else "なし"
+            lines.append(f"- {c['ticker']} {c['name']}［{c['sector']}］")
+            lines.append(
+                f"  型:{c['setup']}  RR:{_fmt_float(c['rr'],2)}  補正EV:{_fmt_float(c['adjev'],2)}  R/日:{_fmt_float(c['rday'],2)}  特性:{c.get('macro','other')}"
+            )
+            lines.append(
+                f"  エントリー:{_fmt_float(c['entry'],1)}（範囲:{_fmt_float(c['entry_low'],1)}〜{_fmt_float(c['entry_high'],1)}） 現在値:{_fmt_float(c['price_now'],1)}  ATR:{_fmt_float(c['atr'],1)}  GU:{gu}"
+            )
+            lines.append(
+                f"  損切:{_fmt_float(c['stop'],1)}  利確1:{_fmt_float(c['tp1'],1)}  利確2:{_fmt_float(c['tp2'],1)}  想定日数:{_fmt_float(c['exp_days'],1)}"
+            )
+            lines.append(f"  行動:{c['action']}")
+            lines.append("")
 
-    # 監視
-    watch = swing.get("watch", [])
-    if watch:
-        lines.append("🧠 監視リスト（今日は入らない）")
-        for w in watch:
-            if "drop_reason" in w:
-                lines.append(f"- {w.get('ticker','')} {w.get('name','')} [{w.get('sector','')}] 理由:{w['drop_reason']}")
+    # Watchlist
+    lines.append("🧠 監視リスト（今日は入らない）")
+    watch = swing.get("watchlist", []) or []
+    if not watch:
+        lines.append("- なし")
+    else:
+        for w in watch[:10]:
+            t = w.get("ticker", "")
+            n = w.get("name", "")
+            sec = w.get("sector", "")
+            rsn = w.get("reason", "")
+            if n:
+                lines.append(f"- {t} {n}［{sec}］ 理由:{rsn}")
             else:
-                lines.append(f"- {w.get('ticker','')} {w.get('name','')} [{w.get('sector','')}] 理由:監視")
-        lines.append("")
+                lines.append(f"- {t} 理由:{rsn}")
+    lines.append("")
 
-    # ロット事故警告
-    warn = lot_accident_warning(picked, total_asset=total_asset, risk_per_trade=0.015)
-    if warn:
-        lines.append(warn)
-        lines.append("")
+    # ロット事故警告（position側で出す想定だが、ここは空出力しない）
+    # → analyze_positions が警告文を含む場合だけ出す
+    if pos_text and "⚠ ロット事故警告" in pos_text:
+        # pos_text内に警告があるなら reportにもそのまま残す（末尾のポジションに含まれる）
+        pass
 
-    lines.append("📊 ポジション")
+    lines.append("📊 保有ポジション")
     lines.append(pos_text.strip() if pos_text else "ノーポジション")
 
     return "\n".join(lines)
