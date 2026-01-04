@@ -1,59 +1,65 @@
 from __future__ import annotations
 
 import os
+from typing import List, Tuple, Dict
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from typing import List, Tuple, Dict
-
-MAX_TICKERS_PER_SECTOR = 20
 
 
 def _fetch_change_5d(ticker: str) -> float:
     try:
         df = yf.Ticker(ticker).history(period="6d", auto_adjust=True)
         if df is None or df.empty or len(df) < 2:
-            return np.nan
+            return float("nan")
         c = df["Close"].astype(float)
         return float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0)
     except Exception:
-        return np.nan
+        return float("nan")
 
 
-def top_sectors_5d(universe_path: str, top_n: int = 5) -> List[Tuple[str, float]]:
-    if not os.path.exists(universe_path):
+def build_sector_ranking(universe_path: str, top_n: int = 5, max_tickers_per_sector: int = 25) -> List[Tuple[str, float]]:
+    """
+    セクターは “判断補助” 用。選定理由ではない。
+    """
+    if not universe_path or (not os.path.exists(universe_path)):
         return []
+
     try:
         df = pd.read_csv(universe_path)
     except Exception:
         return []
 
-    sec_col = "sector" if "sector" in df.columns else ("industry_big" if "industry_big" in df.columns else None)
-    t_col = "ticker" if "ticker" in df.columns else ("code" if "code" in df.columns else None)
-    if sec_col is None or t_col is None:
+    if "sector" in df.columns:
+        sec_col = "sector"
+    elif "industry_big" in df.columns:
+        sec_col = "industry_big"
+    else:
+        return []
+
+    if "ticker" in df.columns:
+        t_col = "ticker"
+    elif "code" in df.columns:
+        t_col = "code"
+    else:
         return []
 
     sectors: List[Tuple[str, float]] = []
+
     for sec_name, sub in df.groupby(sec_col):
-        tickers = sub[t_col].astype(str).tolist()[:MAX_TICKERS_PER_SECTOR]
+        tickers = sub[t_col].astype(str).tolist()
+        tickers = [t.strip() for t in tickers if t and str(t).strip()]
+        if not tickers:
+            continue
+        tickers = tickers[:max_tickers_per_sector]
+
         chgs = []
         for t in tickers:
-            chg = _fetch_change_5d(t)
-            if np.isfinite(chg):
-                chgs.append(chg)
+            v = _fetch_change_5d(t)
+            if np.isfinite(v):
+                chgs.append(v)
         if chgs:
             sectors.append((str(sec_name), float(np.mean(chgs))))
 
     sectors.sort(key=lambda x: x[1], reverse=True)
     return sectors[:top_n]
-
-
-def sector_rank_map(universe_path: str) -> Dict[str, int]:
-    """
-    セクターは“判断補助”として：ランキング（1=強い）を返す
-    """
-    tops = top_sectors_5d(universe_path=universe_path, top_n=50)
-    rank: Dict[str, int] = {}
-    for i, (s, _) in enumerate(tops, 1):
-        rank[s] = i
-    return rank
