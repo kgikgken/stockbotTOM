@@ -1,90 +1,78 @@
 from __future__ import annotations
 
 import os
+from typing import List, Dict
+
 import numpy as np
+import requests
 
 from utils.util import jst_today_str, jst_today_date
-from utils.market import enhance_market_score, calc_delta_market_score_3d, market_regime_multiplier
-from utils.sector import top_sectors_5d
-from utils.events import build_event_warnings, is_macro_danger
-from utils.position import load_positions, analyze_positions, weekly_new_count
+from utils.line import send_line
+from utils.events import load_events, build_event_section, detect_macro_caution
+from utils.market import build_market_context
+from utils.sector import build_sector_ranking
+from utils.position import load_positions, analyze_positions, calc_weekly_new_count
 from utils.screener import run_swing_screening
-from utils.report import build_report
-from utils.line import send_line_text
+from utils.report import build_daily_report
 
 
+# =========================
+# Paths / Env
+# =========================
 UNIVERSE_PATH = "universe_jpx.csv"
 POSITIONS_PATH = "positions.csv"
 EVENTS_PATH = "events.csv"
-
 WORKER_URL = os.getenv("WORKER_URL")
-
-# 週次制限（新規は週3まで）
-WEEKLY_NEW_LIMIT = 3
-
-# 資産フォールバック
-ASSET_FALLBACK = 2_000_000.0
 
 
 def main() -> None:
     today_str = jst_today_str()
     today_date = jst_today_date()
 
-    mkt = enhance_market_score()
-    mkt_score = int(mkt.get("score", 50))
-    delta3d = int(calc_delta_market_score_3d())
+    # --- Market ---
+    mkt = build_market_context()
 
-    # イベント
-    event_lines = build_event_warnings(today_date, path=EVENTS_PATH)
-    macro_danger = is_macro_danger(today_date, path=EVENTS_PATH)
+    # --- Events ---
+    events = load_events(EVENTS_PATH)
+    event_lines = build_event_section(events, today_date)
+    macro_caution = detect_macro_caution(events, today_date)  # イベント接近なら ON
 
-    # ポジション
+    # --- Positions ---
     pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset = analyze_positions(pos_df, mkt_score=mkt_score)
+    pos_text, total_asset = analyze_positions(pos_df, mkt_score=mkt["score"])
+    weekly_new = calc_weekly_new_count(pos_df, today_date=today_date)  # entry_date が無ければ 0
+
     if not (np.isfinite(total_asset) and total_asset > 0):
-        total_asset = ASSET_FALLBACK
+        total_asset = 2_000_000.0
 
-    weekly_used = weekly_new_count(pos_df, today_date=today_date)
-    weekly_remain = max(0, WEEKLY_NEW_LIMIT - weekly_used)
+    # --- Sector (説明用) ---
+    sector_rank = build_sector_ranking(universe_path=UNIVERSE_PATH, top_n=5)
 
-    # セクター
-    sectors = top_sectors_5d(universe_path=UNIVERSE_PATH, top_n=5)
-
-    # 地合い補正（AdjEV用）
-    regime_mul = market_regime_multiplier(mkt_score=mkt_score, delta3d=delta3d, macro_danger=macro_danger)
-
-    # スクリーニング（Swing）
-    swing = run_swing_screening(
-        today_date=today_date,
+    # --- Screening ---
+    swing_result = run_swing_screening(
         universe_path=UNIVERSE_PATH,
-        mkt_score=mkt_score,
-        delta3d=delta3d,
-        macro_danger=macro_danger,
-        regime_mul=regime_mul,
-        weekly_remain=weekly_remain,
+        today_date=today_date,
+        market=mkt,
+        macro_caution=macro_caution,
+        weekly_new=weekly_new,
     )
 
-    # レポート生成
-    report = build_report(
+    # --- Report ---
+    report = build_daily_report(
         today_str=today_str,
         today_date=today_date,
-        mkt=mkt,
-        delta3d=delta3d,
-        weekly_used=weekly_used,
-        weekly_limit=WEEKLY_NEW_LIMIT,
-        macro_danger=macro_danger,
-        sectors=sectors,
+        market=mkt,
+        macro_caution=macro_caution,
+        weekly_new=weekly_new,
+        total_asset=float(total_asset),
+        sector_rank=sector_rank,
         event_lines=event_lines,
-        swing=swing,
+        swing=swing_result,
         pos_text=pos_text,
-        total_asset=total_asset,
-        regime_mul=regime_mul,
     )
 
     print(report)
-
-    # LINE送信（不達ど返し）
-    send_line_text(report, worker_url=WORKER_URL)
+    send_line(report, worker_url=WORKER_URL)
 
 
 if __name__ == "__main__":
