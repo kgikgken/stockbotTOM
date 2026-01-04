@@ -1,142 +1,162 @@
 from __future__ import annotations
 
+from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
 from utils.util import clamp
 
 
-def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    if df is None or len(df) < period + 2:
-        return np.nan
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
+def dynamic_min_rr(mkt_score: int, delta3d: int) -> float:
+    """
+    (1) RR下限を地合い連動にする
+    - 強い相場: 少し緩め
+    - 弱い/悪化: 厳しめ
+    """
+    if mkt_score >= 75:
+        base = 1.60
+    elif mkt_score >= 65:
+        base = 1.70
+    elif mkt_score >= 55:
+        base = 1.80
+    elif mkt_score >= 50:
+        base = 1.90
+    else:
+        base = 2.00
+
+    if delta3d <= -5:
+        base += 0.20
+    elif delta3d <= -2:
+        base += 0.10
+
+    return float(clamp(base, 1.55, 2.30))
+
+
+def compute_targets(df: pd.DataFrame, setup_type: str, entry: float, stop: float, mkt_score: int) -> Tuple[float, float]:
+    """
+    TP1/TP2を固定化しない（RR・R/dayが自然に散るように）
+    - 抵抗（直近高値）と “欲しいRR” の両方で決める
+    """
     close = df["Close"].astype(float)
-    prev = close.shift(1)
+    if not (np.isfinite(entry) and np.isfinite(stop) and entry > 0 and stop > 0 and entry > stop):
+        return entry, entry
 
-    tr = pd.concat([(high - low), (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(period).mean().iloc[-1]
-    return float(atr) if np.isfinite(atr) else np.nan
+    risk = entry - stop
 
+    # 抵抗（60日高値手前）
+    window = 60 if len(close) >= 60 else len(close)
+    hi = float(close.tail(window).max()) if window >= 5 else float(close.iloc[-1])
 
-def rr_from_structure(hist: pd.DataFrame, setup: str, in_center: float, mkt_score: int) -> dict:
-    """
-    RR固定化排除（自然分布）：
-    - STOP：構造（直近安値）+ ATR buffer
-    - TP2：抵抗帯（60d高値）手前 or 伸び余地（地合いで微調整）
-    - ここで丸め/クリップして “3.00固定” にしない
-    """
-    close = hist["Close"].astype(float)
-    high = hist["High"].astype(float)
-    low = hist["Low"].astype(float)
-
-    price_now = float(close.iloc[-1])
-    atr = _atr(hist, 14)
-    if not (np.isfinite(atr) and atr > 0 and np.isfinite(in_center) and in_center > 0):
-        return {"rr": 0.0, "stop": np.nan, "tp1": np.nan, "tp2": np.nan, "atr": np.nan, "expected_days": np.nan}
-
-    # STOP
-    lookback = 12 if setup == "A" else 20
-    swing_low = float(low.tail(lookback).min())
-    # Aは浅い押し目想定：in_center - 1.2ATR を基準、構造安値が近いならそっち
-    if setup == "A":
-        stop = min(in_center - 1.2 * atr, swing_low - 0.2 * atr)
-    else:
-        # Bはブレイク：ブレイクライン割れを許容しない
-        stop = min(in_center - 1.0 * atr, swing_low - 0.2 * atr)
-
-    # stopが近すぎる/遠すぎるの事故防止（“固定RR”ではなく“安全レンジ”）
-    stop = float(clamp(stop, in_center * 0.90, in_center * 0.98))
-
-    r = in_center - stop
-    if not (np.isfinite(r) and r > 0):
-        return {"rr": 0.0, "stop": stop, "tp1": np.nan, "tp2": np.nan, "atr": atr, "expected_days": np.nan}
-
-    # TP2（抵抗帯）
-    hi_window = 60 if len(close) >= 60 else len(close)
-    res = float(close.tail(hi_window).max())
-
-    # 伸び余地：地合いで微調整（弱いと届かない前提で控えめ）
-    stretch = 1.00
-    if mkt_score >= 70:
-        stretch = 1.05
-    elif mkt_score <= 45:
-        stretch = 0.92
-
-    # “理想TP2”= in + kR（kは固定にしない。抵抗までの距離で自動決定）
-    # resまで近い→RR小さくなる、遠い→RR大きくなる（自然分布）
-    tp2_cap = res * 0.99
-    tp2_raw = in_center + (tp2_cap - in_center) * stretch
-    # ただし最低限の伸びは必要（極端な低RR回避）
-    tp2_min = in_center + 1.8 * r  # RR>=1.8最低ライン
-    tp2 = max(tp2_min, tp2_raw)
-
-    rr = (tp2 - in_center) / r
-
-    # TP1は部分利確（1.5R固定はOK。ここは運用ルール）
-    tp1 = in_center + 1.5 * r
-
-    # ExpectedDays（ATRで距離割り）
-    expected_days = (tp2 - in_center) / (0.9 * atr)
-    expected_days = float(clamp(expected_days, 1.0, 7.0))
-
-    return {
-        "rr": float(rr),
-        "stop": float(stop),
-        "tp1": float(tp1),
-        "tp2": float(tp2),
-        "atr": float(atr),
-        "expected_days": float(expected_days),
-    }
-
-
-def pwin_proxy(setup: str, sector_rank: int, adv20: float, rsi: float, deviation: float) -> float:
-    """
-    ログ無しでの勝率代理（固定値禁止）：
-    - セクター強いほど +、流動性 +、RSI過熱は -、乖離大は -
-    """
-    p = 0.26
-
-    # setup補正（A優遇）
-    if setup == "A":
-        p += 0.06
-    else:
-        p += 0.03
-
-    # sector_rank（1が最強）
-    if sector_rank > 0:
-        p += float(clamp((10 - sector_rank) / 50.0, -0.05, 0.12))
-
-    # 流動性
-    if np.isfinite(adv20):
-        if adv20 >= 1_000_000_000:
-            p += 0.08
-        elif adv20 >= 200_000_000:
-            p += 0.04
-
-    # RSI過熱抑制
-    if np.isfinite(rsi):
-        if rsi >= 70:
-            p -= 0.10
-        elif rsi >= 62:
-            p -= 0.05
-        elif 40 <= rsi <= 62:
-            p += 0.03
-
-    # 乖離（追いかけ禁止）
-    if np.isfinite(deviation):
-        if deviation > 0.8:
-            p -= 0.10
-        elif deviation > 0.6:
-            p -= 0.05
+    # トレンド強さで “狙うRR” を変える（固定禁止）
+    ma20 = float(df["ma20"].iloc[-1]) if "ma20" in df.columns and np.isfinite(df["ma20"].iloc[-1]) else entry
+    ma50 = float(df["ma50"].iloc[-1]) if "ma50" in df.columns and np.isfinite(df["ma50"].iloc[-1]) else entry
+    trend_strength = 0.0
+    if entry > 0 and ma20 > 0 and ma50 > 0:
+        if entry > ma20 > ma50:
+            trend_strength = 1.0
+        elif entry > ma20:
+            trend_strength = 0.6
         else:
-            p += 0.02
+            trend_strength = 0.3
 
-    return float(clamp(p, 0.15, 0.60))
+    # marketで上限/下限を揺らす
+    if mkt_score >= 70:
+        rr_target = 2.4 + 1.4 * trend_strength  # 2.4〜3.8
+    elif mkt_score >= 55:
+        rr_target = 2.1 + 1.2 * trend_strength  # 2.1〜3.3
+    else:
+        rr_target = 2.0 + 0.9 * trend_strength  # 2.0〜2.9
+
+    # setupで微調整（A2は伸び狙い、Bは初動で控えめ）
+    if setup_type == "A2":
+        rr_target += 0.25
+    elif setup_type == "B":
+        rr_target -= 0.20
+
+    rr_target = float(clamp(rr_target, 1.80, 4.20))
+
+    # rr_targetベースのtp2
+    tp2_by_rr = entry + risk * rr_target
+
+    # 抵抗ベース（抵抗が近いなら現実に合わせる）
+    tp2_by_res = min(hi * 0.995, entry + risk * 4.5)
+
+    tp2 = min(tp2_by_rr, tp2_by_res)
+
+    # 最低限、tp2はentryより上
+    if tp2 <= entry * 1.01:
+        tp2 = entry + risk * 1.8
+
+    # TP1は 1.5R を基準に、tp2の下に収める（固定化しないため小さく揺らす）
+    tp1 = entry + risk * (1.35 if setup_type == "B" else 1.50)
+    tp1 = min(tp1, entry + (tp2 - entry) * 0.62)
+
+    return float(tp1), float(tp2)
 
 
-def calc_ev(rr: float, pwin: float) -> float:
+def compute_stop(df: pd.DataFrame, setup_type: str, entry_zone: Dict) -> float:
     """
-    EV = Pwin*RR - (1-Pwin)*1
+    Stop：仕様通り + 構造（直近安値）で補強
     """
+    entry = float(entry_zone["center"])
+    atr = float(entry_zone["atr"])
+
+    low = df["Low"].astype(float)
+    lookback = 12 if setup_type != "B" else 8
+    swing_low = float(low.tail(lookback).min())
+
+    if setup_type in ("A1", "A2"):
+        # STOP = IN_low - 0.7ATR（≒中心 -1.2ATR）
+        stop = float(entry_zone["low"] - 0.70 * atr)
+        # 構造安値も考慮
+        stop = min(stop, swing_low - 0.20 * atr)
+    else:
+        # B: BreakLine - 1.0ATR（centerをbreakline扱い）
+        stop = float(entry - 1.00 * atr)
+        stop = min(stop, swing_low - 0.20 * atr)
+
+    # 近すぎ/遠すぎを抑える
+    if entry > 0:
+        pct = (stop / entry) - 1.0
+        pct = clamp(pct, -0.12, -0.02)
+        stop = entry * (1.0 + pct)
+
+    return float(stop)
+
+
+def calc_expected_days(entry: float, tp2: float, atr: float, setup_type: str) -> float:
+    """
+    ExpectedDays = (tp2-entry)/(k*ATR)
+    kを固定しない（R/day分布を広げる）
+    """
+    if not (np.isfinite(entry) and np.isfinite(tp2) and np.isfinite(atr) and entry > 0 and tp2 > entry and atr > 0):
+        return 9.9
+
+    move = tp2 - entry
+    atr_pct = atr / entry
+
+    # ATR%が高いほど “進む速度” を上に寄せる（短期向き）
+    base_k = 0.90 + clamp((atr_pct - 0.02) * 6.0, -0.10, 0.35)  # 0.80〜1.25くらい
+
+    # setup補正
+    if setup_type == "A1":
+        base_k *= 1.05
+    elif setup_type == "A2":
+        base_k *= 0.92
+    elif setup_type == "B":
+        base_k *= 1.10
+
+    k = clamp(base_k, 0.75, 1.35)
+
+    days = move / (k * atr)
+    return float(clamp(days, 1.2, 7.0))
+
+
+def compute_ev(pwin: float, rr: float) -> float:
+    """
+    EV(R) = Pwin*RR - (1-Pwin)*1
+    """
+    if not (np.isfinite(pwin) and np.isfinite(rr) and rr > 0):
+        return -999.0
+    pwin = clamp(pwin, 0.0, 1.0)
     return float(pwin * rr - (1.0 - pwin) * 1.0)
