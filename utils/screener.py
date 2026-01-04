@@ -1,370 +1,393 @@
+# utils/screener.py
 from __future__ import annotations
 
-import os
-from datetime import date
-from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.util import safe_float, clamp
-from utils.features import add_indicators, calc_liquidity_flags, calc_atr_pct, estimate_pwin, regime_multiplier
-from utils.setup import detect_setup
-from utils.entry import compute_entry_zone
-from utils.rr_ev import dynamic_min_rr, compute_stop, compute_targets, compute_ev, calc_expected_days
-from utils.diversify import pick_with_constraints
+from utils.util import MarketState, EventState, safe_float
+from utils.features import compute_tech
+from utils.setup import decide_setup
+from utils.entry import build_entry_plan
+from utils.rr_ev import compute_rr_ev, rr_min_by_market
+from utils.diversify import corr_filter
 
 
-# ===== Universe filters =====
-PRICE_MIN = 200
-PRICE_MAX = 15000
-ADV20_MIN = 200_000_000  # 200M JPY/day
-ATR_PCT_MIN = 1.5
-ATR_PCT_MAX = 6.0
-
+# ============================================================
+# 設定（Swing専用）
+# ============================================================
 EARNINGS_EXCLUDE_DAYS = 3
 
+# 流動性（売買代金）
+ADV20_MIN = 200_000_000  # 2億円/日
+ADV20_SOFT = 100_000_000  # 1億円/日（弱いなら理由付けで除外）
+
+# ボラ
+ATR_PCT_MIN = 0.015
+ATR_PCT_MAX = 0.060
+
+# 候補数
+MAX_FINAL_NORMAL = 5
+MAX_FINAL_EVENT = 2
+
+# EV足切り（c）
+ADJ_EV_MIN = 0.5
+
+# 週次新規（別実装とぶつけないため、ここでは「表示用」だけ残す）
 WEEKLY_NEW_LIMIT = 3
 
 
-def _fetch_history(ticker: str, period: str = "320d") -> Optional[pd.DataFrame]:
+@dataclass
+class Candidate:
+    ticker: str
+    name: str
+    sector: str
+    setup: str
+    rr: float
+    ev: float
+    adj_ev: float
+    rpd: float
+    exp_days: float
+    entry_center: float
+    entry_low: float
+    entry_high: float
+    close: float
+    atr: float
+    gu: bool
+    stop: float
+    tp1: float
+    tp2: float
+    action: str
+    macro_tag: str
+    reject_reason: str = ""
+
+
+def _load_universe(path: str) -> pd.DataFrame:
+    """
+    universe_jpx.csv 必須列（最低）:
+      - ticker (例: 6503.T)
+    任意:
+      - name
+      - sector
+      - earnings_date (YYYY-MM-DD)
+    """
+    df = pd.read_csv(path)
+    if "ticker" not in df.columns:
+        raise ValueError("universe_jpx.csv needs 'ticker' column")
+    df["ticker"] = df["ticker"].astype(str).str.strip()
+    if "name" not in df.columns:
+        df["name"] = ""
+    if "sector" not in df.columns:
+        df["sector"] = ""
+    if "earnings_date" not in df.columns:
+        df["earnings_date"] = ""
+    return df
+
+
+def _earnings_near(_date_str: str) -> bool:
+    # 簡易：空はFalse
+    s = str(_date_str).strip()
+    if not s:
+        return False
+    # 本気版は営業日計算が必要だが、ここでは「±3営業日」を保守的に近似
+    # → 7日以内は危険として除外
     try:
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
-        if df is None or df.empty or len(df) < 120:
+        d = pd.to_datetime(s).to_pydatetime()
+        now = pd.Timestamp.now(tz="Asia/Tokyo").to_pydatetime()
+        return abs((d - now).days) <= 7
+    except Exception:
+        return False
+
+
+def _macro_tag(sector: str) -> str:
+    # 超簡易：本来は金利感応・景気敏感など分類テーブルを持つ
+    s = str(sector)
+    if "銀行" in s or "保険" in s or "不動産" in s:
+        return "rate_sensitive"
+    if "機械" in s or "化学" in s or "金属" in s:
+        return "cyclical"
+    if "食料" in s or "医薬" in s:
+        return "defensive"
+    return "other"
+
+
+def _fetch_ohlcv(ticker: str, period: str = "2y") -> Optional[pd.DataFrame]:
+    try:
+        df = yf.download(ticker, period=period, interval="1d", auto_adjust=True, progress=False)
+        df = df.dropna()
+        if len(df) < 80:
             return None
         return df
     except Exception:
         return None
 
 
-def _parse_universe(universe_path: str) -> Tuple[pd.DataFrame, str]:
-    df = pd.read_csv(universe_path)
-    if "ticker" in df.columns:
-        tcol = "ticker"
-    elif "code" in df.columns:
-        tcol = "code"
-    else:
-        raise ValueError("universe_jpx.csv に ticker/code が必要です")
-    return df, tcol
+def _adv20_jpy(df: pd.DataFrame) -> float:
+    # 売買代金 = Close * Volume を近似（JPY建て）
+    try:
+        v = (df["Close"] * df["Volume"]).rolling(20).mean().iloc[-1]
+        return float(v)
+    except Exception:
+        return 0.0
 
 
-def _filter_earnings(df: pd.DataFrame, today_date: date) -> pd.DataFrame:
-    if "earnings_date" not in df.columns:
-        return df
-    parsed = pd.to_datetime(df["earnings_date"], errors="coerce").dt.date
-    out = df.copy()
-    out["_earn"] = parsed
-    keep = []
-    for d in out["_earn"]:
-        if d is None or pd.isna(d):
-            keep.append(True)
-            continue
-        try:
-            keep.append(abs((d - today_date).days) > EARNINGS_EXCLUDE_DAYS)
-        except Exception:
-            keep.append(True)
-    return out.loc[keep].drop(columns=["_earn"], errors="ignore")
-
-
-def _classify_macro(sector: str) -> str:
-    """
-    ざっくり分類（表示用）
-    """
-    s = str(sector)
-    if any(k in s for k in ["銀行", "保険", "その他金融", "証券"]):
-        return "rate_sensitive"
-    if any(k in s for k in ["食料", "医薬", "水産", "小売"]):
-        return "defensive"
-    if any(k in s for k in ["機械", "電気", "金属", "化学", "建設", "輸送"]):
-        return "cyclical"
-    return "other"
-
-
-def _min_adjev_cut() -> float:
-    # (3) AdjEV < 0.5 を切る
-    return 0.50
-
-
-def _no_trade_reason(market: Dict, macro_caution: bool, weekly_new: int) -> List[str]:
-    reasons: List[str] = []
-    m = int(market["score"])
-    d = int(market["delta3d"])
-
-    # NO-TRADE完全機械化（裁量ゼロ）
-    if m < 45:
-        reasons.append("地合い悪化(MarketScore<45)")
-    if d <= -5 and m < 55:
-        reasons.append("地合い急悪化(Δ3d<=-5 & MarketScore<55)")
-    if macro_caution:
-        reasons.append("イベント接近")
-    if weekly_new >= WEEKLY_NEW_LIMIT:
-        reasons.append("週次上限到達")
-
-    return reasons[:2]
-
-
-def _recommend_leverage(market: Dict, macro_caution: bool, no_trade: bool) -> Tuple[float, str]:
-    m = int(market["score"])
-    d = int(market["delta3d"])
-
-    if no_trade:
-        return 1.0, "守り（新規禁止）"
-
-    if macro_caution:
-        # 本来は新規禁止だが、念のため表現は統一
-        return 1.0, "守り（イベント接近）"
-
-    if m >= 75:
-        return 2.0, "強気（押し目＋一部ブレイク）"
-    if m >= 65:
-        return 1.7, "やや強気（押し目メイン）"
-    if m >= 55:
-        return 1.3, "中立（厳選・押し目中心）"
-    if m >= 50:
-        return 1.1, "やや守り（新規ロット小さめ）"
-    return 1.0, "守り（新規かなり絞る）"
-
-
-def _calc_max_position(total_asset: float, lev: float) -> int:
-    if not (np.isfinite(total_asset) and total_asset > 0 and lev > 0):
-        return 0
-    return int(round(total_asset * lev))
-
-
-def run_swing_screening(
+def run_screening(
     universe_path: str,
-    today_date: date,
-    market: Dict,
-    macro_caution: bool,
-    weekly_new: int,
-) -> Dict:
-    """
-    return dict:
-      - no_trade: bool
-      - no_trade_reasons: [..]
-      - lev, lev_reason
-      - max_final: int
-      - candidates: list (selected)
-      - watchlist: list (rejected)
-      - summary: dict (avg metrics)
-    """
-    if not os.path.exists(universe_path):
-        return {
-            "no_trade": True,
-            "no_trade_reasons": ["ユニバースファイル無し"],
-            "lev": 1.0,
-            "lev_reason": "守り（データ不足）",
-            "max_final": 0,
-            "candidates": [],
-            "watchlist": [],
-            "summary": {},
-        }
+    positions_path: str,
+    events: EventState,
+    market: MarketState,
+    sectors: List[Tuple[str, float]],
+) -> Dict[str, Any]:
+    dfu = _load_universe(universe_path)
 
-    uni, tcol = _parse_universe(universe_path)
-    uni = _filter_earnings(uni, today_date)
+    macro_event_near = bool(events.macro_event_near)
+    rr_min = rr_min_by_market(market.score)
 
-    mkt_score = int(market["score"])
-    delta3d = int(market["delta3d"])
+    no_trade = bool(market.no_trade)
+    reasons: List[str] = []
+    if no_trade:
+        reasons.append(market.reason)
 
-    # (2) イベント時の候補数を最大2
-    max_final = 2 if macro_caution else 5
+    # まず候補を全部作る（落とす理由も残す）
+    candidates: List[Candidate] = []
+    rejected: List[Candidate] = []
 
-    # NO-TRADE判定
-    reasons = _no_trade_reason(market, macro_caution, weekly_new)
-    no_trade = len(reasons) > 0  # イベント接近もここで新規禁止
+    for _, r in dfu.iterrows():
+        ticker = str(r["ticker"]).strip()
+        name = str(r.get("name", "")).strip()
+        sector = str(r.get("sector", "")).strip()
 
-    lev, lev_reason = _recommend_leverage(market, macro_caution, no_trade)
-
-    # RR下限（地合い連動）
-    rr_min = dynamic_min_rr(mkt_score, delta3d)
-    adjev_cut = _min_adjev_cut()
-
-    cands: List[Dict] = []
-    watch: List[Dict] = []
-
-    for _, row in uni.iterrows():
-        ticker = str(row.get(tcol, "")).strip()
-        if not ticker:
+        # 決算±3営業日（近似）回避
+        if _earnings_near(str(r.get("earnings_date", ""))):
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup="-",
+                    rr=0, ev=0, adj_ev=0, rpd=0, exp_days=0,
+                    entry_center=0, entry_low=0, entry_high=0,
+                    close=0, atr=0, gu=False, stop=0, tp1=0, tp2=0,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason="決算近接(±3営業日回避)",
+                )
+            )
             continue
 
-        name = str(row.get("name", ticker)).strip()
-        sector = str(row.get("sector", row.get("industry_big", "不明"))).strip()
-
-        hist = _fetch_history(ticker, period="340d")
-        if hist is None:
+        ohlc = _fetch_ohlcv(ticker)
+        if ohlc is None:
             continue
 
-        df = add_indicators(hist)
-        c = float(df["Close"].iloc[-1])
-
-        # Price filter
-        if not (np.isfinite(c) and PRICE_MIN <= c <= PRICE_MAX):
+        tech = compute_tech(ohlc)
+        if tech is None:
             continue
 
-        # Liquidity
-        liq_ok, adv = calc_liquidity_flags(df, ADV20_MIN)
-        if not liq_ok:
-            watch.append({"ticker": ticker, "name": name, "sector": sector, "reason": "流動性不足（売買代金不足）"})
+        # Universe: 価格レンジ（任意）
+        if not (200 <= tech.close <= 15000):
+            continue
+
+        # ADV20
+        adv20 = _adv20_jpy(ohlc)
+        if adv20 < ADV20_MIN:
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup="-",
+                    rr=0, ev=0, adj_ev=0, rpd=0, exp_days=0,
+                    entry_center=0, entry_low=0, entry_high=0,
+                    close=tech.close, atr=tech.atr, gu=False, stop=0, tp1=0, tp2=0,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason="流動性不足(売買代金不足)",
+                )
+            )
             continue
 
         # ATR%
-        atr_pct = calc_atr_pct(df)
-        if not np.isfinite(atr_pct) or atr_pct < ATR_PCT_MIN:
-            watch.append({"ticker": ticker, "name": name, "sector": sector, "reason": "値動きが小さい（ボラ不足）"})
+        if tech.atr_pct < ATR_PCT_MIN:
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup="-",
+                    rr=0, ev=0, adj_ev=0, rpd=0, exp_days=0,
+                    entry_center=0, entry_low=0, entry_high=0,
+                    close=tech.close, atr=tech.atr, gu=False, stop=0, tp1=0, tp2=0,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason="値動きが小さい（ボラ不足）",
+                )
+            )
             continue
-        if atr_pct > ATR_PCT_MAX:
-            watch.append({"ticker": ticker, "name": name, "sector": sector, "reason": "値動きが荒すぎる（事故ゾーン）"})
-            continue
-
-        # Setup
-        setup_type, setup_meta = detect_setup(df)
-        if setup_type == "-":
-            watch.append({"ticker": ticker, "name": name, "sector": sector, "reason": "チャート形状不一致"})
-            continue
-
-        # Entry & action
-        entry_zone = compute_entry_zone(df, setup_type, setup_meta)
-
-        # GUなら新規は“監視”へ
-        if entry_zone["gu"]:
-            entry_zone["action"] = "今日は監視"
-
-        # Stop / Targets / RR
-        stop = compute_stop(df, setup_type, entry_zone)
-        tp1, tp2 = compute_targets(df, setup_type, entry_zone["center"], stop, mkt_score)
-
-        entry = float(entry_zone["center"])
-        risk = entry - stop
-        if not (np.isfinite(entry) and np.isfinite(stop) and entry > stop and risk > 0):
-            watch.append({"ticker": ticker, "name": name, "sector": sector, "reason": "計算不成立"})
+        if tech.atr_pct >= ATR_PCT_MAX:
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup="-",
+                    rr=0, ev=0, adj_ev=0, rpd=0, exp_days=0,
+                    entry_center=0, entry_low=0, entry_high=0,
+                    close=tech.close, atr=tech.atr, gu=False, stop=0, tp1=0, tp2=0,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason="ボラ高すぎ（事故ゾーン）",
+                )
+            )
             continue
 
-        rr = (tp2 - entry) / risk
-        if not (np.isfinite(rr) and rr >= rr_min):
-            watch.append({"ticker": ticker, "name": name, "sector": sector, "reason": f"利益幅が足りない（RR不足 RR<{rr_min:.2f}）"})
+        # Setup（A1/A2）
+        setup = decide_setup(tech)
+        if not setup.ok:
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup="-",
+                    rr=0, ev=0, adj_ev=0, rpd=0, exp_days=0,
+                    entry_center=0, entry_low=0, entry_high=0,
+                    close=tech.close, atr=tech.atr, gu=False, stop=0, tp1=0, tp2=0,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason="チャート形状不一致",
+                )
+            )
             continue
 
-        # Feature for Pwin
-        ma20 = float(df["ma20"].iloc[-1])
-        ma50 = float(df["ma50"].iloc[-1])
-        trend = 1.0 if (entry > ma20 > ma50) else (0.6 if entry > ma20 else 0.3)
-
-        # pullback quality: dist_atrが小さいほど良い（追いかけ禁止）
-        dist = float(entry_zone["dist_atr"])
-        pull_q = 1.0 - clamp(dist / 0.8, 0.0, 1.0)
-
-        # volume quality（押しで出来高枯れの簡易）
-        vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
-        vol_now = float(vol.iloc[-1]) if np.isfinite(vol.iloc[-1]) else float("nan")
-        vol_ma20 = float(vol.rolling(20).mean().iloc[-1]) if len(vol) >= 20 else float("nan")
-        volume_q = 0.5
-        if np.isfinite(vol_now) and np.isfinite(vol_ma20) and vol_ma20 > 0:
-            volume_q = clamp((vol_ma20 / (vol_now + 1e-9)), 0.0, 1.0)  # 押しで薄いほど↑
-            volume_q = float(clamp(volume_q, 0.0, 1.0))
-
-        liq_norm = clamp(np.log10(max(adv, 1.0)) / 10.0, 0.0, 1.0)
-        gap_safe = 0.0 if entry_zone["gu"] else 1.0
-
-        feat = {
-            "trend": trend,
-            "pullback_quality": pull_q,
-            "volume_quality": volume_q,
-            "liquidity": liq_norm,
-            "gap_risk": gap_safe,
-        }
-        pwin = estimate_pwin(feat)
-
-        ev = compute_ev(pwin, rr)
-        mult = regime_multiplier(mkt_score, delta3d, macro_caution)
-        adjev = ev * mult
-
-        # (3) AdjEV < 0.5 を切る
-        if not (np.isfinite(adjev) and adjev >= adjev_cut):
-            watch.append({"ticker": ticker, "name": name, "sector": sector, "reason": "期待値が低い（補正EV不足）"})
+        # Entry
+        ep = build_entry_plan(tech, setup.kind)
+        if ep.action == "今日は見送り":
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup=setup.kind,
+                    rr=0, ev=0, adj_ev=0, rpd=0, exp_days=0,
+                    entry_center=ep.in_center, entry_low=ep.in_low, entry_high=ep.in_high,
+                    close=tech.close, atr=tech.atr, gu=ep.gu, stop=0, tp1=0, tp2=0,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason="追いかけ禁止（IN帯外/GU/乖離）",
+                )
+            )
             continue
 
-        # Speed
-        atr = float(entry_zone["atr"])
-        exp_days = calc_expected_days(entry, tp2, atr, setup_type)
-        rday = rr / exp_days if exp_days > 0 else 0.0
+        # rr/ev
+        trend_strength = 1.0  # ここは今後強化できる（MA傾き等）
+        rs = clamp(tech.ret20, -0.10, 0.10) / 0.10  # 簡易正規化
+        volume_quality = 0.0
+        if tech.vol_ma20 > 0:
+            volume_quality = clamp((tech.vol / tech.vol_ma20 - 1.0), -0.5, 1.0) / 1.0
+        liquidity = clamp((adv20 - ADV20_MIN) / ADV20_MIN, 0.0, 1.0)
+        gap_risk = 1.0 if ep.gu else 0.0
 
-        # (4) R/day分布を広げる：固定の足切りをしない（選抜スコアに反映）
-        # “速度主導”なので、最終スコアは R/day を強く効かせる
-        final_score = float(adjev + 0.65 * rday)
-
-        macro_tag = _classify_macro(sector)
-
-        cands.append(
-            {
-                "ticker": ticker,
-                "name": name,
-                "sector": sector,
-                "setup": setup_type,
-                "rr": float(rr),
-                "ev": float(ev),
-                "adjev": float(adjev),
-                "rday": float(rday),
-                "entry": float(entry),
-                "entry_low": float(entry_zone["low"]),
-                "entry_high": float(entry_zone["high"]),
-                "price_now": float(entry_zone["price_now"]),
-                "atr": float(entry_zone["atr"]),
-                "gu": bool(entry_zone["gu"]),
-                "stop": float(stop),
-                "tp1": float(tp1),
-                "tp2": float(tp2),
-                "exp_days": float(exp_days),
-                "action": str(entry_zone["action"]),
-                "macro": macro_tag,
-                "final_score": final_score,
-                "_df_ind": df,  # 相関用
-            }
+        rrev = compute_rr_ev(
+            entry=ep.in_center,
+            in_low=ep.in_low,
+            atr=tech.atr,
+            market=market,
+            macro_event_near=macro_event_near,
+            trend_strength=float(trend_strength),
+            rs=float(rs),
+            volume_quality=float(volume_quality),
+            liquidity=float(liquidity),
+            gap_risk=float(gap_risk),
+            ret20=float(tech.ret20),
+            atr_pct=float(tech.atr_pct),
         )
 
-    # sort（速度主導 + 期待値）
-    cands.sort(key=lambda x: (x["final_score"], x["adjev"], x["rday"], x["rr"]), reverse=True)
+        # RR下限（地合い連動）
+        if rrev.rr < rr_min:
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup=setup.kind,
+                    rr=rrev.rr, ev=rrev.ev, adj_ev=rrev.adj_ev, rpd=rrev.r_per_day, exp_days=rrev.exp_days,
+                    entry_center=ep.in_center, entry_low=ep.in_low, entry_high=ep.in_high,
+                    close=tech.close, atr=tech.atr, gu=ep.gu,
+                    stop=rrev.stop, tp1=rrev.tp1, tp2=rrev.tp2,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason=f"RR不足(RR<{rr_min:.1f})",
+                )
+            )
+            continue
 
-    # NO-TRADEなら新規は全部「今日は監視」
-    if no_trade:
-        for c in cands:
-            c["action"] = "今日は監視"
+        # AdjEV足切り（c）
+        if rrev.adj_ev < ADJ_EV_MIN:
+            rejected.append(
+                Candidate(
+                    ticker=ticker, name=name, sector=sector, setup=setup.kind,
+                    rr=rrev.rr, ev=rrev.ev, adj_ev=rrev.adj_ev, rpd=rrev.r_per_day, exp_days=rrev.exp_days,
+                    entry_center=ep.in_center, entry_low=ep.in_low, entry_high=ep.in_high,
+                    close=tech.close, atr=tech.atr, gu=ep.gu,
+                    stop=rrev.stop, tp1=rrev.tp1, tp2=rrev.tp2,
+                    action="今日は見送り", macro_tag=_macro_tag(sector),
+                    reject_reason="補正EV不足(AdjEV<0.5)",
+                )
+            )
+            continue
 
-    # diversification
-    picked = pick_with_constraints(cands, max_final=max_final, max_sector=2, corr_limit=0.75)
+        # 速度優先：R/日
+        c = Candidate(
+            ticker=ticker,
+            name=name,
+            sector=sector,
+            setup=setup.kind,
+            rr=rrev.rr,
+            ev=rrev.ev,
+            adj_ev=rrev.adj_ev,
+            rpd=rrev.r_per_day,
+            exp_days=rrev.exp_days,
+            entry_center=ep.in_center,
+            entry_low=ep.in_low,
+            entry_high=ep.in_high,
+            close=tech.close,
+            atr=tech.atr,
+            gu=ep.gu,
+            stop=rrev.stop,
+            tp1=rrev.tp1,
+            tp2=rrev.tp2,
+            action=ep.action,
+            macro_tag=_macro_tag(sector),
+        )
+        # 相関判定用リターン系列
+        ret_series = ohlc["Close"].pct_change().tail(30)
+        setattr(c, "ret_series", ret_series)
+        candidates.append(c)
 
-    # rejected by diversification -> watchlistに回す
-    picked_set = set([p["ticker"] for p in picked])
-    for c in cands:
-        if c["ticker"] not in picked_set:
-            reason = c.get("reject_reason")
-            if reason:
-                watch.append({"ticker": c["ticker"], "name": c["name"], "sector": c["sector"], "reason": reason})
+    # NO-TRADEなら新規候補は出すが、行動は「今日は見送り」に寄せる（レポート上）
+    # ただし計算自体は維持（強い候補を観測する価値はある）
+    # イベント接近時は候補数制限
+    max_final = MAX_FINAL_EVENT if macro_event_near else MAX_FINAL_NORMAL
 
-    # summary
-    def _avg(vals: List[float]) -> float:
-        v = [x for x in vals if np.isfinite(x)]
-        return float(np.mean(v)) if v else 0.0
+    # ソート：補正EV → R/日（速度）を優先しつつ
+    # ※あなたの方針で「速度主導」にしたいなら R/日 を主キーにできる
+    candidates.sort(key=lambda x: (x.adj_ev, x.rpd), reverse=True)
 
-    summary = {
-        "count": len(picked),
-        "avg_rr": _avg([x["rr"] for x in picked]),
-        "avg_ev": _avg([x["ev"] for x in picked]),
-        "avg_adjev": _avg([x["adjev"] for x in picked]),
-        "avg_rday": _avg([x["rday"] for x in picked]),
-        "rr_min": float(rr_min),
-        "adjev_cut": float(adjev_cut),
-        "max_final": int(max_final),
-        "no_trade": bool(no_trade),
-    }
+    # 相関フィルタ（採用を絞る）
+    # Candidateをdictっぽく扱うため変換
+    cand_dicts: List[Dict[str, Any]] = []
+    for c in candidates:
+        d = c.__dict__.copy()
+        d["ret_series"] = getattr(c, "ret_series", None)
+        cand_dicts.append(d)
+
+    picked_dicts, removed_corr = corr_filter(cand_dicts, corr_limit=0.75)
+    picked: List[Candidate] = []
+    removed: List[Candidate] = []
+
+    for d in picked_dicts[:max_final]:
+        picked.append(Candidate(**{k: d[k] for k in Candidate.__dataclass_fields__.keys() if k in d}))
+
+    for d in removed_corr:
+        if "reject_reason" not in d:
+            d["reject_reason"] = "相関高"
+        removed.append(Candidate(**{k: d[k] for k in Candidate.__dataclass_fields__.keys() if k in d}))
+
+    # 平均AdjEVが低い場合は「見送り」判定（あなたの運用思想に合わせる）
+    avg_adj_ev = float(np.mean([c.adj_ev for c in picked])) if picked else 0.0
+    force_no_trade = False
+    if macro_event_near and avg_adj_ev < 1.2:
+        force_no_trade = True
+        reasons.append("イベント接近 & 平均補正EVが弱い")
 
     return {
-        "no_trade": bool(no_trade),
-        "no_trade_reasons": reasons,
-        "lev": float(lev),
-        "lev_reason": lev_reason,
-        "max_final": int(max_final),
-        "candidates": picked,
-        "watchlist": watch[:10],  # 表示は最大10
-        "summary": summary,
+        "picked": picked,
+        "rejected": rejected,
+        "removed": removed,
+        "no_trade": no_trade or force_no_trade,
+        "reasons": reasons,
+        "weekly_new": 0,
+        "weekly_limit": WEEKLY_NEW_LIMIT,
+        "macro_event_near": macro_event_near,
+        "max_final": max_final,
+        "rr_min": rr_min,
+        "avg_rr": float(np.mean([c.rr for c in picked])) if picked else 0.0,
+        "avg_ev": float(np.mean([c.ev for c in picked])) if picked else 0.0,
+        "avg_adj_ev": avg_adj_ev,
+        "avg_rpd": float(np.mean([c.rpd for c in picked])) if picked else 0.0,
     }
