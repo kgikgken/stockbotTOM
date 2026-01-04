@@ -1,75 +1,79 @@
+# utils/util.py
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone, date
-from typing import Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
 
-JST = timezone(timedelta(hours=9))
+DEFAULT_TZ = timezone(timedelta(hours=9))
 
 
 def jst_now() -> datetime:
-    return datetime.now(JST)
+    return datetime.now(DEFAULT_TZ)
 
 
 def jst_today_str() -> str:
     return jst_now().strftime("%Y-%m-%d")
 
 
-def jst_today_date() -> date:
-    return jst_now().date()
-
-
-def safe_float(x, default=float("nan")) -> float:
+def safe_float(x: Any, default: float = 0.0) -> float:
     try:
-        v = float(x)
-        if v != v:  # nan
-            return float(default)
-        return float(v)
+        if x is None:
+            return default
+        return float(x)
     except Exception:
-        return float(default)
+        return default
 
 
-def clamp(v: float, lo: float, hi: float) -> float:
-    return float(max(lo, min(hi, v)))
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
 
 
-def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str: str | None) -> Optional[datetime]:
-    """
-    events.csv で
-      - datetime: "2026-01-05 00:00"
-      - date: "2026-01-05" と time:"00:00"
-      - date: "2026-01-05" のみ
-    を許容して JST datetime を返す
-    """
-    dt_str = (dt_str or "").strip()
-    date_str = (date_str or "").strip()
-    time_str = (time_str or "").strip()
-
-    # 1) datetime優先
-    if dt_str:
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(dt_str, fmt).replace(tzinfo=JST)
-            except Exception:
-                pass
-
-    # 2) date + time
-    if date_str and time_str:
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(f"{date_str} {time_str}", fmt).replace(tzinfo=JST)
-            except Exception:
-                pass
-
-    # 3) dateのみ（00:00）
-    if date_str:
-        try:
-            return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=JST)
-        except Exception:
-            return None
-
-    return None
+def fmt_int(n: float) -> str:
+    try:
+        return f"{int(round(n)):,}"
+    except Exception:
+        return "n/a"
 
 
-def weekday_monday(d: date) -> date:
-    # 月曜起点
-    return d - timedelta(days=d.weekday())
+def fmt_float(x: float, nd: int = 2) -> str:
+    if x is None:
+        return "n/a"
+    try:
+        return f"{float(x):.{nd}f}"
+    except Exception:
+        return "n/a"
+
+
+def pct(x: float, nd: int = 2) -> str:
+    if x is None:
+        return "n/a"
+    try:
+        return f"{float(x) * 100:.{nd}f}%"
+    except Exception:
+        return "n/a"
+
+
+@dataclass(frozen=True)
+class MarketState:
+    score: float
+    delta_3d: float
+    regime: str  # "bull" / "neutral" / "bear"
+    macro_caution: bool
+    leverage: float
+    max_gross: float
+    no_trade: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class EventState:
+    macro_event_near: bool
+    macro_event_text: str
+
+
+def dict_get(d: Dict[str, Any], k: str, default: Any = None) -> Any:
+    try:
+        return d.get(k, default)
+    except Exception:
+        return default
