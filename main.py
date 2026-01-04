@@ -1,45 +1,40 @@
+# stockbotTOM - Swing Screener (1-7 days)
 from __future__ import annotations
 
 import os
 
-from utils.util import jst_today_str, jst_today_date
-from utils.market import build_market_context
-from utils.position import load_positions, analyze_positions
-from utils.report import build_report_text
-from utils.line import send_line_text
+from utils.setup import Config, load_config
+from utils.util import safe_print
+from utils.events import load_events
+from utils.screener import run_screening
+from utils.report import build_line_report
+from utils.line import send_line_via_worker
 
 
-UNIVERSE_PATH = "universe_jpx.csv"
-POSITIONS_PATH = "positions.csv"
-EVENTS_PATH = "events.csv"
+def main() -> int:
+    cfg: Config = load_config()
 
+    events = load_events(cfg.EVENTS_PATH)
 
-def main() -> None:
-    today_str = jst_today_str()
-    today_date = jst_today_date()
-
-    mkt = build_market_context(today_date=today_date)
-
-    pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset = analyze_positions(pos_df, mkt_score=int(mkt["score"]))
-
-    report = build_report_text(
-        today_str=today_str,
-        today_date=today_date,
-        market=mkt,
-        positions_text=pos_text,
-        total_asset=total_asset,
-        universe_path=UNIVERSE_PATH,
-        events_path=EVENTS_PATH,
+    result = run_screening(
+        universe_path=cfg.UNIVERSE_PATH,
+        positions_path=cfg.POSITIONS_PATH,
+        events=events,
+        cfg=cfg,
     )
 
-    # GitHub Actions log
-    print(report)
+    report = build_line_report(result, cfg=cfg)
+    safe_print(report)
 
-    # LINE
-    worker_url = os.getenv("WORKER_URL", "")
-    send_line_text(worker_url=worker_url, text=report)
+    worker_url = os.getenv("WORKER_URL", "").strip()
+    if worker_url:
+        ok, msg = send_line_via_worker(worker_url, report, timeout=cfg.WORKER_TIMEOUT_SEC)
+        safe_print(f"[LINE] ok={ok} msg={msg}")
+    else:
+        safe_print("[LINE] WORKER_URL not set. (Skipped sending)")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
