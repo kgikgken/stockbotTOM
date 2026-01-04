@@ -1,78 +1,50 @@
+# main.py
 from __future__ import annotations
 
 import os
-from typing import List, Dict
 
-import numpy as np
-import requests
-
-from utils.util import jst_today_str, jst_today_date
-from utils.line import send_line
-from utils.events import load_events, build_event_section, detect_macro_caution
-from utils.market import build_market_context
-from utils.sector import build_sector_ranking
-from utils.position import load_positions, analyze_positions, calc_weekly_new_count
-from utils.screener import run_swing_screening
-from utils.report import build_daily_report
-
-
-# =========================
-# Paths / Env
-# =========================
-UNIVERSE_PATH = "universe_jpx.csv"
-POSITIONS_PATH = "positions.csv"
-EVENTS_PATH = "events.csv"
-WORKER_URL = os.getenv("WORKER_URL")
+from utils.util import jst_today_str
+from utils.events import load_events
+from utils.market import calc_market_state
+from utils.sector import top_sectors_5d
+from utils.screener import run_screening
+from utils.report import build_line_report
+from utils.line import line_notify
 
 
 def main() -> None:
-    today_str = jst_today_str()
-    today_date = jst_today_date()
+    universe_path = os.getenv("UNIVERSE_PATH", "universe_jpx.csv")
+    positions_path = os.getenv("POSITIONS_PATH", "positions.csv")
+    events_path = os.getenv("EVENTS_PATH", "events.csv")
+    worker_url = os.getenv("WORKER_URL")  # Cloudflare Worker URL（LINE配送に使用）
 
-    # --- Market ---
-    mkt = build_market_context()
+    # 1) イベント（マクロ警戒）
+    events = load_events(events_path)
 
-    # --- Events ---
-    events = load_events(EVENTS_PATH)
-    event_lines = build_event_section(events, today_date)
-    macro_caution = detect_macro_caution(events, today_date)  # イベント接近なら ON
+    # 2) 地合い
+    market = calc_market_state()
 
-    # --- Positions ---
-    pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset = analyze_positions(pos_df, mkt_score=mkt["score"])
-    weekly_new = calc_weekly_new_count(pos_df, today_date=today_date)  # entry_date が無ければ 0
+    # 3) セクター
+    sectors = top_sectors_5d()
 
-    if not (np.isfinite(total_asset) and total_asset > 0):
-        total_asset = 2_000_000.0
-
-    # --- Sector (説明用) ---
-    sector_rank = build_sector_ranking(universe_path=UNIVERSE_PATH, top_n=5)
-
-    # --- Screening ---
-    swing_result = run_swing_screening(
-        universe_path=UNIVERSE_PATH,
-        today_date=today_date,
-        market=mkt,
-        macro_caution=macro_caution,
-        weekly_new=weekly_new,
+    # 4) スクリーニング（Swing専用）
+    result = run_screening(
+        universe_path=universe_path,
+        positions_path=positions_path,
+        events=events,
+        market=market,
+        sectors=sectors,
     )
 
-    # --- Report ---
-    report = build_daily_report(
-        today_str=today_str,
-        today_date=today_date,
-        market=mkt,
-        macro_caution=macro_caution,
-        weekly_new=weekly_new,
-        total_asset=float(total_asset),
-        sector_rank=sector_rank,
-        event_lines=event_lines,
-        swing=swing_result,
-        pos_text=pos_text,
-    )
+    # 5) レポート生成
+    msg = build_line_report(date_str=jst_today_str(), market=market, sectors=sectors, events=events, result=result)
 
-    print(report)
-    send_line(report, worker_url=WORKER_URL)
+    # 6) LINE送信
+    if worker_url:
+        line_notify(worker_url=worker_url, message=msg)
+    else:
+        # WORKER_URLが無いときは標準出力（ローカル確認用）
+        print(msg)
 
 
 if __name__ == "__main__":
