@@ -1,44 +1,35 @@
 from __future__ import annotations
 
+from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
 from utils.util import clamp
 
 
-def _last(x: pd.Series) -> float:
-    try:
-        return float(x.iloc[-1])
-    except Exception:
-        return np.nan
-
-
 def _atr(df: pd.DataFrame, period: int = 14) -> float:
     if df is None or len(df) < period + 2:
-        return np.nan
+        return float("nan")
     high = df["High"].astype(float)
     low = df["Low"].astype(float)
     close = df["Close"].astype(float)
     prev_close = close.shift(1)
-
     tr = pd.concat(
         [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
         axis=1
     ).max(axis=1)
+    v = float(tr.rolling(period).mean().iloc[-1])
+    return v if np.isfinite(v) else float("nan")
 
-    atr = tr.rolling(period).mean().iloc[-1]
-    return float(atr) if np.isfinite(atr) else np.nan
 
+def add_indicators(hist: pd.DataFrame) -> pd.DataFrame:
+    df = hist.copy()
+    close = df["Close"].astype(float)
+    vol = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(np.nan, index=df.index)
 
-def compute_indicators(hist: pd.DataFrame) -> dict:
-    close = hist["Close"].astype(float)
-    high = hist["High"].astype(float)
-    low = hist["Low"].astype(float)
-    vol = hist["Volume"].astype(float) if "Volume" in hist.columns else pd.Series(np.nan, index=hist.index)
-
-    ma20 = close.rolling(20).mean()
-    ma50 = close.rolling(50).mean()
-    ma10 = close.rolling(10).mean()
+    df["ma20"] = close.rolling(20).mean()
+    df["ma50"] = close.rolling(50).mean()
+    df["ma10"] = close.rolling(10).mean()
 
     # RSI14
     delta = close.diff()
@@ -47,59 +38,75 @@ def compute_indicators(hist: pd.DataFrame) -> dict:
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / (avg_loss + 1e-9)
-    rsi14 = 100 - (100 / (1 + rs))
+    df["rsi14"] = 100 - (100 / (1 + rs))
 
-    atr = _atr(hist, 14)
-    c = _last(close)
+    # ATR
+    df["atr14"] = np.nan
+    v = _atr(df, 14)
+    if np.isfinite(v):
+        df.loc[df.index[-1], "atr14"] = v
 
-    # 売買代金（JPY換算として proxy: close*volume）
-    turnover = close * vol
-    adv20 = _last(turnover.rolling(20).mean())
+    # 売買代金(概算): Close * Volume
+    df["turnover"] = close * vol
+    df["adv20"] = df["turnover"].rolling(20).mean()
 
-    # 20日高値（ブレイク判定）
-    hh20 = _last(close.rolling(20).max())
+    # 20日リターン（相関用）
+    df["ret1"] = close.pct_change(fill_method=None)
 
-    return {
-        "close": c,
-        "ma10": _last(ma10),
-        "ma20": _last(ma20),
-        "ma50": _last(ma50),
-        "rsi14": _last(rsi14),
-        "atr": float(atr) if np.isfinite(atr) else np.nan,
-        "adv20": float(adv20) if np.isfinite(adv20) else np.nan,
-        "hh20": float(hh20) if np.isfinite(hh20) else np.nan,
-        "high": float(_last(high)),
-        "low": float(_last(low)),
-    }
+    return df
 
 
-def atr_percent(ind: dict) -> float:
-    c = float(ind.get("close", np.nan))
-    atr = float(ind.get("atr", np.nan))
-    if not (np.isfinite(c) and c > 0 and np.isfinite(atr) and atr > 0):
-        return 0.0
-    return float(atr / c * 100.0)
+def calc_liquidity_flags(df: pd.DataFrame, adv_min: float) -> Tuple[bool, float]:
+    adv = float(df["adv20"].iloc[-1]) if "adv20" in df.columns and len(df) >= 20 else float("nan")
+    ok = bool(np.isfinite(adv) and adv >= adv_min)
+    return ok, (adv if np.isfinite(adv) else 0.0)
 
 
-def setup_type(ind: dict) -> str:
+def calc_atr_pct(df: pd.DataFrame) -> float:
+    close = float(df["Close"].iloc[-1])
+    atr = float(df["atr14"].iloc[-1]) if "atr14" in df.columns else float("nan")
+    if not (np.isfinite(close) and close > 0 and np.isfinite(atr) and atr > 0):
+        return float("nan")
+    return float((atr / close) * 100.0)
+
+
+def estimate_pwin(feature: Dict) -> float:
     """
-    Setup A/Bのみ（逆張りOFF）
+    代理Pwin：0.20〜0.62 の範囲に収める（過剰に盛らない）
     """
-    c = ind["close"]
-    ma20 = ind["ma20"]
-    ma50 = ind["ma50"]
-    rsi = ind["rsi14"]
-    hh20 = ind["hh20"]
+    trend = clamp(feature.get("trend", 0.0), 0.0, 1.0)
+    pullback_quality = clamp(feature.get("pullback_quality", 0.0), 0.0, 1.0)
+    volume = clamp(feature.get("volume_quality", 0.0), 0.0, 1.0)
+    liquidity = clamp(feature.get("liquidity", 0.0), 0.0, 1.0)
+    gap_risk = clamp(feature.get("gap_risk", 0.0), 0.0, 1.0)  # 1が安全
 
-    if not all(np.isfinite([c, ma20, ma50, rsi])):
-        return "-"
+    raw = (
+        0.28
+        + 0.16 * trend
+        + 0.10 * pullback_quality
+        + 0.06 * volume
+        + 0.04 * liquidity
+        + 0.08 * gap_risk
+    )
+    return float(clamp(raw, 0.20, 0.62))
 
-    # A: トレンド押し目
-    if c > ma20 > ma50 and 40 <= rsi <= 62:
-        return "A"
 
-    # B: ブレイク（厳選。追いかけ禁止なのでエントリーは後で帯チェック）
-    if np.isfinite(hh20) and c > hh20 and c > ma20 > ma50:
-        return "B"
+def regime_multiplier(mkt_score: int, delta3d: int, macro_caution: bool) -> float:
+    mult = 1.0
+    if mkt_score >= 70 and delta3d >= 0:
+        mult *= 1.06
+    elif mkt_score >= 60 and delta3d >= 0:
+        mult *= 1.03
 
-    return "-"
+    if delta3d <= -5:
+        mult *= 0.78
+    elif delta3d <= -2:
+        mult *= 0.90
+
+    if mkt_score < 50:
+        mult *= 0.90
+
+    if macro_caution:
+        mult *= 0.75
+
+    return float(clamp(mult, 0.55, 1.10))
