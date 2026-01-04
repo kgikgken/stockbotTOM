@@ -1,148 +1,125 @@
 from __future__ import annotations
 
+from typing import Dict, Tuple
 import numpy as np
+import pandas as pd
 import yfinance as yf
 
+from utils.util import clamp
 
-def _history(symbol: str, period: str = "200d"):
+
+def _fetch_index(symbol: str, period: str = "80d") -> pd.DataFrame:
     try:
         df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        return df
+        return df if df is not None else pd.DataFrame()
     except Exception:
-        return None
+        return pd.DataFrame()
 
 
-def _ret(df, n: int) -> float:
-    if df is None or len(df) < n + 1:
-        return 0.0
-    c = df["Close"].astype(float)
-    return float((c.iloc[-1] / c.iloc[-(n + 1)] - 1.0) * 100.0)
+def _rsi(close: pd.Series, period: int = 14) -> float:
+    if close is None or len(close) < period + 2:
+        return float("nan")
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    v = float(rsi.iloc[-1])
+    return v if np.isfinite(v) else float("nan")
 
 
-def _ma(df, w: int) -> float:
-    if df is None or len(df) < w:
-        return np.nan
-    return float(df["Close"].astype(float).rolling(w).mean().iloc[-1])
-
-
-def calc_market_score() -> dict:
+def _score_from_index(df: pd.DataFrame) -> Tuple[float, float, float, float]:
     """
-    0-100：指数のトレンド + モメンタム
+    return: (score_component, ret5, ret20, rsi14)
     """
-    n225 = _history("^N225", "260d")
-    topx = _history("^TOPX", "260d")
+    if df is None or df.empty or len(df) < 55:
+        return 0.0, 0.0, 0.0, 50.0
 
-    r5 = (_ret(n225, 5) + _ret(topx, 5)) / 2.0
-    r20 = (_ret(n225, 20) + _ret(topx, 20)) / 2.0
+    close = df["Close"].astype(float)
+    c = float(close.iloc[-1])
+    ma20 = float(close.rolling(20).mean().iloc[-1])
+    ma50 = float(close.rolling(50).mean().iloc[-1])
 
-    # Trend check
-    c_n = float(n225["Close"].iloc[-1]) if n225 is not None else 0.0
-    ma50_n = _ma(n225, 50)
-    ma20_n = _ma(n225, 20)
+    ret5 = float((close.iloc[-1] / close.iloc[-6] - 1.0) * 100.0) if len(close) >= 6 else 0.0
+    ret20 = float((close.iloc[-1] / close.iloc[-21] - 1.0) * 100.0) if len(close) >= 21 else 0.0
+    rsi14 = _rsi(close, 14)
 
-    trend = 0.0
-    if np.isfinite(c_n) and np.isfinite(ma20_n) and np.isfinite(ma50_n):
-        if c_n > ma50_n and ma20_n > ma50_n:
-            trend = 1.0
-        elif c_n > ma50_n:
-            trend = 0.6
-        else:
-            trend = 0.2
+    sc = 0.0
+    # Trend
+    if c > ma50:
+        sc += 10
+    if ma20 > ma50:
+        sc += 10
+    # Momentum
+    sc += clamp(ret5, -6, 6) * 1.5
+    sc += clamp(ret20, -12, 12) * 0.8
+    # RSI (過熱/弱さ)
+    if np.isfinite(rsi14):
+        if 45 <= rsi14 <= 65:
+            sc += 6
+        elif rsi14 < 40:
+            sc -= 6
+        elif rsi14 > 75:
+            sc -= 4
 
-    # Score mapping
-    base = 50.0
-    base += np.clip(r5, -10, 10) * 1.2
-    base += np.clip(r20, -15, 15) * 0.8
-    base += (trend - 0.5) * 20.0
-
-    score = int(np.clip(round(base), 0, 100))
-    comment = (
-        "強め" if score >= 70 else
-        "やや強め" if score >= 60 else
-        "中立" if score >= 50 else
-        "弱め" if score >= 40 else
-        "弱い"
-    )
-
-    return {"score": score, "comment": comment, "r5": r5, "r20": r20}
+    return sc, ret5, ret20, (float(rsi14) if np.isfinite(rsi14) else 50.0)
 
 
-def enhance_market_score() -> dict:
+def build_market_context() -> Dict:
     """
-    calc_market_score + SOX/NVDAを軽く反映（過剰に振らない）
+    MarketScore(0-100) と Δ3d を作る
     """
-    m = calc_market_score()
-    score = float(m["score"])
+    n225 = _fetch_index("^N225")
+    topx = _fetch_index("^TOPX")
 
-    # SOX
-    sox = _history("^SOX", "60d")
-    sox5 = _ret(sox, 5)
-    score += float(np.clip(sox5 / 2.0, -5.0, 5.0))
-    m["sox_5d"] = sox5
+    sc1, n225_5d, n225_20d, n225_rsi = _score_from_index(n225)
+    sc2, topx_5d, topx_20d, topx_rsi = _score_from_index(topx)
 
-    # NVDA
-    nv = _history("NVDA", "60d")
-    nv5 = _ret(nv, 5)
-    score += float(np.clip(nv5 / 3.0, -4.0, 4.0))
-    m["nvda_5d"] = nv5
+    base = 50.0 + (sc1 + sc2) / 2.0
+    score = int(clamp(round(base), 0, 100))
 
-    m["score"] = int(np.clip(round(score), 0, 100))
-    # comment再計算
-    sc = m["score"]
-    m["comment"] = (
-        "強め" if sc >= 70 else
-        "やや強め" if sc >= 60 else
-        "中立" if sc >= 50 else
-        "弱め" if sc >= 40 else
-        "弱い"
-    )
-    return m
+    # Δ3d（スコア変化）
+    # “3日前”のスコアを再計算して差を取る（粗いが安定）
+    delta3d = 0
+    try:
+        if n225 is not None and len(n225) >= 10 and topx is not None and len(topx) >= 10:
+            n225_past = n225.iloc[:-3]
+            topx_past = topx.iloc[:-3]
+            sc1p, _, _, _ = _score_from_index(n225_past)
+            sc2p, _, _, _ = _score_from_index(topx_past)
+            past = int(clamp(round(50.0 + (sc1p + sc2p) / 2.0), 0, 100))
+            delta3d = int(score - past)
+    except Exception:
+        delta3d = 0
 
+    # コメント
+    if score >= 70:
+        comment = "強い"
+        phase = "上昇基調"
+    elif score >= 60:
+        comment = "やや強い"
+        phase = "上昇基調"
+    elif score >= 50:
+        comment = "中立"
+        phase = "不安定"
+    elif score >= 45:
+        comment = "弱い"
+        phase = "下落警戒"
+    else:
+        comment = "かなり弱い"
+        phase = "下落警戒"
 
-def calc_delta_market_score_3d() -> int:
-    """
-    ΔMarketScore_3d：直近3営業日前との差分（指数ベースの簡易）
-    """
-    # 直近値
-    now = calc_market_score()["score"]
-    # 3日前近似：N225/TOPXの3日前で再計算（厳密でなくてOK。用途は安全側判定）
-    n225 = _history("^N225", "30d")
-    topx = _history("^TOPX", "30d")
-    if n225 is None or topx is None or len(n225) < 6 or len(topx) < 6:
-        return 0
-
-    # “3日前の終値”を使ったリターン近似でスコア差を再構成
-    # → 指標は同系統なので差分の方向性が出ればOK
-    def score_at(idx_back: int) -> int:
-        c_n = float(n225["Close"].iloc[-1 - idx_back])
-        c_t = float(topx["Close"].iloc[-1 - idx_back])
-        # 5日/20日も同じidx_backで近似
-        r5 = 0.0
-        r20 = 0.0
-        if len(n225) > 6 + idx_back and len(topx) > 6 + idx_back:
-            r5 = ((c_n / float(n225["Close"].iloc[-6 - idx_back]) - 1.0) * 100.0 +
-                  (c_t / float(topx["Close"].iloc[-6 - idx_back]) - 1.0) * 100.0) / 2.0
-        if len(n225) > 21 + idx_back and len(topx) > 21 + idx_back:
-            r20 = ((c_n / float(n225["Close"].iloc[-21 - idx_back]) - 1.0) * 100.0 +
-                   (c_t / float(topx["Close"].iloc[-21 - idx_back]) - 1.0) * 100.0) / 2.0
-        base = 50.0 + np.clip(r5, -10, 10) * 1.2 + np.clip(r20, -15, 15) * 0.8
-        return int(np.clip(round(base), 0, 100))
-
-    past = score_at(idx_back=3)
-    return int(now - past)
-
-
-def market_regime_multiplier(mkt_score: int, delta3d: int, macro_danger: bool) -> float:
-    """
-    AdjEV補正：地合い×変化速度×イベント
-    """
-    mul = 1.0
-    if mkt_score >= 60 and delta3d >= 0:
-        mul *= 1.05
-    if delta3d <= -5:
-        mul *= 0.70
-    if macro_danger:
-        mul *= 0.75
-    return float(mul)
+    return {
+        "score": score,
+        "delta3d": int(delta3d),
+        "comment": comment,
+        "phase": phase,
+        "n225_5d": float(n225_5d),
+        "topix_5d": float(topx_5d),
+        "n225_20d": float(n225_20d),
+        "topix_20d": float(topx_20d),
+        "n225_rsi": float(n225_rsi),
+        "topix_rsi": float(topx_rsi),
+    }
