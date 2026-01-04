@@ -1,74 +1,70 @@
+# utils/events.py
 from __future__ import annotations
 
-import os
-from datetime import date
-from typing import List, Dict, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import List, Optional
 
 import pandas as pd
 
-from utils.util import parse_event_datetime_jst
+from utils.util import DEFAULT_TZ, EventState
 
 
-def load_events(path: str) -> List[Dict[str, str]]:
-    if not path or (not os.path.exists(path)):
-        return []
+@dataclass(frozen=True)
+class MacroEvent:
+    name: str
+    when_jst: datetime
+
+
+def _parse_dt(s: str) -> Optional[datetime]:
+    try:
+        # "YYYY-MM-DD HH:MM" または "YYYY-MM-DD"
+        s = str(s).strip()
+        if not s:
+            return None
+        if len(s) == 10:
+            dt = datetime.strptime(s, "%Y-%m-%d")
+            return dt.replace(tzinfo=DEFAULT_TZ)
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M")
+        return dt.replace(tzinfo=DEFAULT_TZ)
+    except Exception:
+        return None
+
+
+def load_events(path: str) -> EventState:
+    """
+    events.csv:
+      - name
+      - when_jst (YYYY-MM-DD HH:MM)
+    """
     try:
         df = pd.read_csv(path)
     except Exception:
-        return []
+        return EventState(macro_event_near=False, macro_event_text="なし")
 
-    out: List[Dict[str, str]] = []
-    for _, row in df.iterrows():
-        label = str(row.get("label", "")).strip()
-        if not label:
-            continue
-        out.append(
-            {
-                "label": label,
-                "kind": str(row.get("kind", "")).strip(),
-                "date": str(row.get("date", "")).strip(),
-                "time": str(row.get("time", "")).strip(),
-                "datetime": str(row.get("datetime", "")).strip(),
-            }
-        )
-    return out
+    events: List[MacroEvent] = []
+    for _, r in df.iterrows():
+        name = str(r.get("name", "")).strip()
+        when = _parse_dt(str(r.get("when_jst", "")).strip())
+        if name and when:
+            events.append(MacroEvent(name=name, when_jst=when))
 
+    now = datetime.now(DEFAULT_TZ)
+    # 「接近」の定義：48時間以内に未来イベントがある
+    near_list = []
+    for e in events:
+        if e.when_jst >= now and e.when_jst <= now + timedelta(hours=48):
+            near_list.append(e)
 
-def build_event_section(events: List[Dict[str, str]], today_date: date) -> List[str]:
-    """
-    LINE出力用：前日〜2日後だけ表示。無ければ「特になし」
-    """
-    lines: List[str] = []
-    for ev in events:
-        dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
-        if dt is None:
-            continue
-        d = dt.date()
-        delta = (d - today_date).days
-        if -1 <= delta <= 2:
-            if delta > 0:
-                when = f"{delta}日後"
-            elif delta == 0:
-                when = "本日"
-            else:
-                when = "直近"
-            lines.append(f"⚠ {ev['label']}（{dt.strftime('%Y-%m-%d %H:%M JST')} / {when}）")
+    if not near_list:
+        return EventState(macro_event_near=False, macro_event_text="なし")
 
-    if not lines:
-        return ["- 特になし"]
-    return lines
+    # 一番近いイベントだけ表示
+    near_list.sort(key=lambda x: x.when_jst)
+    e = near_list[0]
+    delta = e.when_jst - now
+    days = int(delta.total_seconds() // 86400)
+    hours = int((delta.total_seconds() % 86400) // 3600)
 
-
-def detect_macro_caution(events: List[Dict[str, str]], today_date: date) -> bool:
-    """
-    “イベント接近”の判定：
-    0日後 or 1日後 に重要イベントがあるなら ON（新規禁止・候補2に制限）
-    """
-    for ev in events:
-        dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
-        if dt is None:
-            continue
-        delta = (dt.date() - today_date).days
-        if delta in (0, 1):
-            return True
-    return False
+    text = f"⚠ {e.name}（{e.when_jst.strftime('%Y-%m-%d %H:%M')} JST / {days}日{hours}時間後）"
+    return EventState(macro_event_near=True, macro_event_text=text)
