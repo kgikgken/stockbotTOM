@@ -1,77 +1,102 @@
 # ============================================
 # utils/setup.py
-# 初期データ読み込み・週次状態管理
+# チャート形状判定（Setup A1 / A2）
 # ============================================
 
-import os
-import json
+from __future__ import annotations
+
 import pandas as pd
-from datetime import datetime
-from utils.util import jst_today_str
-
-# --------------------------------------------
-# パス設定
-# --------------------------------------------
-UNIVERSE_PATH = "universe_jpx.csv"
-EVENTS_PATH = "events.csv"
-WEEKLY_STATE_PATH = "weekly_state.json"
+from typing import Dict
 
 
 # --------------------------------------------
-# ユニバース読み込み
+# Setup 判定メイン
 # --------------------------------------------
-def load_universe() -> pd.DataFrame:
+def judge_setup(
+    df: pd.DataFrame,
+) -> Dict[str, bool | str]:
     """
-    全銘柄ユニバースを読み込む
+    チャート形状から Setup を判定する
+    戻り値:
+      {
+        "valid": bool,
+        "type": "A1" | "A2" | "",
+        "reason": str
+      }
     """
-    if not os.path.exists(UNIVERSE_PATH):
-        raise FileNotFoundError(f"Universe file not found: {UNIVERSE_PATH}")
 
-    df = pd.read_csv(UNIVERSE_PATH)
-    return df
+    # 必須データ
+    for col in ["close", "ma20", "ma50", "rsi"]:
+        if col not in df.columns:
+            return {
+                "valid": False,
+                "type": "",
+                "reason": f"missing:{col}",
+            }
 
+    latest = df.iloc[-1]
 
-# --------------------------------------------
-# イベント読み込み
-# --------------------------------------------
-def load_events() -> pd.DataFrame:
-    """
-    マクロ・決算イベント読み込み
-    """
-    if not os.path.exists(EVENTS_PATH):
-        return pd.DataFrame()
+    close = latest["close"]
+    ma20 = latest["ma20"]
+    ma50 = latest["ma50"]
+    rsi = latest["rsi"]
 
-    df = pd.read_csv(EVENTS_PATH)
-    return df
-
-
-# --------------------------------------------
-# 週次状態読み込み
-# --------------------------------------------
-def load_weekly_state() -> dict:
-    """
-    週次新規回数などの状態を取得
-    """
-    today = jst_today_str()
-
-    if not os.path.exists(WEEKLY_STATE_PATH):
+    # ----------------------------------------
+    # 共通前提（順張り・押し目）
+    # ----------------------------------------
+    if not (close > ma20 > ma50):
         return {
-            "week_start": today,
-            "new_entries": 0,
+            "valid": False,
+            "type": "",
+            "reason": "MA構造不一致",
         }
 
-    with open(WEEKLY_STATE_PATH, "r", encoding="utf-8") as f:
-        state = json.load(f)
+    if not (35 <= rsi <= 65):
+        return {
+            "valid": False,
+            "type": "",
+            "reason": "RSI過熱/弱すぎ",
+        }
 
-    return state
+    # MA20 傾き
+    if len(df) < 6:
+        return {
+            "valid": False,
+            "type": "",
+            "reason": "データ不足",
+        }
 
+    ma20_slope = df["ma20"].iloc[-1] - df["ma20"].iloc[-6]
 
-# --------------------------------------------
-# 週次状態保存
-# --------------------------------------------
-def save_weekly_state(state: dict):
-    """
-    週次状態を保存
-    """
-    with open(WEEKLY_STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    if ma20_slope <= 0:
+        return {
+            "valid": False,
+            "type": "",
+            "reason": "MA20横ばい/下向き",
+        }
+
+    # ----------------------------------------
+    # Setup A1 / A2 分離
+    # ----------------------------------------
+
+    # A1: 強トレンド・浅い押し
+    if close >= ma20:
+        return {
+            "valid": True,
+            "type": "A1",
+            "reason": "強トレンド浅押し",
+        }
+
+    # A2: やや深い押し（MA20〜MA50）
+    if ma50 <= close < ma20:
+        return {
+            "valid": True,
+            "type": "A2",
+            "reason": "押し目待ち型",
+        }
+
+    return {
+        "valid": False,
+        "type": "",
+        "reason": "押し位置不適合",
+    }
