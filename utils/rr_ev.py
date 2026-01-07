@@ -1,141 +1,172 @@
+# ============================================
 # utils/rr_ev.py
+# STOP/TP、RR、EV、補正EV、速度（R/day）を作る
+# RRを固定化しない（分布を自然にする）
+# ============================================
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
-from utils.util import MarketState, clamp
-
-
-def rr_min_by_market(market_score: float) -> float:
-    """
-    地合いが弱いほど最低RRを上げる（弱い日に低RRを取らない）
-    """
-    if market_score >= 70:
-        return 1.8
-    if market_score >= 60:
-        return 2.0
-    if market_score >= 50:
-        return 2.2
-    if market_score >= 45:
-        return 2.4
-    return 9.9  # 実質禁止
+from utils.features import Features
+from utils.util import estimate_days, calc_r_per_day, clamp
 
 
-def regime_multiplier(market: MarketState, macro_event_near: bool) -> float:
-    mult = 1.0
-    if market.delta_3d <= -5:
-        mult *= 0.70
-    elif market.score >= 60 and market.delta_3d >= 0:
-        mult *= 1.05
-
-    if macro_event_near:
-        mult *= 0.75
-
-    return float(mult)
-
-
-def expected_days(tp2: float, entry: float, atr: float, ret20: float, atr_pct: float) -> float:
-    """
-    R/日分布を広げるため、kを固定にしない。
-    - 20日上昇が強いほど（ret20↑）到達が早い想定（days↓）
-    - ATR%が高いほど動きやすい（days↓）
-    """
-    if atr <= 0:
-        return 9.9
-
-    dist = max(tp2 - entry, 0.0)
-    # k（1日あたりに進むATRの期待値）を可変化
-    k = 0.85
-    k += clamp(ret20 * 3.0, -0.20, 0.35)         # 勢い補正
-    k += clamp((atr_pct - 0.02) * 2.0, -0.15, 0.25)  # ボラ補正
-    k = clamp(k, 0.65, 1.25)
-
-    days = dist / (k * atr)
-    return float(clamp(days, 1.8, 7.0))
-
-
-def pwin_proxy(trend_strength: float, rs: float, volume_quality: float, liquidity: float, gap_risk: float) -> float:
-    """
-    代理Pwin（0〜1）。シンプルで良い。過学習しない。
-    """
-    x = 0.0
-    x += 0.35 * trend_strength
-    x += 0.25 * rs
-    x += 0.20 * volume_quality
-    x += 0.10 * liquidity
-    x -= 0.30 * gap_risk
-    return float(clamp(0.45 + x, 0.05, 0.90))
-
-
-def ev(pwin: float, rr: float) -> float:
-    """
-    EV = Pwin*RR - (1-Pwin)*1
-    """
-    return float(pwin * rr - (1.0 - pwin) * 1.0)
-
-
-@dataclass(frozen=True)
-class RRResult:
+@dataclass
+class RREV:
     stop: float
     tp1: float
     tp2: float
     rr: float
     ev: float
     adj_ev: float
-    exp_days: float
+    expected_days: float
     r_per_day: float
 
 
-def compute_rr_ev(
-    entry: float,
-    in_low: float,
-    atr: float,
-    market: MarketState,
-    macro_event_near: bool,
-    trend_strength: float,
-    rs: float,
-    volume_quality: float,
-    liquidity: float,
-    gap_risk: float,
-    ret20: float,
-    atr_pct: float,
-) -> RRResult:
-    # Stop（仕様の近似）
-    stop = in_low - 0.7 * atr
-    risk = max(entry - stop, 1e-6)
+def _pwin_proxy(f: Features, setup_type: str) -> float:
+    """
+    勝率の代理（0-1）
+    """
+    p = 0.50
 
-    # TP：RRを固定しない（自然な分布）
-    # まずRRの「狙い値」を、勢いと地合いで少し動かす
-    base_rr = 2.4
-    base_rr += clamp(ret20 * 4.0, -0.4, 0.8)        # 勢いで上振れ
-    base_rr += clamp((market.score - 55) / 100, -0.2, 0.3)
-    base_rr = clamp(base_rr, 1.8, 3.8)
+    # トレンド強度（sma構造）
+    if f.close > f.sma20 > f.sma50:
+        p += 0.08
+    if (f.sma20 - f.sma50) > 0:
+        p += 0.04
 
-    tp2 = entry + base_rr * risk
-    tp1 = entry + 1.5 * risk
+    # RSI（過熱なら下げる）
+    if f.rsi14 >= 70:
+        p -= 0.08
+    elif 45 <= f.rsi14 <= 62:
+        p += 0.05
+    elif f.rsi14 < 35:
+        p -= 0.06
 
+    # A1/A2の差
+    if setup_type == "A1":
+        p += 0.03
+    if setup_type == "A2":
+        p -= 0.01
+
+    # ATR%（動かなすぎは不利、荒すぎも不利）
+    if f.atrp14 < 1.5:
+        p -= 0.10
+    elif f.atrp14 > 6.0:
+        p -= 0.05
+    else:
+        p += 0.02
+
+    # GUは大幅減点（本来は候補外）
+    if f.gu_flag:
+        p -= 0.20
+
+    return clamp(p, 0.05, 0.85)
+
+
+def build_rr_ev(
+    f: Features,
+    setup_type: str,
+    market_score: float,
+    macro_risk: bool,
+) -> Optional[RREV]:
+    """
+    STOP/TPは構造から出す（RR固定化しない）
+    - STOP: entry_low - 0.7ATR（A1） / -0.9ATR（A2）
+    - TP2: 過去20日高値やATRから伸び代を見て可変
+    - TP1: TP2の手前（部分利確）
+    """
+    atr = f.atr14
+    if atr <= 0:
+        return None
+
+    # entryは別で算出しているが、ここではSMA20基準（entry.pyと整合）
+    entry = f.sma20
+
+    # STOP
+    if setup_type == "A1":
+        stop = (entry - 1.2 * atr)
+    elif setup_type == "A2":
+        stop = (entry - 1.4 * atr)
+    else:
+        stop = (entry - 1.2 * atr)
+
+    # 伸び代（RR分布を自然にする要）
+    # 地合いが強いほど伸び代を少し取りやすい
+    # ボラが高すぎるものは伸び代控えめ
+    base_mult = 2.0
+    if market_score >= 70:
+        base_mult = 2.4
+    elif market_score >= 60:
+        base_mult = 2.2
+    elif market_score >= 50:
+        base_mult = 2.0
+    else:
+        base_mult = 1.9
+
+    if f.atrp14 > 6.0:
+        base_mult -= 0.2
+
+    # A1は伸びやすい
+    if setup_type == "A1":
+        base_mult += 0.2
+    if setup_type == "A2":
+        base_mult -= 0.1
+
+    # マクロ警戒は控えめ（RRを上げるのではなく、補正EVで抑える）
+    if macro_risk:
+        base_mult -= 0.1
+
+    # TP2
+    tp2 = entry + base_mult * (entry - stop)
+
+    # TP1はTP2の手前（部分利確）
+    tp1 = entry + 0.6 * (tp2 - entry)
+
+    # RR
+    risk = (entry - stop)
+    if risk <= 0:
+        return None
     rr = (tp2 - entry) / risk
 
-    # Pwin proxy
-    pw = pwin_proxy(trend_strength, rs, volume_quality, liquidity, gap_risk)
-    raw_ev = ev(pw, rr)
+    # Pwin推定 → EV
+    pwin = _pwin_proxy(f, setup_type)
+    ev = pwin * rr - (1.0 - pwin) * 1.0
 
-    # 環境補正
-    mult = regime_multiplier(market, macro_event_near)
-    adj_ev = raw_ev * mult
+    # 地合い補正（現実値へ）
+    mult = 1.0
+    if market_score >= 70:
+        mult *= 1.05
+    elif market_score >= 60:
+        mult *= 1.00
+    elif market_score >= 50:
+        mult *= 0.90
+    else:
+        mult *= 0.75
+
+    # イベント接近（マクロ警戒）
+    if macro_risk:
+        mult *= 0.75
+
+    adj_ev = ev * mult
 
     # 速度
-    exp_days = expected_days(tp2=tp2, entry=entry, atr=atr, ret20=ret20, atr_pct=atr_pct)
-    rpd = rr / exp_days if exp_days > 0 else 0.0
+    days = estimate_days(tp2, entry, atr)
+    # 速度分布を広げる：ATRだけでなく「伸び代」を織り込む係数
+    # 伸び代大(=RR高)ほど日数増えやすいが、一定上は抑える
+    days = days * clamp(0.85 + (rr - 2.0) * 0.10, 0.75, 1.25)
 
-    return RRResult(
-        stop=float(stop),
-        tp1=float(tp1),
-        tp2=float(tp2),
-        rr=float(rr),
-        ev=float(raw_ev),
-        adj_ev=float(adj_ev),
-        exp_days=float(exp_days),
-        r_per_day=float(rpd),
+    r_day = calc_r_per_day(rr, days)
+
+    return RREV(
+        stop=stop,
+        tp1=tp1,
+        tp2=tp2,
+        rr=rr,
+        ev=ev,
+        adj_ev=adj_ev,
+        expected_days=days,
+        r_per_day=r_day,
     )
