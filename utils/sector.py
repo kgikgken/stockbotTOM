@@ -1,29 +1,98 @@
 # ============================================
 # utils/sector.py
-# セクター5日リターン集計（判断補助）
+# セクター相対強度算出
 # ============================================
 
-from __future__ import annotations
-
-from typing import Dict, List, Tuple
 import pandas as pd
 
 
-def top_sectors_5d(universe_df: pd.DataFrame, returns_5d: Dict[str, float], top_n: int = 5) -> List[Tuple[str, float]]:
+# --------------------------------------------
+# セクター5日リターン算出
+# --------------------------------------------
+def calc_sector_returns(
+    stock_data: dict,
+    meta_data: dict,
+    lookback: int = 5,
+):
     """
-    returns_5d: ticker->5d return(%)
-    universe_df: ticker, sector を含む想定
+    各セクターの短期リターンを算出
+    stock_data: { code: df }
+    meta_data: { code: meta }
     """
-    if universe_df is None or universe_df.empty:
-        return []
 
-    df = universe_df.copy()
-    if "ticker" not in df.columns:
-        return []
-    if "sector" not in df.columns:
-        df["sector"] = "不明"
+    sector_returns = {}
 
-    df["ret5d"] = df["ticker"].map(returns_5d).fillna(0.0)
-    g = df.groupby("sector")["ret5d"].mean().sort_values(ascending=False)
-    out = [(str(k), float(v)) for k, v in g.head(top_n).items()]
-    return out
+    for code, df in stock_data.items():
+        meta = meta_data.get(code)
+        if meta is None:
+            continue
+
+        sector = meta.get("sector")
+        if not sector:
+            continue
+
+        if len(df) < lookback + 1:
+            continue
+
+        try:
+            ret = (
+                df["Close"].iloc[-1] /
+                df["Close"].iloc[-(lookback + 1)] - 1.0
+            )
+        except Exception:
+            continue
+
+        sector_returns.setdefault(sector, []).append(ret)
+
+    # セクター平均
+    sector_avg = {}
+    for sector, rets in sector_returns.items():
+        if len(rets) == 0:
+            continue
+        sector_avg[sector] = sum(rets) / len(rets)
+
+    return sector_avg
+
+
+# --------------------------------------------
+# セクター順位付け
+# --------------------------------------------
+def rank_sectors(sector_returns: dict):
+    """
+    セクターをリターン順に順位付け
+    return:
+        sector_ranks: { sector: rank }
+        sorted_list: [(sector, return)]
+    """
+
+    sorted_sectors = sorted(
+        sector_returns.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    sector_ranks = {}
+    for i, (sector, _) in enumerate(sorted_sectors, start=1):
+        sector_ranks[sector] = i
+
+    return sector_ranks, sorted_sectors
+
+
+# --------------------------------------------
+# 上位セクター抽出
+# --------------------------------------------
+def top_sectors(
+    sector_returns: dict,
+    top_n: int = 5
+):
+    """
+    上位セクターのみ返す
+    """
+
+    sorted_sectors = sorted(
+        sector_returns.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return sorted_sectors[:top_n]
