@@ -1,70 +1,76 @@
+# ============================================
 # utils/events.py
+# 重要イベント（FOMC/日銀/CPI/雇用統計など）読み込み＆判定
+# ============================================
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
+import csv
+import os
 
-import pandas as pd
-
-from utils.util import DEFAULT_TZ, EventState
+from utils.util import JST
 
 
 @dataclass(frozen=True)
 class MacroEvent:
     name: str
-    when_jst: datetime
+    dt_jst: datetime
 
 
-def _parse_dt(s: str) -> Optional[datetime]:
-    try:
-        # "YYYY-MM-DD HH:MM" または "YYYY-MM-DD"
-        s = str(s).strip()
-        if not s:
-            return None
-        if len(s) == 10:
-            dt = datetime.strptime(s, "%Y-%m-%d")
-            return dt.replace(tzinfo=DEFAULT_TZ)
-        dt = datetime.strptime(s, "%Y-%m-%d %H:%M")
-        return dt.replace(tzinfo=DEFAULT_TZ)
-    except Exception:
+def _parse_dt_jst(s: str) -> Optional[datetime]:
+    s = (s or "").strip()
+    if not s:
         return None
+    # 例: "2026-01-05 00:00"
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            if fmt == "%Y-%m-%d":
+                dt = dt.replace(hour=0, minute=0, second=0)
+            return dt.replace(tzinfo=JST)
+        except Exception:
+            pass
+    return None
 
 
-def load_events(path: str) -> EventState:
+def load_events_csv(path: str = "events.csv") -> List[MacroEvent]:
+    if not os.path.exists(path):
+        return []
+
+    out: List[MacroEvent] = []
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            name = (row.get("name") or row.get("event") or "").strip()
+            dt = _parse_dt_jst(row.get("datetime") or row.get("dt") or row.get("date") or "")
+            if name and dt:
+                out.append(MacroEvent(name=name, dt_jst=dt))
+
+    out.sort(key=lambda x: x.dt_jst)
+    return out
+
+
+def nearest_event(events: List[MacroEvent], now_jst: datetime) -> Optional[Tuple[MacroEvent, int]]:
     """
-    events.csv:
-      - name
-      - when_jst (YYYY-MM-DD HH:MM)
+    直近イベントと、今から何日後か（整数）を返す
     """
-    try:
-        df = pd.read_csv(path)
-    except Exception:
-        return EventState(macro_event_near=False, macro_event_text="なし")
+    future = [e for e in events if e.dt_jst >= now_jst]
+    if not future:
+        return None
+    ev = future[0]
+    delta_days = (ev.dt_jst.date() - now_jst.date()).days
+    return ev, delta_days
 
-    events: List[MacroEvent] = []
-    for _, r in df.iterrows():
-        name = str(r.get("name", "")).strip()
-        when = _parse_dt(str(r.get("when_jst", "")).strip())
-        if name and when:
-            events.append(MacroEvent(name=name, when_jst=when))
 
-    now = datetime.now(DEFAULT_TZ)
-    # 「接近」の定義：48時間以内に未来イベントがある
-    near_list = []
-    for e in events:
-        if e.when_jst >= now and e.when_jst <= now + timedelta(hours=48):
-            near_list.append(e)
-
-    if not near_list:
-        return EventState(macro_event_near=False, macro_event_text="なし")
-
-    # 一番近いイベントだけ表示
-    near_list.sort(key=lambda x: x.when_jst)
-    e = near_list[0]
-    delta = e.when_jst - now
-    days = int(delta.total_seconds() // 86400)
-    hours = int((delta.total_seconds() % 86400) // 3600)
-
-    text = f"⚠ {e.name}（{e.when_jst.strftime('%Y-%m-%d %H:%M')} JST / {days}日{hours}時間後）"
-    return EventState(macro_event_near=True, macro_event_text=text)
+def macro_risk_on(events: List[MacroEvent], now_jst: datetime, days_ahead: int = 2) -> bool:
+    """
+    イベント接近の警戒フラグ
+    """
+    x = nearest_event(events, now_jst)
+    if not x:
+        return False
+    _, d = x
+    return d <= days_ahead
