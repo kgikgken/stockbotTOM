@@ -1,98 +1,63 @@
 # ============================================
 # utils/sector.py
-# セクター相対強度算出
+# セクター別の短期モメンタム集計（5日）
 # ============================================
 
+from __future__ import annotations
+
+from typing import Dict, List, Tuple
 import pandas as pd
 
 
-# --------------------------------------------
-# セクター5日リターン算出
-# --------------------------------------------
-def calc_sector_returns(
-    stock_data: dict,
-    meta_data: dict,
-    lookback: int = 5,
-):
+def _safe_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
+
+def top_sectors_5d(universe_df: pd.DataFrame, top_k: int = 5) -> List[Tuple[str, float]]:
     """
-    各セクターの短期リターンを算出
-    stock_data: { code: df }
-    meta_data: { code: meta }
+    universe_df に含まれる銘柄の sector 列ごとに、5日リターンの平均を集計して上位を返す。
+
+    想定カラム:
+      - sector: セクター名（文字列）
+      - ret_5d: 5日リターン（%でも小数でもOK。ここでは「小数(0.05=+5%)」を推奨）
+        ※ ret_5d が %表記(5.0=+5%) っぽい場合は自動で /100 して小数に寄せる
     """
+    if universe_df is None or len(universe_df) == 0:
+        return []
 
-    sector_returns = {}
+    if "sector" not in universe_df.columns:
+        return []
 
-    for code, df in stock_data.items():
-        meta = meta_data.get(code)
-        if meta is None:
-            continue
+    df = universe_df.copy()
 
-        sector = meta.get("sector")
-        if not sector:
-            continue
+    if "ret_5d" not in df.columns:
+        # ret_5d が無い場合は空で返す（理由: 計算元が別モジュールの可能性がある）
+        return []
 
-        if len(df) < lookback + 1:
-            continue
+    # 数値化
+    df["ret_5d"] = df["ret_5d"].apply(_safe_float)
 
-        try:
-            ret = (
-                df["Close"].iloc[-1] /
-                df["Close"].iloc[-(lookback + 1)] - 1.0
-            )
-        except Exception:
-            continue
+    # %っぽい値(例: 5.2)が混じってたら小数へ寄せる
+    # 例: ret_5d の絶対値が 1 を大きく超える割合が一定以上なら /100
+    abs_gt_1_ratio = (df["ret_5d"].abs() > 1.0).mean() if len(df) else 0.0
+    if abs_gt_1_ratio > 0.3:
+        df["ret_5d"] = df["ret_5d"] / 100.0
 
-        sector_returns.setdefault(sector, []).append(ret)
+    # 欠損除外
+    df = df.dropna(subset=["sector", "ret_5d"])
+    if len(df) == 0:
+        return []
 
-    # セクター平均
-    sector_avg = {}
-    for sector, rets in sector_returns.items():
-        if len(rets) == 0:
-            continue
-        sector_avg[sector] = sum(rets) / len(rets)
+    # 集計（平均）
+    g = df.groupby("sector", as_index=False)["ret_5d"].mean()
+    g = g.sort_values("ret_5d", ascending=False).head(int(top_k))
 
-    return sector_avg
+    # 出力は %表記で揃える（LINE表示用）
+    out: List[Tuple[str, float]] = []
+    for _, row in g.iterrows():
+        out.append((str(row["sector"]), float(row["ret_5d"]) * 100.0))
 
-
-# --------------------------------------------
-# セクター順位付け
-# --------------------------------------------
-def rank_sectors(sector_returns: dict):
-    """
-    セクターをリターン順に順位付け
-    return:
-        sector_ranks: { sector: rank }
-        sorted_list: [(sector, return)]
-    """
-
-    sorted_sectors = sorted(
-        sector_returns.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    sector_ranks = {}
-    for i, (sector, _) in enumerate(sorted_sectors, start=1):
-        sector_ranks[sector] = i
-
-    return sector_ranks, sorted_sectors
-
-
-# --------------------------------------------
-# 上位セクター抽出
-# --------------------------------------------
-def top_sectors(
-    sector_returns: dict,
-    top_n: int = 5
-):
-    """
-    上位セクターのみ返す
-    """
-
-    sorted_sectors = sorted(
-        sector_returns.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    return sorted_sectors[:top_n]
+    return out
