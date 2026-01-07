@@ -1,72 +1,85 @@
 # ============================================
 # utils/diversify.py
-# 分散制約（同一セクター上限、相関制約）
+# 分散・集中リスク制御
+# - 同一セクター制限
+# - 相関制限
+# - 週次新規制限補助
 # ============================================
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import List, Dict
 import numpy as np
-import pandas as pd
 
 
-def corr(a: pd.Series, b: pd.Series) -> float:
-    try:
-        x = a.dropna()
-        y = b.dropna()
-        n = min(len(x), len(y))
-        if n < 20:
-            return 0.0
-        x = x.iloc[-n:]
-        y = y.iloc[-n:]
-        return float(np.corrcoef(x.values, y.values)[0, 1])
-    except Exception:
-        return 0.0
-
-
-def pick_with_constraints(
+# --------------------------------------------
+# 同一セクター制限
+# --------------------------------------------
+def filter_by_sector_limit(
     candidates: List[dict],
-    max_final: int = 5,
-    max_per_sector: int = 2,
-    corr_threshold: float = 0.75,
-) -> Tuple[List[dict], List[dict]]:
+    per_sector_limit: int,
+) -> List[dict]:
     """
-    candidates: dictに
-      - sector
-      - close_series（相関用, pd.Series）
-    を持っている想定
+    同一セクターの採用数を制限
     """
-    selected: List[dict] = []
-    watch: List[dict] = []
-
+    result = []
     sector_count: Dict[str, int] = {}
 
     for c in candidates:
-        if len(selected) >= max_final:
-            watch.append({**c, "drop_reason": "枠上限"})
+        sector = c.get("sector", "UNKNOWN")
+        cnt = sector_count.get(sector, 0)
+
+        if cnt >= per_sector_limit:
+            c["reject_reason"] = "セクター上限"
             continue
 
-        sec = str(c.get("sector") or "不明")
-        if sector_count.get(sec, 0) >= max_per_sector:
-            watch.append({**c, "drop_reason": "セクター上限"})
-            continue
+        sector_count[sector] = cnt + 1
+        result.append(c)
 
-        # 相関
-        too_corr = False
-        for s in selected:
-            a = c.get("close_series")
-            b = s.get("close_series")
-            if isinstance(a, pd.Series) and isinstance(b, pd.Series):
-                r = corr(a, b)
-                if r > corr_threshold:
-                    too_corr = True
-                    break
+    return result
 
-        if too_corr:
-            watch.append({**c, "drop_reason": f"相関高({corr_threshold}超)"})
-            continue
 
-        selected.append(c)
-        sector_count[sec] = sector_count.get(sec, 0) + 1
+# --------------------------------------------
+# 相関制限
+# --------------------------------------------
+def filter_by_correlation(
+    candidates: List[dict],
+    corr_block_threshold: float,
+) -> List[dict]:
+    """
+    20日リターン相関が高い銘柄を同時採用しない
+    ※ candidates は AdjEV 降順で来る前提
+    """
+    accepted: List[dict] = []
 
-    return selected, watch
+    for c in candidates:
+        corr_vec = c.get("corr_with", {})  # {ticker: corr}
+        blocked = False
+
+        for a in accepted:
+            t = a.get("ticker")
+            if t in corr_vec and abs(corr_vec[t]) >= corr_block_threshold:
+                c["reject_reason"] = f"相関高({corr_vec[t]:.2f})"
+                blocked = True
+                break
+
+        if not blocked:
+            accepted.append(c)
+
+    return accepted
+
+
+# --------------------------------------------
+# 最終分散フィルタ
+# --------------------------------------------
+def apply_diversification(
+    candidates: List[dict],
+    per_sector_limit: int,
+    corr_block_threshold: float,
+) -> List[dict]:
+    """
+    分散ルールを順に適用
+    """
+    step1 = filter_by_sector_limit(candidates, per_sector_limit)
+    step2 = filter_by_correlation(step1, corr_block_threshold)
+    return step2
