@@ -1,10 +1,13 @@
 # ============================================
 # utils/util.py
-# 共通ユーティリティ（日時・数値・地合い連動）
+# 共通ユーティリティ（日時・数値・リスク計算）
 # ============================================
+
+from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 import math
+
 
 # --------------------------------------------
 # JST 時刻
@@ -12,22 +15,22 @@ import math
 JST = timezone(timedelta(hours=9))
 
 
-def jst_now():
+def jst_now() -> datetime:
     return datetime.now(JST)
 
 
-def jst_now_str():
+def jst_now_str() -> str:
     return jst_now().strftime("%Y-%m-%d %H:%M")
 
 
-def jst_today_str():
+def jst_today_str() -> str:
     return jst_now().strftime("%Y-%m-%d")
 
 
 # --------------------------------------------
 # 安全な数値処理
 # --------------------------------------------
-def safe_div(a, b, default=0.0):
+def safe_div(a: float, b: float, default: float = 0.0) -> float:
     try:
         if b == 0 or b is None:
             return default
@@ -36,30 +39,25 @@ def safe_div(a, b, default=0.0):
         return default
 
 
-def clamp(x, low, high):
-    try:
-        return max(low, min(high, x))
-    except Exception:
-        return low
+def clamp(x: float, low: float, high: float) -> float:
+    return max(low, min(high, x))
 
 
 # --------------------------------------------
-# RR 下限（地合い連動）
+# 地合い連動 RR 下限
 # --------------------------------------------
 def rr_min_by_market(market_score: float) -> float:
     """
-    地合いが弱いほど RR を要求する（完全固定禁止）
+    地合いが悪いほど、より高い RR を要求する
     """
-    if market_score >= 75:
+    if market_score >= 70:
         return 1.8
-    elif market_score >= 65:
+    elif market_score >= 60:
         return 2.0
-    elif market_score >= 55:
+    elif market_score >= 50:
         return 2.2
-    elif market_score >= 45:
-        return 2.4
     else:
-        return 2.6
+        return 2.5
 
 
 # --------------------------------------------
@@ -67,7 +65,7 @@ def rr_min_by_market(market_score: float) -> float:
 # --------------------------------------------
 def leverage_by_market(market_score: float, macro_risk: bool) -> float:
     """
-    マクロ警戒時は無条件で 1.0
+    マクロ警戒時は無条件で 1.0 倍
     """
     if macro_risk:
         return 1.0
@@ -83,74 +81,49 @@ def leverage_by_market(market_score: float, macro_risk: bool) -> float:
 
 
 # --------------------------------------------
-# 最大建玉目安
+# Expected Days（速度評価）
 # --------------------------------------------
-def calc_max_position(capital: float, leverage: float) -> float:
-    try:
-        return capital * leverage
-    except Exception:
-        return 0.0
-
-
-# --------------------------------------------
-# ExpectedDays 推定
-# --------------------------------------------
-def estimate_days(tp2: float, entry: float, atr: float) -> float:
+def estimate_days(entry: float, tp2: float, atr: float) -> float:
     """
-    TP2 到達までの想定日数（速度評価用）
+    TP2 到達までの想定日数
     """
-    try:
-        if atr <= 0:
-            return 99.0
-        return abs(tp2 - entry) / atr
-    except Exception:
+    if atr <= 0:
         return 99.0
+    return abs(tp2 - entry) / atr
 
 
 # --------------------------------------------
-# R/day
+# R / day
 # --------------------------------------------
 def calc_r_per_day(rr: float, days: float) -> float:
-    try:
-        if days <= 0:
-            return 0.0
-        return rr / days
-    except Exception:
+    if days <= 0:
         return 0.0
+    return rr / days
 
 
 # --------------------------------------------
-# RR 分布の自然化（固定回避）
+# ロット事故チェック
 # --------------------------------------------
-def normalize_rr(rr: float) -> float:
+def calc_max_loss(
+    entry: float,
+    stop: float,
+    quantity: float,
+) -> float:
     """
-    RR が 3.00 に固まりすぎるのを防ぐための微調整
+    想定最大損失（金額）
     """
-    try:
-        # 不自然な固定値を丸め直す
-        return round(rr, 2)
-    except Exception:
-        return rr
+    if entry <= 0 or quantity <= 0:
+        return 0.0
+    return abs(entry - stop) * quantity
 
 
-# --------------------------------------------
-# AdjEV 判定
-# --------------------------------------------
-def is_valid_adjev(adjev: float, threshold: float = 0.5) -> bool:
+def lot_risk_ratio(
+    max_loss: float,
+    total_asset: float,
+) -> float:
     """
-    AdjEV 下限フィルタ
+    総資産に対する最大損失比率
     """
-    try:
-        return adjev >= threshold
-    except Exception:
-        return False
-
-
-# --------------------------------------------
-# 週次制限チェック
-# --------------------------------------------
-def weekly_limit_ok(current: int, limit: int) -> bool:
-    try:
-        return current < limit
-    except Exception:
-        return False
+    if total_asset <= 0:
+        return 0.0
+    return max_loss / total_asset
