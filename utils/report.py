@@ -1,186 +1,183 @@
 # ============================================
 # utils/report.py
-# LINE 送信用レポート生成（最終完成版）
+# 日報レポート生成（Swing専用）
 # ============================================
 
 from typing import List, Dict
 from utils.util import jst_today_str
+from utils.position import check_risk_warning
 
 
 # --------------------------------------------
-# 共通フォーマット補助
+# ヘッダ生成
 # --------------------------------------------
-def _fmt(v, nd=2):
-    if v is None:
-        return "-"
-    try:
-        if isinstance(v, float):
-            return f"{v:.{nd}f}"
-        return str(v)
-    except Exception:
-        return "-"
-
-
-def _safe_str(s):
-    if s is None:
-        return "-"
-    return str(s)
-
-
-# --------------------------------------------
-# ヘッダー
-# --------------------------------------------
-def build_header(info: Dict) -> str:
+def build_header(report: Dict) -> str:
     lines = []
+
     lines.append(f"📅 {jst_today_str()} stockbotTOM 日報")
     lines.append("")
     lines.append("◆ 今日の結論（Swing専用 / 1〜7日）")
 
-    if info.get("no_trade", False):
-        lines.append(f"🚫 新規見送り（{_safe_str(info.get('no_trade_reason'))}）")
+    if report["no_trade"]:
+        lines.append(f"🚫 新規見送り（{report['no_trade_reason']}）")
     else:
         lines.append("✅ 新規可（条件クリア）")
 
-    lines.append(f"- 地合い: {_fmt(info.get('market_score'),0)}点")
-    lines.append(f"- 地合い変化: Δ{_fmt(info.get('delta_market'),0)}")
-    lines.append(f"- 相場判断: {_safe_str(info.get('market_view'))}")
-    lines.append(f"- 週次新規回数: {_fmt(info.get('weekly_count'),0)} / {_fmt(info.get('weekly_limit'),0)}")
+    lines.append(f"- 地合い: {report['market_score']}点（{report['market_label']}）")
+    lines.append(f"- 地合い変化: Δ{report['delta_market']:+d}")
+    lines.append(f"- 相場判断: {report['market_trend']}")
+    lines.append(f"- 週次新規回数: {report['weekly_new']} / {report['weekly_limit']}")
 
-    if info.get("macro_risk"):
+    if report["macro_risk"]:
         lines.append("- マクロ警戒: ON")
+    else:
+        lines.append("- マクロ警戒: OFF")
 
-    lines.append(f"- 推奨レバレッジ: {_fmt(info.get('leverage'),1)}倍")
-    lines.append(f"- 最大建玉目安: 約{_fmt(info.get('max_position'),0)}円")
+    lines.append(f"- 推奨レバレッジ: {report['leverage']}倍")
+    lines.append(f"- 最大建玉目安: 約{int(report['max_position']):,}円")
 
     return "\n".join(lines)
 
 
 # --------------------------------------------
-# セクター
+# セクター表示
 # --------------------------------------------
-def build_sector(sectors: List[Dict]) -> str:
+def build_sector_section(sectors: List[Dict]) -> str:
     lines = []
     lines.append("")
     lines.append("📈 セクター動向（直近5日）")
 
-    if not sectors:
-        lines.append("- 該当なし")
-        return "\n".join(lines)
-
-    for i, s in enumerate(sectors, 1):
-        lines.append(f"{i}. {_safe_str(s.get('name'))} (+{_fmt(s.get('ret'),2)}%)")
+    for i, s in enumerate(sectors, start=1):
+        lines.append(f"{i}. {s['name']} ({s['return']:+.2f}%)")
 
     return "\n".join(lines)
 
 
 # --------------------------------------------
-# イベント
+# イベント表示
 # --------------------------------------------
-def build_events(events: List[Dict]) -> str:
+def build_event_section(events: List[str]) -> str:
     lines = []
     lines.append("")
     lines.append("⚠ 重要イベント")
 
     if not events:
         lines.append("- 特になし")
-        return "\n".join(lines)
-
-    for e in events:
-        lines.append(f"⚠ {_safe_str(e.get('name'))}（{_safe_str(e.get('date'))}）")
+    else:
+        for e in events:
+            lines.append(f"⚠ {e}")
 
     return "\n".join(lines)
 
 
 # --------------------------------------------
-# Swing 候補
+# Swing候補表示
 # --------------------------------------------
-def build_candidates(cands: List[Dict], summary: Dict) -> str:
+def build_candidates_section(summary: Dict, candidates: List[Dict]) -> str:
     lines = []
     lines.append("")
     lines.append("🏆 Swing候補（順張りのみ / 追いかけ禁止 / 速度重視）")
-
     lines.append(
-        f"  候補数:{_fmt(summary.get('count'),0)}銘柄  "
-        f"平均RR:{_fmt(summary.get('avg_rr'))} / "
-        f"平均EV:{_fmt(summary.get('avg_ev'))} / "
-        f"平均補正EV:{_fmt(summary.get('avg_adj_ev'))} / "
-        f"平均R/日:{_fmt(summary.get('avg_r_day'))}"
+        f"  候補数:{summary['count']}銘柄  "
+        f"平均RR:{summary['avg_rr']:.2f} / "
+        f"平均EV:{summary['avg_ev']:.2f} / "
+        f"平均補正EV:{summary['avg_adj_ev']:.2f} / "
+        f"平均R/日:{summary['avg_r_day']:.2f}"
     )
 
-    if not cands:
-        lines.append("")
-        lines.append("- 該当なし")
-        return "\n".join(lines)
+    if summary.get("limit_reason"):
+        lines.append(f"※ {summary['limit_reason']}")
 
-    for c in cands:
+    for c in candidates:
         lines.append("")
+        lines.append(f"- {c['ticker']} {c['name']}［{c['sector']}］")
         lines.append(
-            f"- {_safe_str(c.get('code'))} {_safe_str(c.get('name'))}［{_safe_str(c.get('sector'))}］"
+            f"  型:{c['setup']}  RR:{c['rr']:.2f}  "
+            f"補正EV:{c['adj_ev']:.2f}  R/日:{c['r_day']:.2f}"
         )
         lines.append(
-            f"  型:{_safe_str(c.get('setup'))}  "
-            f"RR:{_fmt(c.get('rr'))}  "
-            f"補正EV:{_fmt(c.get('adj_ev'))}  "
-            f"R/日:{_fmt(c.get('r_day'))}"
+            f"  エントリー:{c['entry']:.1f}"
+            f"（範囲:{c['entry_low']:.1f}〜{c['entry_high']:.1f}） "
+            f"現在値:{c['price']:.1f}  ATR:{c['atr']:.1f}  GU:{c['gu']}"
         )
         lines.append(
-            f"  エントリー:{_fmt(c.get('entry'))}"
-            f"（範囲:{_fmt(c.get('in_low'))}〜{_fmt(c.get('in_high'))}） "
-            f"現在値:{_fmt(c.get('price'))}  ATR:{_fmt(c.get('atr'))}  "
-            f"GU:{'あり' if c.get('gu') else 'なし'}"
+            f"  損切:{c['stop']:.1f}  "
+            f"利確1:{c['tp1']:.1f}  利確2:{c['tp2']:.1f}  "
+            f"想定日数:{c['days']:.1f}"
         )
-        lines.append(
-            f"  損切:{_fmt(c.get('stop'))}  "
-            f"利確1:{_fmt(c.get('tp1'))}  "
-            f"利確2:{_fmt(c.get('tp2'))}  "
-            f"想定日数:{_fmt(c.get('days'))}"
-        )
-        lines.append(f"  行動:{_safe_str(c.get('action'))}")
+        lines.append(f"  行動:{c['action']}")
 
     return "\n".join(lines)
 
 
 # --------------------------------------------
-# 監視リスト（任意）
+# 監視リスト
 # --------------------------------------------
-def build_watchlist(watch: List[Dict]) -> str:
-    if not watch:
-        return ""
-
+def build_watch_section(watchlist: List[Dict]) -> str:
     lines = []
     lines.append("")
     lines.append("🧠 監視リスト（今日は入らない）")
 
-    for w in watch:
+    for w in watchlist:
         lines.append(
-            f"- {_safe_str(w.get('code'))} {_safe_str(w.get('name'))}［{_safe_str(w.get('sector'))}］ "
-            f"理由:{_safe_str(w.get('reason'))}"
+            f"- {w['ticker']} {w['name']}［{w['sector']}］ "
+            f"理由:{w['reason']}"
         )
 
     return "\n".join(lines)
 
 
 # --------------------------------------------
-# メイン組み立て
+# ポジション・リスク表示
+# --------------------------------------------
+def build_position_section(
+    positions: List[Dict],
+    account_size: float
+) -> str:
+    lines = []
+    lines.append("")
+    lines.append("📊 保有ポジション")
+
+    if not positions:
+        lines.append("- なし")
+    else:
+        for p in positions:
+            lines.append(
+                f"- {p['ticker']}: 損益 {p.get('pnl', 'n/a')}"
+            )
+
+    risk = check_risk_warning(positions, account_size)
+    if risk["warning"]:
+        lines.append("")
+        lines.append(
+            f"⚠ ロット事故警告："
+            f"想定最大損失 ≈ {int(risk['total_risk']):,}円"
+            f"（資産比 {risk['risk_ratio']}%）"
+        )
+
+    return "\n".join(lines)
+
+
+# --------------------------------------------
+# レポート統合
 # --------------------------------------------
 def build_report(
-    header_info: Dict,
+    header: Dict,
     sectors: List[Dict],
-    events: List[Dict],
-    candidates: List[Dict],
+    events: List[str],
     summary: Dict,
+    candidates: List[Dict],
     watchlist: List[Dict],
+    positions: List[Dict],
+    account_size: float
 ) -> str:
-
-    parts = [
-        build_header(header_info),
-        build_sector(sectors),
-        build_events(events),
-        build_candidates(candidates, summary),
-        build_watchlist(watchlist),
+    sections = [
+        build_header(header),
+        build_sector_section(sectors),
+        build_event_section(events),
+        build_candidates_section(summary, candidates),
+        build_watch_section(watchlist),
+        build_position_section(positions, account_size),
     ]
 
-    # None / 空 を完全排除
-    parts = [p for p in parts if p and isinstance(p, str)]
-
-    return "\n".join(parts)
+    return "\n".join(sections)
