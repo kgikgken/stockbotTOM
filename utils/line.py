@@ -1,41 +1,65 @@
 # ============================================
 # utils/line.py
-# Cloudflare Worker に投げて LINE 配信
+# LINE送信（Cloudflare Worker 経由）
 # ============================================
 
-from __future__ import annotations
-
 import json
-import time
-from typing import Optional
-
-import requests
+import urllib.request
+import urllib.error
 
 
-def send_line_message(worker_url: str, message: str, max_retry: int = 3) -> bool:
+def send_line_message(worker_url: str, message: str) -> bool:
     """
-    WORKER_URL に対して { "message": "..."} を POST する。
-    Worker 側で LINE 送信を実行する想定。
+    Cloudflare Worker に POST して LINE に送信する
+    戻り値:
+        True  : 送信成功
+        False : 送信失敗（HTTPエラー含む）
     """
-    worker_url = (worker_url or "").strip()
+
     if not worker_url:
+        print("LINE ERROR: worker_url is empty")
         return False
 
-    payload = {"message": message}
-    headers = {"Content-Type": "application/json"}
+    if not message:
+        print("LINE ERROR: message is empty")
+        return False
 
-    last_err: Optional[str] = None
-    for i in range(max_retry):
-        try:
-            r = requests.post(worker_url, data=json.dumps(payload), headers=headers, timeout=20)
-            if 200 <= r.status_code < 300:
-                return True
-            last_err = f"status={r.status_code} body={r.text[:200]}"
-        except Exception as e:
-            last_err = str(e)
+    payload = {
+        "message": message
+    }
 
-        time.sleep(1.2 * (i + 1))
+    data = json.dumps(payload).encode("utf-8")
 
-    if last_err:
-        print(f"[LINE] send failed: {last_err}")
-    return False
+    req = urllib.request.Request(
+        worker_url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "stockbotTOM/1.0"
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as res:
+            status = res.status
+            body = res.read().decode("utf-8", errors="ignore")
+
+        if status != 200:
+            print(f"LINE ERROR: status={status} body={body}")
+            return False
+
+        return True
+
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        print(f"LINE HTTP ERROR: {e.code} body={body}")
+        return False
+
+    except urllib.error.URLError as e:
+        print(f"LINE URL ERROR: {e}")
+        return False
+
+    except Exception as e:
+        print(f"LINE UNKNOWN ERROR: {e}")
+        return False
