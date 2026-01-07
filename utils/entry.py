@@ -1,56 +1,63 @@
+# ============================================
 # utils/entry.py
+# エントリー帯と行動分類（追いかけ禁止）
+# ============================================
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Tuple
 
-from utils.features import Tech
+from utils.features import Features
 
 
-@dataclass(frozen=True)
+@dataclass
 class EntryPlan:
-    in_center: float
-    in_low: float
-    in_high: float
-    gu: bool
-    action: str  # "即IN可" / "指値待ち" / "今日は見送り"
-    deviation_atr: float
+    entry: float
+    band_low: float
+    band_high: float
+    action: str  # "即IN可" / "指値待ち" / "監視のみ"
+    distance_atr: float
 
 
-def build_entry_plan(tech: Tech, setup_kind: str) -> EntryPlan:
-    # IN帯
-    if setup_kind in ("A1", "A2"):
-        in_center = tech.sma20
-        band = 0.5 * tech.atr
+def calc_entry_plan(setup_type: str, f: Features) -> EntryPlan:
+    """
+    A: IN_center = SMA20、帯=±0.5ATR（A2は±0.6ATR）
+    追いかけ禁止: Closeが帯上抜けしている場合は基本「指値待ち」 or 乖離が大きいなら「監視のみ」
+    """
+    atr = f.atr14 if f.atr14 > 0 else 0.0
+
+    if setup_type == "A1":
+        center = f.sma20
+        w = 0.5 * atr
+    elif setup_type == "A2":
+        # A2は少し広く待てる帯
+        center = f.sma20
+        w = 0.6 * atr
     else:
-        in_center = tech.sma20
-        band = 0.5 * tech.atr
+        center = f.sma20
+        w = 0.5 * atr
 
-    in_low = in_center - band
-    in_high = in_center + band
+    band_low = center - w
+    band_high = center + w
 
-    # GU判定（Open > PrevClose + 1.0ATR）を厳密にやりたいが、
-    # ここでは "Open > Close + 1.0ATR" 近似（十分に危険判定になる）
-    gu = (tech.open_ > tech.close + 1.0 * tech.atr)
+    # 乖離（ATR換算）
+    dist = 0.0
+    if atr > 0:
+        dist = abs(f.close - center) / atr
 
-    # 乖離率（CloseがIN_centerからどれだけ離れているか）
-    deviation = abs(tech.close - in_center) / tech.atr if tech.atr > 0 else 999
+    # GUは別で切る想定だが、ここでも保険で監視
+    if f.gu_flag:
+        return EntryPlan(entry=center, band_low=band_low, band_high=band_high, action="監視のみ", distance_atr=dist)
 
-    # 行動
-    if gu:
-        action = "今日は見送り"
+    # 行動分類
+    if band_low <= f.close <= band_high:
+        action = "即IN可"
     else:
-        if in_low <= tech.close <= in_high:
-            action = "即IN可"
-        elif deviation <= 0.8:
-            action = "指値待ち"
+        # 乖離大は監視
+        if dist > 0.8:
+            action = "監視のみ"
         else:
-            action = "今日は見送り"
+            action = "指値待ち"
 
-    return EntryPlan(
-        in_center=float(in_center),
-        in_low=float(in_low),
-        in_high=float(in_high),
-        gu=bool(gu),
-        action=action,
-        deviation_atr=float(deviation),
-    )
+    return EntryPlan(entry=center, band_low=band_low, band_high=band_high, action=action, distance_atr=dist)
