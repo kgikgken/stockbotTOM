@@ -1,36 +1,72 @@
+# ============================================
 # utils/diversify.py
+# 分散制約（同一セクター上限、相関制約）
+# ============================================
+
 from __future__ import annotations
 
-from typing import List, Dict, Any, Tuple
-
+from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
 
-def corr_filter(candidates: List[Dict[str, Any]], corr_limit: float = 0.75) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def corr(a: pd.Series, b: pd.Series) -> float:
+    try:
+        x = a.dropna()
+        y = b.dropna()
+        n = min(len(x), len(y))
+        if n < 20:
+            return 0.0
+        x = x.iloc[-n:]
+        y = y.iloc[-n:]
+        return float(np.corrcoef(x.values, y.values)[0, 1])
+    except Exception:
+        return 0.0
+
+
+def pick_with_constraints(
+    candidates: List[dict],
+    max_final: int = 5,
+    max_per_sector: int = 2,
+    corr_threshold: float = 0.75,
+) -> Tuple[List[dict], List[dict]]:
     """
-    簡易：20日リターン相関が高いものを同時採用しない。
-    candidates: 各要素に "ret_series" (pd.Series) がある想定
+    candidates: dictに
+      - sector
+      - close_series（相関用, pd.Series）
+    を持っている想定
     """
-    picked: List[Dict[str, Any]] = []
-    removed: List[Dict[str, Any]] = []
+    selected: List[dict] = []
+    watch: List[dict] = []
+
+    sector_count: Dict[str, int] = {}
 
     for c in candidates:
-        ok = True
-        for p in picked:
-            s1 = c.get("ret_series")
-            s2 = p.get("ret_series")
-            if isinstance(s1, pd.Series) and isinstance(s2, pd.Series):
-                df = pd.concat([s1, s2], axis=1).dropna()
-                if len(df) >= 15:
-                    corr = float(df.corr().iloc[0, 1])
-                    if corr > corr_limit:
-                        ok = False
-                        c["reject_reason"] = f"相関高({corr:.2f})"
-                        break
-        if ok:
-            picked.append(c)
-        else:
-            removed.append(c)
+        if len(selected) >= max_final:
+            watch.append({**c, "drop_reason": "枠上限"})
+            continue
 
-    return picked, removed
+        sec = str(c.get("sector") or "不明")
+        if sector_count.get(sec, 0) >= max_per_sector:
+            watch.append({**c, "drop_reason": "セクター上限"})
+            continue
+
+        # 相関
+        too_corr = False
+        for s in selected:
+            a = c.get("close_series")
+            b = s.get("close_series")
+            if isinstance(a, pd.Series) and isinstance(b, pd.Series):
+                r = corr(a, b)
+                if r > corr_threshold:
+                    too_corr = True
+                    break
+
+        if too_corr:
+            watch.append({**c, "drop_reason": f"相関高({corr_threshold}超)"})
+            continue
+
+        selected.append(c)
+        sector_count[sec] = sector_count.get(sec, 0) + 1
+
+    return selected, watch
