@@ -1,153 +1,82 @@
 # ============================================
 # utils/position.py
-# ポジション管理・リスク制御
+# 既存ポジションの読み込み・リスク分析
 # ============================================
 
-import csv
+from __future__ import annotations
+
 import os
-from typing import List, Dict
-
-from utils.util import safe_div
-
-
-# --------------------------------------------
-# 設定
-# --------------------------------------------
-POSITIONS_PATH = "positions.csv"
-
-RISK_PER_TRADE = 0.015        # 1トレードあたり資産リスク（1.5%）
-MAX_WEEKLY_NEW = 3            # 週次新規制限
-MAX_TOTAL_RISK = 0.10         # 想定最大損失の上限（資産比10%）
+from typing import Dict, List
+import pandas as pd
 
 
 # --------------------------------------------
 # ポジション読み込み
 # --------------------------------------------
-def load_positions() -> List[Dict]:
+def load_positions(path: str = "positions.csv") -> pd.DataFrame:
     """
     positions.csv を読み込む
-    必須カラム例:
-        ticker, entry, stop, size, is_new
+    想定カラム例:
+      - ticker
+      - qty
+      - entry_price
+      - stop_price
+      - current_price（無くてもOK）
     """
-    if not os.path.exists(POSITIONS_PATH):
-        return []
+    if not os.path.exists(path):
+        return pd.DataFrame()
 
-    positions = []
-    with open(POSITIONS_PATH, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            positions.append(row)
-    return positions
-
-
-# --------------------------------------------
-# 週次新規カウント
-# --------------------------------------------
-def count_weekly_new_positions(positions: List[Dict]) -> int:
-    """
-    is_new == '1' の件数をカウント
-    """
-    count = 0
-    for p in positions:
-        if str(p.get("is_new", "0")) == "1":
-            count += 1
-    return count
+    try:
+        df = pd.read_csv(path)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 # --------------------------------------------
-# 想定損失計算
+# ポジション分析
 # --------------------------------------------
-def calc_position_risk(entry: float, stop: float, size: float) -> float:
+def analyze_positions(
+    positions_df: pd.DataFrame,
+    capital: float | None = None,
+    risk_per_trade: float = 0.015,
+) -> Dict:
     """
-    1ポジションあたりの想定損失
-    """
-    return abs(entry - stop) * size
+    保有ポジションのリスクを集計する
 
+    戻り値:
+      {
+        "num_positions": int,
+        "estimated_max_loss": float,
+        "risk_ratio": float | None
+      }
+    """
+    if positions_df is None or len(positions_df) == 0:
+        return {
+            "num_positions": 0,
+            "estimated_max_loss": 0.0,
+            "risk_ratio": 0.0 if capital else None,
+        }
 
-def calc_total_risk(positions: List[Dict]) -> float:
-    """
-    全ポジションの想定最大損失合計
-    """
-    total = 0.0
-    for p in positions:
+    total_loss = 0.0
+
+    for _, row in positions_df.iterrows():
         try:
-            entry = float(p["entry"])
-            stop = float(p["stop"])
-            size = float(p["size"])
-            total += calc_position_risk(entry, stop, size)
+            qty = float(row.get("qty", 0))
+            entry = float(row.get("entry_price", 0))
+            stop = float(row.get("stop_price", entry))
+
+            loss_per_share = max(entry - stop, 0)
+            total_loss += loss_per_share * qty
         except Exception:
             continue
-    return total
 
-
-# --------------------------------------------
-# ロット事故チェック
-# --------------------------------------------
-def check_risk_warning(
-    positions: List[Dict],
-    account_size: float
-) -> Dict:
-    """
-    ロット事故警告判定
-    """
-    total_risk = calc_total_risk(positions)
-    risk_ratio = safe_div(total_risk, account_size)
-
-    warning = risk_ratio >= MAX_TOTAL_RISK
+    risk_ratio = None
+    if capital and capital > 0:
+        risk_ratio = total_loss / capital
 
     return {
-        "warning": warning,
-        "total_risk": round(total_risk, 0),
-        "risk_ratio": round(risk_ratio * 100, 2),
+        "num_positions": int(len(positions_df)),
+        "estimated_max_loss": float(total_loss),
+        "risk_ratio": risk_ratio,
     }
-
-
-# --------------------------------------------
-# 新規可否（ポジション制約）
-# --------------------------------------------
-def can_open_new_position(
-    positions: List[Dict],
-    account_size: float
-) -> Dict:
-    """
-    ポジション制約による新規可否
-    """
-    weekly_new = count_weekly_new_positions(positions)
-    risk_info = check_risk_warning(positions, account_size)
-
-    reasons = []
-
-    if weekly_new >= MAX_WEEKLY_NEW:
-        reasons.append("週次新規上限")
-
-    if risk_info["warning"]:
-        reasons.append("ロット事故リスク")
-
-    return {
-        "can_open": len(reasons) == 0,
-        "weekly_new": weekly_new,
-        "reasons": reasons,
-        "risk_info": risk_info,
-    }
-
-
-# --------------------------------------------
-# 推奨ロット計算
-# --------------------------------------------
-def calc_position_size(
-    account_size: float,
-    entry: float,
-    stop: float,
-    leverage: float
-) -> float:
-    """
-    資産・レバ・許容リスクから株数を算出
-    """
-    risk_amount = account_size * RISK_PER_TRADE
-    per_share_risk = abs(entry - stop)
-
-    if per_share_risk <= 0:
-        return 0.0
-
-    size = safe_div(risk_amount, per_share_risk)
-    return round(size * leverage, 2)
