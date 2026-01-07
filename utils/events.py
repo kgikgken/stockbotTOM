@@ -1,76 +1,154 @@
 # ============================================
 # utils/events.py
-# 重要イベント（FOMC/日銀/CPI/雇用統計など）読み込み＆判定
+# マクロ・イベント管理
+# - 決算 / マクロイベントの検知
+# - 新規可否・警戒フラグ生成
 # ============================================
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
-import csv
-import os
+from typing import List, Dict, Optional
 
-from utils.util import JST
+import pandas as pd
 
-
-@dataclass(frozen=True)
-class MacroEvent:
-    name: str
-    dt_jst: datetime
+from utils.util import jst_now, jst_today_str
 
 
-def _parse_dt_jst(s: str) -> Optional[datetime]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    # 例: "2026-01-05 00:00"
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(s, fmt)
-            if fmt == "%Y-%m-%d":
-                dt = dt.replace(hour=0, minute=0, second=0)
-            return dt.replace(tzinfo=JST)
-        except Exception:
-            pass
-    return None
+# --------------------------------------------
+# イベント定義
+# --------------------------------------------
+IMPORTANT_KEYWORDS = [
+    "FOMC",
+    "雇用統計",
+    "CPI",
+    "GDP",
+    "日銀",
+    "BOJ",
+]
 
 
-def load_events_csv(path: str = "events.csv") -> List[MacroEvent]:
-    if not os.path.exists(path):
-        return []
-
-    out: List[MacroEvent] = []
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            name = (row.get("name") or row.get("event") or "").strip()
-            dt = _parse_dt_jst(row.get("datetime") or row.get("dt") or row.get("date") or "")
-            if name and dt:
-                out.append(MacroEvent(name=name, dt_jst=dt))
-
-    out.sort(key=lambda x: x.dt_jst)
-    return out
-
-
-def nearest_event(events: List[MacroEvent], now_jst: datetime) -> Optional[Tuple[MacroEvent, int]]:
+# --------------------------------------------
+# events.csv 読み込み
+# --------------------------------------------
+def load_events(path: str) -> pd.DataFrame:
     """
-    直近イベントと、今から何日後か（整数）を返す
+    events.csv を読み込む
+    必須列: date, name
+    date は YYYY-MM-DD or YYYY-MM-DD HH:MM
     """
-    future = [e for e in events if e.dt_jst >= now_jst]
-    if not future:
-        return None
-    ev = future[0]
-    delta_days = (ev.dt_jst.date() - now_jst.date()).days
-    return ev, delta_days
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=["date", "name"])
+
+    if "date" not in df.columns or "name" not in df.columns:
+        return pd.DataFrame(columns=["date", "name"])
+
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+
+    return df
 
 
-def macro_risk_on(events: List[MacroEvent], now_jst: datetime, days_ahead: int = 2) -> bool:
+# --------------------------------------------
+# 重要イベント抽出
+# --------------------------------------------
+def extract_important_events(
+    events_df: pd.DataFrame,
+) -> pd.DataFrame:
     """
-    イベント接近の警戒フラグ
+    IMPORTANT_KEYWORDS を含むイベントのみ抽出
     """
-    x = nearest_event(events, now_jst)
-    if not x:
+    if events_df.empty:
+        return events_df
+
+    mask = events_df["name"].apply(
+        lambda x: any(k in str(x) for k in IMPORTANT_KEYWORDS)
+    )
+    return events_df[mask]
+
+
+# --------------------------------------------
+# 直近イベント判定
+# --------------------------------------------
+def check_upcoming_events(
+    events_df: pd.DataFrame,
+    days_ahead: int = 2,
+) -> Dict[str, object]:
+    """
+    直近イベントを判定
+    """
+    now = jst_now()
+    end = now + timedelta(days=days_ahead)
+
+    upcoming = events_df[
+        (events_df["date"] >= now) & (events_df["date"] <= end)
+    ].sort_values("date")
+
+    macro_risk = not upcoming.empty
+
+    return {
+        "macro_risk": macro_risk,
+        "events": upcoming.to_dict("records"),
+    }
+
+
+# --------------------------------------------
+# 決算回避判定
+# --------------------------------------------
+def is_near_earnings(
+    earnings_date: Optional[str],
+    window: int = 3,
+) -> bool:
+    """
+    決算 ±window 日以内かどうか
+    """
+    if not earnings_date:
         return False
-    _, d = x
-    return d <= days_ahead
+
+    try:
+        ed = pd.to_datetime(earnings_date)
+    except Exception:
+        return False
+
+    today = pd.to_datetime(jst_today_str())
+    return abs((ed - today).days) <= window
+
+
+# --------------------------------------------
+# イベント制限ルール
+# --------------------------------------------
+def apply_event_constraints(
+    macro_risk: bool,
+    candidates: List[Dict],
+    max_candidates_normal: int,
+    max_candidates_event: int = 2,
+) -> List[Dict]:
+    """
+    マクロイベント接近時は候補数を制限
+    """
+    if not macro_risk:
+        return candidates[:max_candidates_normal]
+
+    return candidates[:max_candidates_event]
+
+
+# --------------------------------------------
+# イベントサマリー文字列
+# --------------------------------------------
+def format_event_summary(events: List[Dict]) -> List[str]:
+    """
+    LINE 用イベント表示
+    """
+    lines = []
+    for e in events:
+        dt = e.get("date")
+        name = e.get("name", "")
+        if isinstance(dt, (datetime, pd.Timestamp)):
+            dt_str = dt.strftime("%Y-%m-%d %H:%M")
+        else:
+            dt_str = str(dt)
+        lines.append(f"{name}（{dt_str}）")
+    return lines
