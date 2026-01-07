@@ -1,18 +1,30 @@
+# ============================================
 # utils/features.py
+# 指標計算（ATR/RSI/MA/リターン等）
+# ============================================
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 
-def sma(series: pd.Series, n: int) -> pd.Series:
+def _sma(series: pd.Series, n: int) -> pd.Series:
     return series.rolling(n).mean()
 
 
-def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
+    diff = close.diff()
+    up = diff.clip(lower=0.0)
+    down = (-diff).clip(lower=0.0)
+    rs = up.rolling(n).mean() / (down.rolling(n).mean() + 1e-9)
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     high = df["High"]
     low = df["Low"]
     close = df["Close"]
@@ -21,84 +33,87 @@ def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.rolling(n).mean()
 
 
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / (loss.replace(0, np.nan))
-    out = 100 - (100 / (1 + rs))
-    return out.fillna(50)
-
-
-def hh(series: pd.Series, n: int) -> pd.Series:
-    return series.rolling(n).max()
-
-
-def ll(series: pd.Series, n: int) -> pd.Series:
-    return series.rolling(n).min()
-
-
-@dataclass(frozen=True)
-class Tech:
+@dataclass
+class Features:
     close: float
-    open_: float
-    atr: float
-    atr_pct: float
-    rsi: float
+    open: float
+    high: float
+    low: float
+    volume: float
+
     sma20: float
     sma50: float
     sma10: float
-    hh20: float
-    ll20: float
-    vol: float
-    vol_ma20: float
-    ret20: float
+
+    rsi14: float
+    atr14: float
+    atrp14: float  # ATR%
+
+    ret5d: float
+    ret20d: float
+
+    gu_flag: bool
 
 
-def compute_tech(df: pd.DataFrame) -> Optional[Tech]:
-    if df is None or len(df) < 80:
+def compute_features(df: pd.DataFrame) -> Optional[Features]:
+    if df is None or df.empty or len(df) < 60:
         return None
 
-    close = df["Close"]
-    open_ = df["Open"]
-    vol = df["Volume"]
+    for col in ("Open", "High", "Low", "Close", "Volume"):
+        if col not in df.columns:
+            return None
 
-    sma10 = sma(close, 10)
-    sma20 = sma(close, 20)
-    sma50 = sma(close, 50)
-    atr14 = atr(df, 14)
-    rsi14 = rsi(close, 14)
+    d = df.dropna().copy()
+    if len(d) < 60:
+        return None
 
-    hh20 = hh(close, 20)
-    ll20 = ll(close, 20)
-    vol_ma20 = vol.rolling(20).mean()
+    close = d["Close"]
+    sma20 = _sma(close, 20)
+    sma50 = _sma(close, 50)
+    sma10 = _sma(close, 10)
+    rsi14 = _rsi(close, 14)
+    atr14 = _atr(d, 14)
 
-    c = float(close.iloc[-1])
-    o = float(open_.iloc[-1])
-    a = float(atr14.iloc[-1]) if not np.isnan(atr14.iloc[-1]) else 0.0
-    atr_pct = (a / c) if c > 0 else 0.0
-    r = float(rsi14.iloc[-1])
-    s10 = float(sma10.iloc[-1])
+    c = float(d["Close"].iloc[-1])
+    o = float(d["Open"].iloc[-1])
+    h = float(d["High"].iloc[-1])
+    l = float(d["Low"].iloc[-1])
+    v = float(d["Volume"].iloc[-1])
+
     s20 = float(sma20.iloc[-1])
     s50 = float(sma50.iloc[-1])
-    h20 = float(hh20.iloc[-1])
-    l20 = float(ll20.iloc[-1])
-    v = float(vol.iloc[-1])
-    vm20 = float(vol_ma20.iloc[-1]) if not np.isnan(vol_ma20.iloc[-1]) else 0.0
-    ret20 = float(close.pct_change(20).iloc[-1]) if len(close) > 20 else 0.0
+    s10 = float(sma10.iloc[-1])
+    rsi = float(rsi14.iloc[-1])
+    atr = float(atr14.iloc[-1]) if not np.isnan(float(atr14.iloc[-1])) else 0.0
+    atrp = (atr / c * 100.0) if c > 0 else 0.0
 
-    return Tech(
+    # 5d/20d return (%)
+    ret5 = 0.0
+    ret20 = 0.0
+    if len(close) >= 6:
+        ret5 = float((c / float(close.iloc[-6]) - 1.0) * 100.0)
+    if len(close) >= 21:
+        ret20 = float((c / float(close.iloc[-21]) - 1.0) * 100.0)
+
+    # GU判定: Open > PrevClose + 1.0 ATR
+    prev_close = float(close.iloc[-2])
+    gu_flag = False
+    if atr > 0 and o > (prev_close + 1.0 * atr):
+        gu_flag = True
+
+    return Features(
         close=c,
-        open_=o,
-        atr=a,
-        atr_pct=atr_pct,
-        rsi=r,
+        open=o,
+        high=h,
+        low=l,
+        volume=v,
         sma20=s20,
         sma50=s50,
         sma10=s10,
-        hh20=h20,
-        ll20=l20,
-        vol=v,
-        vol_ma20=vm20,
-        ret20=ret20,
+        rsi14=rsi,
+        atr14=atr,
+        atrp14=atrp,
+        ret5d=ret5,
+        ret20d=ret20,
+        gu_flag=gu_flag,
     )
