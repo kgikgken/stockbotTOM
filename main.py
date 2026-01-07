@@ -1,181 +1,165 @@
 # ============================================
 # main.py
-# stockbotTOM (Swing 1-7d) - Clean Version
-# - NO-TRADE fully mechanical
-# - AdjEV filter, RR min by market, event cap(=2), weekly cap
-# - Setup A split to A1/A2
-# - Natural RR / R-day distribution (not fixed)
-# - LINE delivery via Cloudflare Worker (WORKER_URL)
+# stockbotTOM（Swing専用 / 1〜7日）
+# - NO-TRADE完全機械化
+# - EV → 地合い/イベントで補正（AdjEV）
+# - 速度（R/day）主導
+# - 相場認識をレポート明示
+# - ロット事故を事前警告
+# - LINE送信（Cloudflare Worker 経由想定）
 # ============================================
 
 from __future__ import annotations
 
 import os
 import sys
-import json
 import traceback
-from dataclasses import asdict
-from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
-import pandas as pd
-
-from utils.util import jst_today_str, jst_now_str
-from utils.market import compute_market_context
-from utils.sector import compute_top_sectors_5d
-from utils.events import load_events, detect_macro_risk
+from utils.util import jst_today_str
+from utils.setup import load_universe, load_events, load_weekly_state, save_weekly_state
+from utils.market import calc_market_regime
+from utils.sector import top_sectors_5d
 from utils.position import load_positions, analyze_positions
-from utils.screener import run_screener
-from utils.report import build_daily_report_text
+from utils.screener import run_swing_screening
+from utils.report import build_daily_report
 from utils.line import send_line_message
 
 
-UNIVERSE_PATH = os.getenv("UNIVERSE_PATH", "universe_jpx.csv")
-POSITIONS_PATH = os.getenv("POSITIONS_PATH", "positions.csv")
-EVENTS_PATH = os.getenv("EVENTS_PATH", "events.csv")
-WEEKLY_STATE_PATH = os.getenv("WEEKLY_STATE_PATH", "weekly_state.json")
+# -----------------------------
+# 設定（必要ならここだけ触る）
+# -----------------------------
+@dataclass(frozen=True)
+class Config:
+    # 入力
+    universe_path: str = "universe_jpx.csv"
+    positions_path: str = "positions.csv"
+    events_path: str = "events.csv"
+    weekly_state_path: str = "weekly_state.json"
 
-WORKER_URL = os.getenv("WORKER_URL", "").strip()
+    # 指数（地合い計算のベンチマーク）
+    index_ticker: str = "^TOPX"  # yfinanceのTOPIX。環境により取得不可なら screener 側でフォールバック
 
+    # Swing基本（最終採用上限）
+    max_final: int = 5
 
-def _load_universe(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Universe not found: {path}")
-    df = pd.read_csv(path)
-    # expected columns (flexible):
-    # ticker, name, sector, earnings_date (optional)
-    if "ticker" not in df.columns:
-        raise ValueError("universe_jpx.csv must include 'ticker' column")
-    df["ticker"] = df["ticker"].astype(str).str.strip()
-    return df
+    # 週次制限（新規回数）
+    weekly_new_limit: int = 3
 
+    # 決算回避（±営業日）
+    earnings_exclude_days: int = 3
 
-def _load_weekly_state(path: str) -> Dict[str, Any]:
-    # Track weekly new entries count: resets on Monday (JST) or when week key changes.
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    # セクター上限（同一セクター最大数）
+    per_sector_limit: int = 2
 
+    # 相関制限（同時採用禁止ライン）
+    corr_block_threshold: float = 0.75
 
-def _save_weekly_state(path: str, state: Dict[str, Any]) -> None:
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception:
-        # Do not crash screening if state save fails
-        pass
+    # 候補の“監視”を出すか（cで話していたやつ）
+    include_watchlist: bool = True
+    watchlist_max: int = 10
 
+    # LINE（worker URL は utils/line.py が env から拾う）
+    line_dry_run: bool = False  # Trueなら送らずに標準出力のみ
 
-def _current_week_key_jst() -> str:
-    # ISO week key based on JST date
-    # Example: 2026-W01
-    import datetime
-    from utils.util import JST
-
-    d = datetime.datetime.now(JST).date()
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{int(w):02d}"
+    # ロット事故警告（資産比 % を超えたら警告）
+    lot_accident_warn_pct: float = 8.0
 
 
-def _get_weekly_new_count(state: Dict[str, Any], week_key: str) -> int:
-    if state.get("week_key") != week_key:
-        return 0
-    return int(state.get("weekly_new_count", 0) or 0)
-
-
-def _set_weekly_new_count(state: Dict[str, Any], week_key: str, count: int) -> None:
-    state["week_key"] = week_key
-    state["weekly_new_count"] = int(count)
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
 
 
 def main() -> int:
+    cfg = Config(
+        line_dry_run=_env_bool("LINE_DRY_RUN", False),
+    )
+
     today = jst_today_str()
-    now_str = jst_now_str()
 
-    # --- Load core inputs
-    universe = _load_universe(UNIVERSE_PATH)
-    positions = load_positions(POSITIONS_PATH)
-    events = load_events(EVENTS_PATH)
+    try:
+        # 1) 入力読み込み
+        universe = load_universe(cfg.universe_path)
+        events = load_events(cfg.events_path)
+        weekly_state = load_weekly_state(cfg.weekly_state_path)
 
-    # --- Weekly state
-    week_key = _current_week_key_jst()
-    weekly_state = _load_weekly_state(WEEKLY_STATE_PATH)
-    weekly_new_count = _get_weekly_new_count(weekly_state, week_key)
+        positions = load_positions(cfg.positions_path)
+        pos_summary = analyze_positions(positions)
 
-    # --- Market / Sector / Macro
-    market_ctx = compute_market_context()
-    top_sectors = compute_top_sectors_5d(universe=universe, lookback_days=5)
+        # 2) 地合い（MarketScore / Δ3d / 相場判断 / マクロ警戒）
+        regime = calc_market_regime(index_ticker=cfg.index_ticker, events=events)
 
-    macro_risk = detect_macro_risk(
-        events=events,
-        within_days=2,
-        now_jst=now_str,
-    )
+        # 3) セクター（補助情報）
+        sectors_5d = top_sectors_5d(universe)
 
-    # --- Analyze positions (risk / lot accident)
-    pos_summary = analyze_positions(positions=positions)
+        # 4) スクリーニング（Swing）
+        screening = run_swing_screening(
+            universe=universe,
+            events=events,
+            positions=positions,
+            regime=regime,
+            today=today,
+            weekly_state=weekly_state,
+            config={
+                "max_final": cfg.max_final,
+                "earnings_exclude_days": cfg.earnings_exclude_days,
+                "per_sector_limit": cfg.per_sector_limit,
+                "corr_block_threshold": cfg.corr_block_threshold,
+                "weekly_new_limit": cfg.weekly_new_limit,
+                "include_watchlist": cfg.include_watchlist,
+                "watchlist_max": cfg.watchlist_max,
+            },
+        )
 
-    # --- Run screener
-    screen_out = run_screener(
-        universe=universe,
-        positions=positions,
-        events=events,
-        market_ctx=market_ctx,
-        top_sectors=top_sectors,
-        macro_risk=macro_risk,
-        weekly_new_count=weekly_new_count,
-    )
+        # 5) レポート生成（LINE文）
+        message = build_daily_report(
+            today=today,
+            regime=regime,
+            sectors_5d=sectors_5d,
+            events=events,
+            screening=screening,
+            pos_summary=pos_summary,
+            weekly_state=weekly_state,
+            config={
+                "lot_accident_warn_pct": cfg.lot_accident_warn_pct,
+            },
+        )
 
-    # Update weekly state if "new entries allowed and executed" is conceptually increased.
-    # In this bot, we only recommend; user executes. So we increment only when user opts in.
-    # BUT to keep it fully mechanical, we treat "candidates produced under NEW-OK" as "1 slot used"
-    # only if we were not NO-TRADE and there is at least one EXEC_NOW or LIMIT_WAIT.
-    # You can change to manual later.
-    if screen_out.weekly_new_count_next is not None:
-        _set_weekly_new_count(weekly_state, week_key, screen_out.weekly_new_count_next)
-        _save_weekly_state(WEEKLY_STATE_PATH, weekly_state)
+        # 6) 送信（LINE）
+        if cfg.line_dry_run:
+            print(message)
+        else:
+            send_line_message(message)
 
-    # --- Build report text
-    report_text = build_daily_report_text(
-        date_str=today,
-        market_ctx=market_ctx,
-        top_sectors=top_sectors,
-        events=events,
-        macro_risk=macro_risk,
-        weekly_new_count=_get_weekly_new_count(weekly_state, week_key),
-        screen_out=screen_out,
-        pos_summary=pos_summary,
-    )
+        # 7) 週次状態保存（新規回数など）
+        # run_swing_screening 側で weekly_state を更新して返す想定
+        if isinstance(screening, dict) and "weekly_state" in screening:
+            save_weekly_state(cfg.weekly_state_path, screening["weekly_state"])
+        else:
+            # フォールバック：読み込んだものをそのまま保存（最低限）
+            save_weekly_state(cfg.weekly_state_path, weekly_state)
 
-    # --- Send LINE via Worker
-    if not WORKER_URL:
-        print(report_text)
-        print("\n[WARN] WORKER_URL is empty. Printed report instead of sending.")
         return 0
 
-    ok = send_line_message(worker_url=WORKER_URL, message=report_text)
-    if not ok:
-        print(report_text)
-        print("\n[ERROR] LINE send failed. Printed report for debugging.")
-        return 2
+    except Exception as e:
+        # 失敗した時も “何が起きたか” を出す（Actions で追える）
+        err = f"[ERROR] stockbotTOM failed on {today}: {e}"
+        print(err, file=sys.stderr)
+        traceback.print_exc()
 
-    return 0
+        # 送信できるならエラーもLINEに流す（落ちた理由が即分かる）
+        try:
+            if not cfg.line_dry_run:
+                send_line_message(err)
+        except Exception:
+            pass
+
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as e:
-        print("[FATAL] main.py crashed:", str(e))
-        traceback.print_exc()
-        # Try to send crash notice if possible
-        try:
-            if WORKER_URL:
-                msg = "[FATAL] stockbotTOM crashed\n" + jst_now_str() + "\n" + str(e)
-                send_line_message(worker_url=WORKER_URL, message=msg)
-        except Exception:
-            pass
-        sys.exit(1)
+    raise SystemExit(main())
