@@ -1,79 +1,113 @@
+# ============================================
 # utils/util.py
+# 共通ユーティリティ（日時・数値処理）
+# ============================================
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone, timedelta
+import math
+from typing import Optional
 
-DEFAULT_TZ = timezone(timedelta(hours=9))
+
+# --------------------------------------------
+# JST 時刻
+# --------------------------------------------
+JST = timezone(timedelta(hours=9))
 
 
 def jst_now() -> datetime:
-    return datetime.now(DEFAULT_TZ)
+    return datetime.now(JST)
+
+
+def jst_now_str() -> str:
+    return jst_now().strftime("%Y-%m-%d %H:%M")
 
 
 def jst_today_str() -> str:
     return jst_now().strftime("%Y-%m-%d")
 
 
-def safe_float(x: Any, default: float = 0.0) -> float:
+# --------------------------------------------
+# 安全な数値処理
+# --------------------------------------------
+def safe_div(a: float, b: float, default: float = 0.0) -> float:
     try:
-        if x is None:
+        if b == 0 or b is None:
             return default
-        return float(x)
+        return a / b
     except Exception:
         return default
 
 
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
+def clamp(x: float, low: float, high: float) -> float:
+    return max(low, min(high, x))
 
 
-def fmt_int(n: float) -> str:
+# --------------------------------------------
+# RR 下限（地合い連動）
+# --------------------------------------------
+def rr_min_by_market(market_score: float) -> float:
+    """
+    地合いが弱いほど RR を要求する
+    """
+    if market_score >= 75:
+        return 1.8
+    if market_score >= 65:
+        return 2.0
+    if market_score >= 55:
+        return 2.2
+    if market_score >= 45:
+        return 2.4
+    return 2.6
+
+
+# --------------------------------------------
+# レバレッジ目安
+# --------------------------------------------
+def leverage_by_market(market_score: float, macro_risk: bool) -> float:
+    if macro_risk:
+        return 1.0
+
+    if market_score >= 75:
+        return 2.0
+    if market_score >= 65:
+        return 1.7
+    if market_score >= 55:
+        return 1.3
+    return 1.0
+
+
+# --------------------------------------------
+# ExpectedDays 推定
+# --------------------------------------------
+def estimate_days(tp2: float, entry: float, atr: float) -> float:
+    """
+    TP2 到達までの想定日数（速度評価用）
+    """
+    if atr <= 0:
+        return 99.0
+    return abs(tp2 - entry) / atr
+
+
+# --------------------------------------------
+# R/day
+# --------------------------------------------
+def calc_r_per_day(rr: float, days: float) -> float:
+    if days <= 0:
+        return 0.0
+    return rr / days
+
+
+def round_price(x: float, ndigits: int = 1) -> float:
     try:
-        return f"{int(round(n)):,}"
+        return round(float(x), ndigits)
     except Exception:
-        return "n/a"
+        return float("nan")
 
 
-def fmt_float(x: float, nd: int = 2) -> str:
-    if x is None:
-        return "n/a"
+def to_float(x, default: float = float("nan")) -> float:
     try:
-        return f"{float(x):.{nd}f}"
-    except Exception:
-        return "n/a"
-
-
-def pct(x: float, nd: int = 2) -> str:
-    if x is None:
-        return "n/a"
-    try:
-        return f"{float(x) * 100:.{nd}f}%"
-    except Exception:
-        return "n/a"
-
-
-@dataclass(frozen=True)
-class MarketState:
-    score: float
-    delta_3d: float
-    regime: str  # "bull" / "neutral" / "bear"
-    macro_caution: bool
-    leverage: float
-    max_gross: float
-    no_trade: bool
-    reason: str
-
-
-@dataclass(frozen=True)
-class EventState:
-    macro_event_near: bool
-    macro_event_text: str
-
-
-def dict_get(d: Dict[str, Any], k: str, default: Any = None) -> Any:
-    try:
-        return d.get(k, default)
+        return float(x)
     except Exception:
         return default
