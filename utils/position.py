@@ -1,82 +1,108 @@
 # ============================================
 # utils/position.py
-# 既存ポジションの読み込み・リスク分析
+# 保有ポジション管理・リスク集計
 # ============================================
 
 from __future__ import annotations
 
-import os
-from typing import Dict, List
 import pandas as pd
+from typing import Dict, Tuple
 
 
 # --------------------------------------------
 # ポジション読み込み
 # --------------------------------------------
-def load_positions(path: str = "positions.csv") -> pd.DataFrame:
+def load_positions(path: str) -> pd.DataFrame:
     """
     positions.csv を読み込む
-    想定カラム例:
-      - ticker
-      - qty
-      - entry_price
-      - stop_price
-      - current_price（無くてもOK）
+    想定カラム:
+      ticker, entry, size, stop, rr
     """
-    if not os.path.exists(path):
-        return pd.DataFrame()
-
     try:
         df = pd.read_csv(path)
-        return df
     except Exception:
         return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    # 必須カラム補正
+    for col in ["ticker", "entry", "size", "stop", "rr"]:
+        if col not in df.columns:
+            df[col] = None
+
+    return df
 
 
 # --------------------------------------------
 # ポジション分析
 # --------------------------------------------
 def analyze_positions(
-    positions_df: pd.DataFrame,
-    capital: float | None = None,
-    risk_per_trade: float = 0.015,
+    pos_df: pd.DataFrame,
+    capital: float,
 ) -> Dict:
     """
-    保有ポジションのリスクを集計する
-
-    戻り値:
-      {
-        "num_positions": int,
-        "estimated_max_loss": float,
-        "risk_ratio": float | None
-      }
+    現在ポジションのリスク状況を集計
     """
-    if positions_df is None or len(positions_df) == 0:
+    if pos_df is None or pos_df.empty:
         return {
-            "num_positions": 0,
-            "estimated_max_loss": 0.0,
-            "risk_ratio": 0.0 if capital else None,
+            "count": 0,
+            "max_loss": 0.0,
+            "risk_ratio": 0.0,
+            "warning": False,
         }
 
-    total_loss = 0.0
+    max_loss = 0.0
 
-    for _, row in positions_df.iterrows():
+    for _, row in pos_df.iterrows():
         try:
-            qty = float(row.get("qty", 0))
-            entry = float(row.get("entry_price", 0))
-            stop = float(row.get("stop_price", entry))
-
-            loss_per_share = max(entry - stop, 0)
-            total_loss += loss_per_share * qty
+            entry = float(row["entry"])
+            stop = float(row["stop"])
+            size = float(row["size"])
+            loss = max(entry - stop, 0) * size
+            max_loss += loss
         except Exception:
             continue
 
-    risk_ratio = None
-    if capital and capital > 0:
-        risk_ratio = total_loss / capital
+    risk_ratio = max_loss / capital if capital > 0 else 0.0
 
     return {
-        "num_positions": int(len(positions_df)),
-        "estimated_max_loss": float(total_loss),
-        "risk_ratio": risk_ratio,
+        "count": len(pos_df),
+        "max_loss": round(max_loss, 0),
+        "risk_ratio": round(risk_ratio, 4),
+        "warning": risk_ratio >= 0.10,  # 10%超で警告
     }
+
+
+# --------------------------------------------
+# セクター・相関制限チェック用
+# --------------------------------------------
+def sector_exposure(pos_df: pd.DataFrame) -> Dict[str, int]:
+    """
+    セクター別保有数
+    """
+    if pos_df is None or pos_df.empty:
+        return {}
+
+    if "sector" not in pos_df.columns:
+        return {}
+
+    return pos_df["sector"].value_counts().to_dict()
+
+
+def can_add_position(
+    pos_df: pd.DataFrame,
+    sector: str,
+    max_per_sector: int = 2,
+) -> bool:
+    """
+    セクター上限チェック
+    """
+    if pos_df is None or pos_df.empty:
+        return True
+
+    if "sector" not in pos_df.columns:
+        return True
+
+    current = (pos_df["sector"] == sector).sum()
+    return current < max_per_sector
