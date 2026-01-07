@@ -1,135 +1,77 @@
 # ============================================
 # utils/setup.py
-# Setup 判定（A1 / A2）
+# 初期データ読み込み・週次状態管理
 # ============================================
 
-import numpy as np
+import os
+import json
+import pandas as pd
+from datetime import datetime
+from utils.util import jst_today_str
+
+# --------------------------------------------
+# パス設定
+# --------------------------------------------
+UNIVERSE_PATH = "universe_jpx.csv"
+EVENTS_PATH = "events.csv"
+WEEKLY_STATE_PATH = "weekly_state.json"
 
 
 # --------------------------------------------
-# 共通インジケータ取得
+# ユニバース読み込み
 # --------------------------------------------
-def _ma(series, n):
-    if len(series) < n:
-        return np.nan
-    return series.rolling(n).mean().iloc[-1]
-
-
-def _atr(df, n=14):
-    if len(df) < n + 1:
-        return np.nan
-
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
-
-    tr = np.maximum(
-        high - low,
-        np.maximum(
-            abs(high - close.shift(1)),
-            abs(low - close.shift(1)),
-        ),
-    )
-
-    return tr.rolling(n).mean().iloc[-1]
-
-
-def _rsi(series, n=14):
-    if len(series) < n + 1:
-        return np.nan
-
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(n).mean()
-    avg_loss = loss.rolling(n).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi.iloc[-1]
-
-
-# --------------------------------------------
-# Setup A 判定（A1 / A2）
-# --------------------------------------------
-def judge_setup_A(df):
+def load_universe() -> pd.DataFrame:
     """
-    Setup A を A1 / A2 に分離
-
-    A1:
-      ・強トレンド
-      ・浅い押し目
-      ・再加速期待
-
-    A2:
-      ・トレンド継続
-      ・やや深い押し目
-      ・時間はかかるがEV成立
+    全銘柄ユニバースを読み込む
     """
+    if not os.path.exists(UNIVERSE_PATH):
+        raise FileNotFoundError(f"Universe file not found: {UNIVERSE_PATH}")
 
-    close = df["Close"]
+    df = pd.read_csv(UNIVERSE_PATH)
+    return df
 
-    ma20 = _ma(close, 20)
-    ma50 = _ma(close, 50)
-    ma20_prev = _ma(close[:-5], 20) if len(close) > 25 else np.nan
 
-    atr = _atr(df)
-    rsi = _rsi(close)
+# --------------------------------------------
+# イベント読み込み
+# --------------------------------------------
+def load_events() -> pd.DataFrame:
+    """
+    マクロ・決算イベント読み込み
+    """
+    if not os.path.exists(EVENTS_PATH):
+        return pd.DataFrame()
 
-    if any(np.isnan(x) for x in [ma20, ma50, atr, rsi]):
-        return None
+    df = pd.read_csv(EVENTS_PATH)
+    return df
 
-    price = close.iloc[-1]
 
-    # --- トレンド前提 ---
-    trend_ok = price > ma20 > ma50
-    slope_ok = ma20 > ma20_prev
+# --------------------------------------------
+# 週次状態読み込み
+# --------------------------------------------
+def load_weekly_state() -> dict:
+    """
+    週次新規回数などの状態を取得
+    """
+    today = jst_today_str()
 
-    if not (trend_ok and slope_ok):
-        return None
-
-    # --- 押し目判定 ---
-    dist_from_ma20 = abs(price - ma20)
-    dist_atr = dist_from_ma20 / atr if atr > 0 else np.inf
-
-    # RSI 過熱排除
-    if rsi >= 65:
-        return None
-
-    # --------------------
-    # A1: 浅い押し目
-    # --------------------
-    if dist_atr <= 0.5 and 40 <= rsi <= 60:
+    if not os.path.exists(WEEKLY_STATE_PATH):
         return {
-            "setup": "A1",
-            "comment": "浅い押し目・再加速型"
+            "week_start": today,
+            "new_entries": 0,
         }
 
-    # --------------------
-    # A2: やや深い押し目
-    # --------------------
-    if 0.5 < dist_atr <= 1.0 and 35 <= rsi <= 55:
-        return {
-            "setup": "A2",
-            "comment": "深め押し目・時間許容型"
-        }
+    with open(WEEKLY_STATE_PATH, "r", encoding="utf-8") as f:
+        state = json.load(f)
 
-    return None
+    return state
 
 
 # --------------------------------------------
-# Setup 判定エントリポイント
+# 週次状態保存
 # --------------------------------------------
-def detect_setup(df):
+def save_weekly_state(state: dict):
     """
-    現在は Setup A のみ採用
-    将来 Setup B 追加可能
+    週次状態を保存
     """
-
-    setup_a = judge_setup_A(df)
-    if setup_a:
-        return setup_a
-
-    return None
+    with open(WEEKLY_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
