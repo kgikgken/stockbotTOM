@@ -1,77 +1,135 @@
 # ============================================
 # utils/setup.py
-# Setup判定（AをA1/A2に分離）
+# Setup 判定（A1 / A2）
 # ============================================
 
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Optional, Tuple
-
-from utils.features import Features
+import numpy as np
 
 
-@dataclass
-class SetupResult:
-    setup_type: str  # "A1" "A2" "B" or "-"
-    reason: str
+# --------------------------------------------
+# 共通インジケータ取得
+# --------------------------------------------
+def _ma(series, n):
+    if len(series) < n:
+        return np.nan
+    return series.rolling(n).mean().iloc[-1]
 
 
-def is_trend_up(f: Features) -> bool:
-    return (f.close > f.sma20 > f.sma50) and (f.sma20 - f.sma50) > 0.0
+def _atr(df, n=14):
+    if len(df) < n + 1:
+        return np.nan
+
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+
+    tr = np.maximum(
+        high - low,
+        np.maximum(
+            abs(high - close.shift(1)),
+            abs(low - close.shift(1)),
+        ),
+    )
+
+    return tr.rolling(n).mean().iloc[-1]
 
 
-def setup_a1(f: Features) -> Optional[SetupResult]:
+def _rsi(series, n=14):
+    if len(series) < n + 1:
+        return np.nan
+
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(n).mean()
+    avg_loss = loss.rolling(n).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi.iloc[-1]
+
+
+# --------------------------------------------
+# Setup A 判定（A1 / A2）
+# --------------------------------------------
+def judge_setup_A(df):
     """
-    A1: 強トレンド + 浅い押し目（MA20近辺）+ RSI過熱なし
+    Setup A を A1 / A2 に分離
+
+    A1:
+      ・強トレンド
+      ・浅い押し目
+      ・再加速期待
+
+    A2:
+      ・トレンド継続
+      ・やや深い押し目
+      ・時間はかかるがEV成立
     """
-    if not is_trend_up(f):
+
+    close = df["Close"]
+
+    ma20 = _ma(close, 20)
+    ma50 = _ma(close, 50)
+    ma20_prev = _ma(close[:-5], 20) if len(close) > 25 else np.nan
+
+    atr = _atr(df)
+    rsi = _rsi(close)
+
+    if any(np.isnan(x) for x in [ma20, ma50, atr, rsi]):
         return None
-    # 押し目: SMA20から0.8ATR以内
-    if f.atr14 <= 0:
+
+    price = close.iloc[-1]
+
+    # --- トレンド前提 ---
+    trend_ok = price > ma20 > ma50
+    slope_ok = ma20 > ma20_prev
+
+    if not (trend_ok and slope_ok):
         return None
-    if abs(f.close - f.sma20) > 0.8 * f.atr14:
+
+    # --- 押し目判定 ---
+    dist_from_ma20 = abs(price - ma20)
+    dist_atr = dist_from_ma20 / atr if atr > 0 else np.inf
+
+    # RSI 過熱排除
+    if rsi >= 65:
         return None
-    if not (40.0 <= f.rsi14 <= 62.0):
-        return None
-    return SetupResult(setup_type="A1", reason="トレンド上 + MA20付近の押し目")
+
+    # --------------------
+    # A1: 浅い押し目
+    # --------------------
+    if dist_atr <= 0.5 and 40 <= rsi <= 60:
+        return {
+            "setup": "A1",
+            "comment": "浅い押し目・再加速型"
+        }
+
+    # --------------------
+    # A2: やや深い押し目
+    # --------------------
+    if 0.5 < dist_atr <= 1.0 and 35 <= rsi <= 55:
+        return {
+            "setup": "A2",
+            "comment": "深め押し目・時間許容型"
+        }
+
+    return None
 
 
-def setup_a2(f: Features) -> Optional[SetupResult]:
+# --------------------------------------------
+# Setup 判定エントリポイント
+# --------------------------------------------
+def detect_setup(df):
     """
-    A2: トレンドは上だが、押しが深め（MA50寄り） or RSIがやや低め
+    現在は Setup A のみ採用
+    将来 Setup B 追加可能
     """
-    if not (f.close > f.sma50):
-        return None
-    if f.atr14 <= 0:
-        return None
 
-    # MA20割れは許容、ただしMA50は維持
-    if f.close < f.sma50:
-        return None
+    setup_a = judge_setup_A(df)
+    if setup_a:
+        return setup_a
 
-    # MA20〜MA50の間で押し目判定（深め）
-    # 近さ: min(|close-sma20|, |close-sma50|) <= 1.2ATR
-    near = min(abs(f.close - f.sma20), abs(f.close - f.sma50))
-    if near > 1.2 * f.atr14:
-        return None
-
-    # RSIは過熱なし（35〜60）
-    if not (35.0 <= f.rsi14 <= 60.0):
-        return None
-
-    # A1に該当するならA1優先
-    if setup_a1(f) is not None:
-        return None
-
-    return SetupResult(setup_type="A2", reason="トレンド上 + 深めの押し目（MA50寄り）")
-
-
-def detect_setup(f: Features) -> SetupResult:
-    a1 = setup_a1(f)
-    if a1:
-        return a1
-    a2 = setup_a2(f)
-    if a2:
-        return a2
-    return SetupResult(setup_type="-", reason="形不一致")
+    return None
