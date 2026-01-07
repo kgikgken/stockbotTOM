@@ -1,13 +1,20 @@
 # ============================================
 # utils/rr_ev.py
-# RR / EV / 補正EV / 速度（R/day）計算
+# RR / EV / 補正EV / 速度評価
 # ============================================
 
-from utils.util import safe_div, clamp, rr_min_by_market, estimate_days, calc_r_per_day
+from __future__ import annotations
+
+from utils.util import (
+    safe_div,
+    rr_min_by_market,
+    estimate_days,
+    calc_r_per_day,
+)
 
 
 # --------------------------------------------
-# RR 計算（構造ベース・固定化しない）
+# RR 計算
 # --------------------------------------------
 def calc_rr(entry: float, stop: float, tp2: float) -> float:
     """
@@ -15,49 +22,26 @@ def calc_rr(entry: float, stop: float, tp2: float) -> float:
     """
     risk = entry - stop
     reward = tp2 - entry
-    if risk <= 0:
-        return 0.0
-    return safe_div(reward, risk)
+    return safe_div(reward, risk, 0.0)
 
 
 # --------------------------------------------
-# 勝率 proxy（0〜1）
-# ※ スコアではなく EV の素材としてのみ使用
+# 勝率代理（Pwin）
 # --------------------------------------------
 def estimate_pwin(features: dict) -> float:
     """
-    features 例:
-    - trend_strength (0〜1)
-    - rs_strength (0〜1)
-    - sector_rank (1〜N)
-    - volume_quality (0〜1)
-    - gu_flag (bool)
-    - liquidity (0〜1)
+    厳密な勝率は推定不可なので、
+    特徴量から 0〜1 に正規化した代理値を作る
     """
+    score = 0.0
+    score += features.get("trend_strength", 0.0) * 0.30
+    score += features.get("relative_strength", 0.0) * 0.25
+    score += features.get("sector_rank", 0.0) * 0.15
+    score += features.get("volume_quality", 0.0) * 0.15
+    score -= features.get("gap_risk", 0.0) * 0.25
 
-    p = 0.0
-
-    # トレンドの強さ
-    p += 0.30 * features.get("trend_strength", 0.0)
-
-    # 相対強度
-    p += 0.25 * features.get("rs_strength", 0.0)
-
-    # セクター順位（上位ほど良い）
-    sector_rank = features.get("sector_rank", 10)
-    p += 0.15 * clamp(1.0 - (sector_rank - 1) / 10.0, 0.0, 1.0)
-
-    # 出来高の質
-    p += 0.20 * features.get("volume_quality", 0.0)
-
-    # 流動性
-    p += 0.10 * features.get("liquidity", 0.0)
-
-    # GU は強烈に減点
-    if features.get("gu_flag", False):
-        p -= 0.30
-
-    return clamp(p, 0.05, 0.80)
+    # clamp
+    return max(0.05, min(0.85, score))
 
 
 # --------------------------------------------
@@ -67,103 +51,46 @@ def calc_ev(rr: float, pwin: float) -> float:
     """
     EV = Pwin * RR - (1 - Pwin) * 1R
     """
-    return pwin * rr - (1.0 - pwin) * 1.0
+    return pwin * rr - (1 - pwin) * 1.0
 
 
 # --------------------------------------------
-# 地合い補正 EV
+# 地合い補正
 # --------------------------------------------
-def adjust_ev_by_market(
+def apply_market_adjustment(
     ev: float,
     market_score: float,
-    delta_market: int,
-    macro_risk: bool
+    delta_3d: float,
+    macro_risk: bool,
 ) -> float:
-    """
-    地合い・イベントで EV を現実値に補正
-    """
+    multiplier = 1.0
 
-    mult = 1.0
+    if market_score >= 70 and delta_3d >= 0:
+        multiplier = 1.05
+    elif delta_3d <= -5:
+        multiplier = 0.70
 
-    # 地合いレベル
-    if market_score >= 70:
-        mult *= 1.05
-    elif market_score >= 60:
-        mult *= 1.00
-    elif market_score >= 50:
-        mult *= 0.90
-    else:
-        mult *= 0.80
-
-    # 地合いの変化
-    if delta_market <= -5:
-        mult *= 0.75
-    elif delta_market >= 5:
-        mult *= 1.05
-
-    # マクロイベント
     if macro_risk:
-        mult *= 0.75
+        multiplier *= 0.75
 
-    return ev * mult
+    return ev * multiplier
 
 
 # --------------------------------------------
-# RR 下限チェック（地合い連動）
+# RR 足切り判定（地合い連動）
 # --------------------------------------------
-def pass_rr_filter(rr: float, market_score: float) -> bool:
-    """
-    地合いが悪いほど高RRを要求
-    """
+def is_rr_valid(rr: float, market_score: float) -> bool:
     rr_min = rr_min_by_market(market_score)
     return rr >= rr_min
 
 
 # --------------------------------------------
-# EV 足切り
+# 速度評価
 # --------------------------------------------
-def pass_ev_filter(adj_ev: float, threshold: float = 0.5) -> bool:
+def evaluate_speed(entry: float, tp2: float, atr: float, rr: float):
     """
-    補正EVが一定未満は不採用
-    """
-    return adj_ev >= threshold
-
-
-# --------------------------------------------
-# 速度評価（R/day）
-# --------------------------------------------
-def calc_speed_metrics(
-    entry: float,
-    tp2: float,
-    atr: float,
-    rr: float
-) -> dict:
-    """
-    ExpectedDays / R_per_day を算出
+    ExpectedDays と R/day を返す
     """
     days = estimate_days(tp2, entry, atr)
     r_day = calc_r_per_day(rr, days)
-
-    return {
-        "expected_days": days,
-        "r_day": r_day,
-    }
-
-
-# --------------------------------------------
-# 速度フィルタ
-# --------------------------------------------
-def pass_speed_filter(
-    expected_days: float,
-    r_day: float,
-    max_days: float = 5.0,
-    min_r_day: float = 0.5
-) -> bool:
-    """
-    1〜7日戦用の速度足切り
-    """
-    if expected_days > max_days:
-        return False
-    if r_day < min_r_day:
-        return False
-    return True
+    return days, r_day
