@@ -1,94 +1,36 @@
-# ============================================
-# utils/screener.py
-# 銘柄スクリーニング中核ロジック
-# ============================================
 
-from __future__ import annotations
+from utils.market import calc_market_score
+from utils.events import get_events
+from utils.sector import top_sectors
+from utils.features import extract_features
+from utils.setup import classify_setup
+from utils.entry import calc_entry
+from utils.rr_ev import calc_rr, calc_ev
+from utils.util import rr_min_by_market
 
-from typing import List, Dict
+def run_screening():
+    market = calc_market_score()
+    rr_min = rr_min_by_market(market["score"])
 
-from utils.rr_ev import (
-    calc_rr,
-    estimate_pwin,
-    calc_ev,
-    apply_market_adjustment,
-    is_rr_valid,
-    evaluate_speed,
-)
-from utils.util import clamp
+    candidates = []
+    for t in ["4063.T","4182.T"]:
+        f = extract_features(t)
+        setup = classify_setup(f)
+        ent = calc_entry(f)
+        rr = calc_rr(ent["entry"], ent["stop"], ent["tp2"])
+        ev = calc_ev(rr)
 
+        if rr >= rr_min and ev >= 0.5:
+            candidates.append({
+                "ticker": t,
+                "setup": setup,
+                "rr": rr,
+                "ev": ev
+            })
 
-# --------------------------------------------
-# スクリーニング本体
-# --------------------------------------------
-def screen_stocks(
-    candidates: List[Dict],
-    market_score: float,
-    delta_3d: float,
-    macro_risk: bool,
-    max_candidates: int,
-) -> List[Dict]:
-    """
-    各銘柄の RR / EV / AdjEV / R/day を計算し、
-    条件を満たすものだけを返す
-    """
-
-    results = []
-
-    for c in candidates:
-        entry = c["entry"]
-        stop = c["stop"]
-        tp2 = c["tp2"]
-        atr = c["atr"]
-
-        # RR
-        rr = calc_rr(entry, stop, tp2)
-        if not is_rr_valid(rr, market_score):
-            continue
-
-        # 勝率代理
-        pwin = estimate_pwin(c.get("features", {}))
-
-        # EV
-        ev = calc_ev(rr, pwin)
-
-        # 地合い補正
-        adj_ev = apply_market_adjustment(
-            ev,
-            market_score,
-            delta_3d,
-            macro_risk,
-        )
-
-        # EV 足切り
-        if adj_ev < 0.5:
-            continue
-
-        # 速度評価
-        days, r_day = evaluate_speed(entry, tp2, atr, rr)
-
-        # 速度足切り
-        if days > 7 or r_day < 0.5:
-            continue
-
-        c2 = dict(c)
-        c2.update(
-            {
-                "rr": round(rr, 2),
-                "pwin": round(pwin, 2),
-                "ev": round(ev, 2),
-                "adj_ev": round(adj_ev, 2),
-                "expected_days": round(days, 1),
-                "r_per_day": round(r_day, 2),
-            }
-        )
-
-        results.append(c2)
-
-    # AdjEV → R/day 優先で並び替え
-    results.sort(
-        key=lambda x: (x["adj_ev"], x["r_per_day"]),
-        reverse=True,
-    )
-
-    return results[:max_candidates]
+    return {
+        "market": market,
+        "candidates": candidates,
+        "events": get_events(),
+        "sectors": top_sectors()
+    }
