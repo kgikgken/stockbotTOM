@@ -93,6 +93,9 @@ def pass_universe_filters(
     return True, {"price": float(price), "adv20": float(adv20), "atrp14": float(atrp)}, ""
 
 
+MAX_LINE_CANDS = 5
+
+
 def run_screening(
     universe_path: str,
     today_date: date,
@@ -253,7 +256,10 @@ def run_screening(
         "max_final": int(max_final),
     }
 
-    return {
+        # LINE output cap
+    candidates = (candidates or [])[:MAX_LINE_CANDS]
+
+return {
         "no_trade": bool(no_trade),
         "no_trade_reasons": reasons,
         "candidates": diversified,
