@@ -1,180 +1,92 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
-
+from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
-from utils.setup import atr14
-
-
-@dataclass
-class TradePlan:
-    rr: float
-    pwin: float
-    ev: float
-    adjev: float
-    expected_days: float
-    r_per_day: float
-    entry_low: float
-    entry_high: float
-    entry_mid: float
-    sl: float
-    tp1: float
-    tp2: float
-    r_value: float
-    note: str
-
-
-def _safe_float(x, default=np.nan) -> float:
+def _swing_low(df: pd.DataFrame, lookback: int = 12) -> float:
     try:
-        v = float(x)
-        if not np.isfinite(v):
-            return float(default)
-        return float(v)
+        return float(df["Low"].astype(float).tail(lookback).min())
     except Exception:
-        return float(default)
+        return np.nan
 
-
-def rr_min_by_market(mkt_score: int) -> float:
-    """
-    仕様：RR下限は地合い連動
-      MarketScore ≥ 70 → RR ≥ 1.8
-      MarketScore ≥ 60 → RR ≥ 2.0
-      MarketScore ≥ 50 → RR ≥ 2.2
-      MarketScore < 50 → RR ≥ 2.5
-    """
-    if mkt_score >= 70:
-        return 1.8
-    if mkt_score >= 60:
-        return 2.0
-    if mkt_score >= 50:
-        return 2.2
-    return 2.5
-
-
-def _pwin_base(setup: str) -> float:
-    # ログ無し前提の仮定（仕様：将来ログで更新）
-    if setup == "A1":
-        return 0.48
-    if setup == "A2":
-        return 0.44
-    if setup == "B":
-        return 0.40
-    return 0.33
-
-
-def build_trade_plan(
-    hist: pd.DataFrame,
-    setup: str,
-    entry_low: float,
-    entry_high: float,
-    entry_mid: float,
-    stop_seed: float,
-    mkt_score: int,
-    macro_on: bool,
-) -> Optional[TradePlan]:
-    """
-    仕様のExit:
-      STOP: IN - 1.2ATR（seed） / 直近安値が近い場合はそちら優先
-      TP1 : +1.5R
-      TP2 : +2.0〜3.5R（可変）
-
-    速度:
-      ExpectedDays = (TP2 - IN) / ATR
-      R/day = RR / ExpectedDays
-
-    EV:
-      EV = Pwin*RR - (1-Pwin)
-      AdjEV は Macro警戒で減衰
-    """
-    if hist is None or hist.empty or len(hist) < 80:
-        return None
-
+def compute_exit_levels(hist: pd.DataFrame, entry_mid: float, atr: float) -> Dict[str, float]:
+    """Stop/TP design per spec."""
     df = hist.copy()
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
+    entry = float(entry_mid)
+    atr = float(atr) if np.isfinite(atr) and atr > 0 else max(entry * 0.015, 1.0)
 
-    atr = atr14(df)
-    if not (np.isfinite(atr) and atr > 0 and np.isfinite(entry_mid) and entry_mid > 0):
-        return None
+    # SL: entry - 1.2ATR
+    sl_base = entry - 1.2 * atr
 
-    # SL finalize
-    sl = float(stop_seed)
-    lookback = 12
-    swing_low = _safe_float(low.tail(lookback).min(), np.nan)
-    if np.isfinite(swing_low):
-        # 直近安値が近い（=高い）なら採用（損切り幅を広げない）
-        cand = float(swing_low - 0.2 * atr)
-        if cand < entry_mid and cand > sl:
-            sl = cand
+    # structure low (prefer if closer / higher)
+    s_low = _swing_low(df, lookback=12)
+    if np.isfinite(s_low):
+        sl_struct = s_low - 0.2 * atr
+        # "if recent low is close, prefer it" -> if it is higher (tighter) than base, use it
+        sl = max(sl_base, sl_struct)
+    else:
+        sl = sl_base
 
-    r_value = float(entry_mid - sl)
-    if r_value <= 0:
-        return None
+    # clamp
+    sl = float(np.clip(sl, entry * 0.90, entry * 0.98))
 
-    # SLが近すぎるとノイズで刈られるので最低幅を確保
-    if r_value < 0.6 * atr:
-        sl = float(entry_mid - 0.6 * atr)
-        r_value = float(entry_mid - sl)
+    r = max(1e-6, entry - sl)
+    tp1 = entry + 1.5 * r
+    # TP2 variable (2.0 to 3.5R), capped by 60d high region
+    close = df["Close"].astype(float)
+    hi_window = 60 if len(close) >= 60 else len(close)
+    high_60 = float(close.tail(hi_window).max()) if hi_window > 0 else entry
+    # choose base multiple = 2.8, clamp to [2.0, 3.5]
+    tp2_raw = entry + 2.8 * r
+    tp2 = min(entry + 3.5 * r, max(entry + 2.0 * r, min(high_60 * 0.995, tp2_raw)))
 
-    # TP2 multiple (2.0..3.5)
-    # A1:伸びやすい想定 / B:控えめ / Macro時は控えめ
-    rr_target = 2.6
+    rr = (tp2 - entry) / r if r > 0 else 0.0
+
+    return {"sl": float(sl), "tp1": float(tp1), "tp2": float(tp2), "rr": float(rr), "r": float(r)}
+
+def pwin_for_setup(setup: str) -> float:
     if setup == "A1":
-        rr_target = 3.0 if mkt_score >= 60 else 2.7
-    elif setup == "A2":
-        rr_target = 2.6 if mkt_score >= 60 else 2.4
-    elif setup == "B":
-        rr_target = 2.4 if mkt_score >= 60 else 2.2
+        return 0.45
+    if setup == "A2":
+        return 0.40
+    if setup == "B":
+        return 0.35
+    return 0.30
 
+def compute_ev_metrics(setup: str, rr: float, atr: float, entry: float, tp2: float, mkt_score: int, macro_on: bool, gu: bool) -> Tuple[float, float, float, float]:
+    """Return (ev, adjev, expected_days, rday)"""
+    rr = float(rr)
+    if rr <= 0:
+        return -999.0, -999.0, 999.0, 0.0
+
+    p = pwin_for_setup(setup)
+
+    # market adjustment
+    if mkt_score >= 70:
+        p += 0.03
+    elif mkt_score <= 45:
+        p -= 0.03
+
+    # macro penalty
     if macro_on:
-        rr_target = max(2.0, rr_target - 0.4)
+        p -= 0.05
+    p = float(np.clip(p, 0.20, 0.60))
 
-    rr_target = float(np.clip(rr_target, 2.0, 3.5))
+    ev = p * rr - (1.0 - p)
 
-    tp1 = float(entry_mid + 1.5 * r_value)
-    tp2 = float(entry_mid + rr_target * r_value)
-
-    # TP2 cap by 60d high (realistic)
-    hi_window = 60 if len(high) >= 60 else len(high)
-    high_60 = _safe_float(high.tail(hi_window).max(), np.nan)
-    if np.isfinite(high_60) and high_60 > 0:
-        tp2 = min(tp2, float(high_60 * 0.995))
-        if tp2 <= tp1:
-            tp2 = float(tp1 * 1.05)
-
-    rr = float((tp2 - entry_mid) / r_value)
-
-    expected_days = float((tp2 - entry_mid) / atr)
-    if not np.isfinite(expected_days) or expected_days <= 0:
-        return None
-
-    rday = float(rr / expected_days)
-
-    pwin = _pwin_base(setup)
-    pwin += float((mkt_score - 50) * 0.001)
+    # AdjEV: penalize macro and GU (execution quality)
+    adjev = ev
     if macro_on:
-        pwin -= 0.05
-    pwin = float(np.clip(pwin, 0.25, 0.60))
+        adjev -= 0.15
+    if gu:
+        adjev -= 0.10
 
-    ev = float(pwin * rr - (1.0 - pwin))
-    adjev = float(ev * (0.85 if macro_on else 1.0))
+    # ExpectedDays = (TP2 - IN) / ATR
+    atr = float(atr) if np.isfinite(atr) and atr > 0 else max(float(entry) * 0.015, 1.0)
+    expected_days = float((tp2 - entry) / atr) if atr > 0 else 999.0
+    expected_days = float(np.clip(expected_days, 0.8, 30.0))
 
-    return TradePlan(
-        rr=float(rr),
-        pwin=float(pwin),
-        ev=float(ev),
-        adjev=float(adjev),
-        expected_days=float(expected_days),
-        r_per_day=float(rday),
-        entry_low=float(entry_low),
-        entry_high=float(entry_high),
-        entry_mid=float(entry_mid),
-        sl=float(sl),
-        tp1=float(tp1),
-        tp2=float(tp2),
-        r_value=float(r_value),
-        note="",
-    )
+    rday = float(rr / expected_days) if expected_days > 0 else 0.0
+
+    return float(ev), float(adjev), float(expected_days), float(rday)
