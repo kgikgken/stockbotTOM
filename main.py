@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import os
 import sys
-
 import numpy as np
 
 from utils.util import jst_today_str, jst_today_date
-from utils.market import calc_market_context
 from utils.events import load_events, build_event_warnings, is_macro_caution
-from utils.position import load_positions, analyze_positions_summary
+from utils.market import calc_market_context
+from utils.position import load_positions, analyze_positions
 from utils.screener import run_screening
 from utils.report import build_report
 from utils.line import send_line_text
-from utils.state import load_state, bump_weekly_new, save_state
+from utils.state import load_state, save_state, bump_weekly_new
 
 
 UNIVERSE_PATH = "universe_jpx.csv"
@@ -27,20 +26,21 @@ def main() -> None:
 
     state = load_state(today_date)
 
+    # Market / macro
     mkt = calc_market_context(today_date=today_date)
 
     events = load_events(EVENTS_PATH)
     macro_on = is_macro_caution(today_date=today_date, events=events)
     event_warnings = build_event_warnings(today_date=today_date, events=events)
 
+    # Positions (optional)
     pos_df = load_positions(POSITIONS_PATH)
-    pos_text, total_asset_est, _weekly_from_positions = analyze_positions_summary(
-        pos_df, today_date=today_date, mkt_score=int(mkt["score"])
-    )
-    if not (np.isfinite(total_asset_est) and total_asset_est > 0):
-        total_asset_est = 2_000_000.0
+    pos_text, total_asset = analyze_positions(pos_df, today_date=today_date, mkt=mkt, macro_on=macro_on)
+    if not (np.isfinite(total_asset) and total_asset > 0):
+        total_asset = 2_000_000.0
 
-    screening = run_screening(
+    # Screening
+    result = run_screening(
         universe_path=UNIVERSE_PATH,
         today_date=today_date,
         mkt=mkt,
@@ -49,27 +49,26 @@ def main() -> None:
         state=state,
     )
 
-    report = build_report(
+    text = build_report(
         today_str=today_str,
         today_date=today_date,
         mkt=mkt,
         macro_on=macro_on,
         event_warnings=event_warnings,
-        weekly_new_count=int(state.get("weekly_new", 0)),
-        total_asset=float(total_asset_est),
+        weekly_new=int(state.get("weekly_new", 0)),
+        total_asset=float(total_asset),
         positions_text=pos_text,
-        screening=screening,
+        screening=result,
     )
 
-    print(report)
-    send_line_text(report, worker_url=WORKER_URL)
+    print(text)
+    send_line_text(text, worker_url=WORKER_URL)
 
-    # Machine-mode counter: count 1 when new entries are allowed and at least one non-GU candidate exists
+    # weekly counter: bump only if today is not NO-TRADE and there is at least one non-GU actionable candidate
     try:
-        if not screening.get("no_trade", False):
-            cands = screening.get("candidates", []) or []
-            any_actionable = any((not bool(c.get("gu", False))) for c in cands)
-            if any_actionable:
+        if not bool(result.get("no_trade", False)):
+            cands = result.get("candidates", []) or []
+            if any((not bool(c.get("gu", False))) for c in cands):
                 bump_weekly_new(state, 1)
         save_state(state)
     except Exception:
