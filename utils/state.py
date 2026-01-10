@@ -7,11 +7,6 @@ from datetime import date
 STATE_PATH = Path("state.json")
 
 def load_state(today_date: date) -> dict:
-    """
-    Weekly persistent controls.
-    state.json is saved in the workspace. To persist across GitHub Actions runs,
-    add a step to commit/push state.json (optional) or store externally.
-    """
     y = int(today_date.isocalendar().year)
     w = int(today_date.isocalendar().week)
 
@@ -24,16 +19,9 @@ def load_state(today_date: date) -> dict:
 
     if int(s.get("year", -1)) != y or int(s.get("week", -1)) != w:
         s = {"year": y, "week": w, "weekly_new": 0}
-
     if "weekly_new" not in s:
         s["weekly_new"] = 0
     return s
-
-def can_take_new_trades(state: dict, max_per_week: int = 3) -> bool:
-    try:
-        return int(state.get("weekly_new", 0)) < int(max_per_week)
-    except Exception:
-        return True
 
 def bump_weekly_new(state: dict, n: int = 1) -> None:
     try:
