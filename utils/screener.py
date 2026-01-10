@@ -54,6 +54,8 @@ def _get_cols(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
         return None, None
     tcol = "ticker" if "ticker" in df.columns else ("code" if "code" in df.columns else None)
     scol = "sector" if "sector" in df.columns else ("industry_big" if "industry_big" in df.columns else None)
+    # LINE output cap (max 5)
+    candidates = (candidates or [])[:MAX_LINE_CANDS]
     return tcol, scol
 
 
