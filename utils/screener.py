@@ -12,6 +12,7 @@ from utils.events import earnings_new_entry_block
 from utils.setup import detect_setup, atr14
 from utils.rr_ev import build_trade_plan, rr_min_by_market
 from utils.diversify import apply_diversification, DiversifyConfig
+from utils.state import can_take_new_trades
 
 
 @dataclass
@@ -98,6 +99,7 @@ def run_screening(
     mkt: Dict[str, object],
     macro_on: bool,
     events: List[Dict[str, str]],  # reserved for future (e.g., event proximity per sector)
+    state: Dict[str, object] | None = None,
 ) -> Dict[str, object]:
     """
     ✅ 仕様準拠（Swing 1〜7日）
@@ -110,6 +112,15 @@ def run_screening(
     - NO-TRADE：地合いNG / 平均AdjEV<0.5 / Macro未達 / GU比率高
     """
     mkt_score = int(mkt.get("score", 50))
+    state = state or {}
+    if not can_take_new_trades(state, max_per_week=3):
+        return {
+            "no_trade": True,
+            "no_trade_reasons": ["weekly_new_limit>=3"],
+            "candidates": [],
+            "stats": {"weekly_new": int(state.get("weekly_new", 0))},
+        }
+
     rr_min = rr_min_by_market(mkt_score)
     max_final = 2 if macro_on else 3
 
