@@ -1,172 +1,107 @@
 from __future__ import annotations
 
-from typing import List, Dict, Tuple
-import time
+from typing import Dict, Tuple, Optional
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
-from utils.util import business_days_diff
-from utils.setup import detect_setup
+from utils.setup import sma, rsi14, atr14, sma_slope_up, hh20, _last
 from utils.rr_ev import compute_exit_levels, compute_ev_metrics
-from utils.market import rr_min_for_market
 
-EARNINGS_EXCLUDE_BD = 3
+def detect_setup(hist: pd.DataFrame) -> Tuple[str, Dict[str, float]]:
+    df = hist.copy()
+    close = df["Close"].astype(float)
+    open_ = df["Open"].astype(float)
+    c = _last(close)
 
-def _safe_float(x, default=np.nan) -> float:
-    try:
-        v = float(x)
-        return float(v) if np.isfinite(v) else float(default)
-    except Exception:
-        return float(default)
+    sma20 = sma(close, 20)
+    sma50 = sma(close, 50)
+    rsi = rsi14(close)
+    atr = atr14(df)
+    if not (np.isfinite(c) and np.isfinite(sma20) and np.isfinite(sma50) and np.isfinite(atr) and atr > 0):
+        return "NA", {}
 
-def _fetch_hist(ticker: str, period: str = "260d") -> pd.DataFrame | None:
-    for _ in range(2):
-        try:
-            df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
-            if df is not None and not df.empty and len(df) >= 80:
-                return df
-        except Exception:
-            time.sleep(0.4)
-    return None
+    trend_ok = bool(c > sma20 > sma50 and sma_slope_up(close, 20, 5))
 
-def _atr_pct(atr: float, price: float) -> float:
-    if not (np.isfinite(atr) and np.isfinite(price) and price > 0):
-        return 0.0
-    return float(atr / price * 100.0)
+    dist20_atr = abs(c - sma20) / atr if atr > 0 else 999.0
+    dist50_atr = abs(c - sma50) / atr if atr > 0 else 999.0
 
-def _adv20_jpy(df: pd.DataFrame) -> float:
-    try:
-        close = df["Close"].astype(float)
-        vol = df["Volume"].astype(float)
-        adv = (close * vol).rolling(20).mean().iloc[-1]
-        return float(adv) if np.isfinite(adv) else 0.0
-    except Exception:
-        return 0.0
+    setup = "NA"
+    breakout_line = np.nan
 
-def _exclude_abnormal(df: pd.DataFrame) -> bool:
-    try:
-        close = df["Close"].astype(float)
-        high = df["High"].astype(float)
-        low = df["Low"].astype(float)
-        ret = close.pct_change(fill_method=None).tail(5).abs()
-        if float(ret.max()) > 0.18:
-            return True
-        rng = (high - low).tail(3)
-        if (rng < (close.tail(3) * 0.001)).all():
-            return True
-    except Exception:
-        return False
-    return False
-
-def _earnings_block(row: pd.Series, today_date) -> bool:
-    if "earnings_date" not in row.index:
-        return False
-    ed = str(row.get("earnings_date", "")).strip()
-    if not ed:
-        return False
-    try:
-        d = pd.to_datetime(ed, errors="coerce").date()
-    except Exception:
-        return False
-    if d is None or pd.isna(d):
-        return False
-    bd = abs(business_days_diff(today_date, d))
-    return bool(bd <= EARNINGS_EXCLUDE_BD)
-
-def build_raw_candidates(universe: pd.DataFrame, today_date, mkt_score: int, macro_on: bool) -> Tuple[List[Dict], Dict]:
-    rr_min = rr_min_for_market(mkt_score)
-    out: List[Dict] = []
-    stats = {"raw_n": 0, "qualified_n": 0}
-
-    if "ticker" in universe.columns:
-        t_col = "ticker"
-    elif "code" in universe.columns:
-        t_col = "code"
+    if trend_ok and np.isfinite(rsi) and (40 <= rsi <= 60) and dist20_atr <= 0.8:
+        setup = "A1"
+        entry_mid = sma20
+        entry_lo = sma20 - 0.5 * atr
+        entry_hi = sma20 + 0.5 * atr
+    elif (c > sma50) and np.isfinite(rsi) and (35 <= rsi <= 65) and dist50_atr <= 1.6:
+        setup = "A2"
+        entry_mid = sma20
+        entry_lo = min(sma20 - 0.8 * atr, sma50 - 0.3 * atr)
+        entry_hi = sma20 + 0.4 * atr
     else:
-        return [], stats
+        br = hh20(close)
+        breakout_line = br
+        if np.isfinite(br) and c >= br * 1.002:
+            setup = "B"
+            entry_mid = br
+            entry_lo = br - 0.3 * atr
+            entry_hi = br + 0.3 * atr
+        else:
+            return "NA", {}
 
-    for _, row in universe.iterrows():
-        ticker = str(row.get(t_col, "")).strip()
-        if not ticker:
-            continue
-        stats["raw_n"] += 1
+    anchors = {
+        "entry_mid": float(entry_mid),
+        "entry_lo": float(entry_lo),
+        "entry_hi": float(entry_hi),
+        "atr": float(atr),
+        "rsi": float(rsi) if np.isfinite(rsi) else np.nan,
+        "sma20": float(sma20),
+        "sma50": float(sma50),
+        "breakout_line": float(breakout_line) if np.isfinite(breakout_line) else np.nan,
+        "last_close": float(c),
+        "last_open": float(_last(open_)),
+    }
+    return setup, anchors
 
-        if _earnings_block(row, today_date):
-            continue
-
-        name = str(row.get("name", ticker))
-        sector = str(row.get("sector", row.get("industry_big", "不明")))
-
-        hist = _fetch_hist(ticker, period="260d")
-        if hist is None:
-            continue
-        if _exclude_abnormal(hist):
-            continue
-
-        price = _safe_float(hist["Close"].iloc[-1], np.nan)
-        if not (np.isfinite(price) and 200 <= price <= 15000):
-            continue
-
-        setup, anchors, gu = detect_setup(hist)
-        if setup == "NONE":
-            continue
-
+def gu_flag(anchors: Dict[str, float]) -> bool:
+    try:
+        o = float(anchors.get("last_open", np.nan))
+        c = float(anchors.get("last_close", np.nan))
         atr = float(anchors.get("atr", np.nan))
-        atrp = _atr_pct(atr, price)
-        if atrp < 1.5:
-            continue
+        if not (np.isfinite(o) and np.isfinite(c) and np.isfinite(atr) and atr > 0):
+            return False
+        return bool(o > c + 1.0 * atr)
+    except Exception:
+        return False
 
-        adv = _adv20_jpy(hist)
-        if adv < 200_000_000:
-            continue
+def score_candidate(hist: pd.DataFrame, setup: str, anchors: Dict[str, float], *, mkt_score: int, macro_on: bool) -> Optional[Dict]:
+    if setup == "NA":
+        return None
+    atr = float(anchors["atr"])
+    entry_mid = float(anchors["entry_mid"])
 
-        exits = compute_exit_levels(hist, anchors["entry_mid"], atr, macro_on=macro_on)
-        rr = float(exits["rr"])
-        if rr < rr_min:
-            continue
+    exits = compute_exit_levels(hist, entry_mid, atr, macro_on=macro_on)
+    rr = float(exits["rr"])
+    sl = float(exits["sl"])
+    tp1 = float(exits["tp1"])
+    tp2 = float(exits["tp2"])
 
-        ev, adjev, expected_days, rday = compute_ev_metrics(
-            setup=setup,
-            rr=rr,
-            atr=atr,
-            entry=anchors["entry_mid"],
-            tp2=exits["tp2"],
-            mkt_score=mkt_score,
-            macro_on=macro_on,
-            gu=gu,
-        )
+    gu = gu_flag(anchors)
+    ev, adjev, expected_days, rday = compute_ev_metrics(setup, rr, atr, entry_mid, tp2, mkt_score, gu)
 
-        if adjev < 0.50:
-            continue
-        if rday < 0.50:
-            continue
-
-        try:
-            ret60 = hist["Close"].astype(float).pct_change(fill_method=None).tail(61)
-        except Exception:
-            ret60 = None
-
-        out.append({
-            "ticker": ticker,
-            "name": name,
-            "sector": sector,
-            "setup": setup,
-            "entry_lo": float(anchors["entry_lo"]),
-            "entry_hi": float(anchors["entry_hi"]),
-            "rr": float(rr),
-            "ev": float(ev),
-            "adjev": float(adjev),
-            "expected_days": float(expected_days),
-            "rday": float(rday),
-            "sl": float(exits["sl"]),
-            "tp1": float(exits["tp1"]),
-            "tp2": float(exits["tp2"]),
-            "gu": bool(gu),
-            "_ret60": ret60,
-            "adv20": float(adv),
-            "atrp": float(atrp),
-        })
-
-    stats["qualified_n"] = len(out)
-    return out, stats
+    return {
+        "setup": setup,
+        "entry_lo": float(anchors["entry_lo"]),
+        "entry_hi": float(anchors["entry_hi"]),
+        "entry_mid": float(entry_mid),
+        "atr": float(atr),
+        "rr": float(rr),
+        "ev": float(ev),
+        "adjev": float(adjev),
+        "expected_days": float(expected_days),
+        "rday": float(rday),
+        "sl": float(sl),
+        "tp1": float(tp1),
+        "tp2": float(tp2),
+        "gu": bool(gu),
+    }
