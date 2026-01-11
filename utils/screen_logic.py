@@ -45,7 +45,6 @@ def _adv20_jpy(df: pd.DataFrame) -> float:
         return 0.0
 
 def _exclude_abnormal(df: pd.DataFrame) -> bool:
-    # Exclude extreme moves or locked limit (approx)
     try:
         close = df["Close"].astype(float)
         high = df["High"].astype(float)
@@ -53,7 +52,6 @@ def _exclude_abnormal(df: pd.DataFrame) -> bool:
         ret = close.pct_change(fill_method=None).tail(5).abs()
         if float(ret.max()) > 0.18:
             return True
-        # lock candles: high==low for 2+ days with tiny range
         rng = (high - low).tail(3)
         if (rng < (close.tail(3) * 0.001)).all():
             return True
@@ -62,7 +60,6 @@ def _exclude_abnormal(df: pd.DataFrame) -> bool:
     return False
 
 def _earnings_block(row: pd.Series, today_date) -> bool:
-    # returns True if blocked
     if "earnings_date" not in row.index:
         return False
     ed = str(row.get("earnings_date", "")).strip()
@@ -80,15 +77,14 @@ def _earnings_block(row: pd.Series, today_date) -> bool:
 def build_raw_candidates(universe: pd.DataFrame, today_date, mkt_score: int, macro_on: bool) -> Tuple[List[Dict], Dict]:
     rr_min = rr_min_for_market(mkt_score)
     out: List[Dict] = []
-    stats = {"raw_n": 0, "filtered_n": 0}
+    stats = {"raw_n": 0, "qualified_n": 0}
 
-    # ticker column
     if "ticker" in universe.columns:
         t_col = "ticker"
     elif "code" in universe.columns:
         t_col = "code"
     else:
-        return [], {"raw_n": 0, "filtered_n": 0}
+        return [], stats
 
     for _, row in universe.iterrows():
         ticker = str(row.get(t_col, "")).strip()
@@ -96,7 +92,6 @@ def build_raw_candidates(universe: pd.DataFrame, today_date, mkt_score: int, mac
             continue
         stats["raw_n"] += 1
 
-        # earnings block
         if _earnings_block(row, today_date):
             continue
 
@@ -147,10 +142,6 @@ def build_raw_candidates(universe: pd.DataFrame, today_date, mkt_score: int, mac
         if rday < 0.50:
             continue
 
-        # action
-        action = "監視（寄り後再判定）" if gu else "指値（Entry帯で待つ）"
-
-        # returns for correlation (60d)
         try:
             ret60 = hist["Close"].astype(float).pct_change(fill_method=None).tail(61)
         except Exception:
@@ -161,7 +152,6 @@ def build_raw_candidates(universe: pd.DataFrame, today_date, mkt_score: int, mac
             "name": name,
             "sector": sector,
             "setup": setup,
-            "action": action,
             "entry_lo": float(anchors["entry_lo"]),
             "entry_hi": float(anchors["entry_hi"]),
             "rr": float(rr),
@@ -178,5 +168,5 @@ def build_raw_candidates(universe: pd.DataFrame, today_date, mkt_score: int, mac
             "atrp": float(atrp),
         })
 
-    stats["filtered_n"] = len(out)
+    stats["qualified_n"] = len(out)
     return out, stats
