@@ -29,11 +29,10 @@ def analyze_positions(df: pd.DataFrame, today_date, mkt: dict, macro_on: bool) -
         ticker = str(row.get("ticker", "")).strip()
         if not ticker:
             continue
-        entry_price = float(row.get("entry_price", 0) or 0)
+
         qty = float(row.get("quantity", 0) or 0)
 
-        # current price
-        cur = entry_price
+        cur = np.nan
         try:
             h = yf.Ticker(ticker).history(period="10d", auto_adjust=True)
             if h is not None and not h.empty:
@@ -41,20 +40,22 @@ def analyze_positions(df: pd.DataFrame, today_date, mkt: dict, macro_on: bool) -
         except Exception:
             pass
 
-        value = cur * qty
-        if np.isfinite(value) and value > 0:
-            total_value += value
+        if np.isfinite(cur) and qty > 0:
+            value = cur * qty
+            if np.isfinite(value) and value > 0:
+                total_value += value
 
-        # recompute EV metrics from current structure
         adjev = np.nan
         rr = np.nan
         try:
             hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
             if hist is not None and len(hist) >= 80:
                 setup, anchors, gu = detect_setup(hist)
-                exits = compute_exit_levels(hist, anchors.get("entry_mid", cur), anchors.get("atr", cur * 0.02))
+                exits = compute_exit_levels(hist, anchors.get("entry_mid", float(cur) if np.isfinite(cur) else 0.0), anchors.get("atr", float(cur) * 0.02 if np.isfinite(cur) else 1.0))
                 rr = float(exits["rr"])
-                ev, adjev, _, _ = compute_ev_metrics(setup, rr, anchors.get("atr", cur * 0.02), anchors.get("entry_mid", cur), exits["tp2"], mkt_score, macro_on, gu)
+                _, adjev, _, _ = compute_ev_metrics(
+                    setup, rr, anchors.get("atr", float(cur) * 0.02 if np.isfinite(cur) else 1.0), anchors.get("entry_mid", float(cur) if np.isfinite(cur) else 0.0), exits["tp2"], mkt_score, macro_on, gu
+                )
         except Exception:
             pass
 
