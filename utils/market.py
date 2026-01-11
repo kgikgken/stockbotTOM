@@ -1,125 +1,117 @@
 from __future__ import annotations
 
-from typing import Dict
 import numpy as np
-import pandas as pd
 import yfinance as yf
 
-def _hist(symbol: str, period: str = "260d") -> pd.DataFrame | None:
+def _safe_hist(symbol: str, period: str = "6d", interval: str | None = None):
     try:
-        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
-        if df is None or df.empty or len(df) < 80:
+        t = yf.Ticker(symbol)
+        if interval:
+            df = t.history(period=period, interval=interval, auto_adjust=True)
+        else:
+            df = t.history(period=period, auto_adjust=True)
+        if df is None or df.empty:
             return None
         return df
     except Exception:
         return None
 
-def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    if df is None or len(df) < period + 2:
-        return np.nan
-    h = df["High"].astype(float)
-    l = df["Low"].astype(float)
-    c = df["Close"].astype(float)
-    pc = c.shift(1)
-    tr = pd.concat([(h-l), (h-pc).abs(), (l-pc).abs()], axis=1).max(axis=1)
-    v = tr.rolling(period).mean().iloc[-1]
-    return float(v) if np.isfinite(v) else np.nan
-
-def _score_index(df: pd.DataFrame) -> float:
+def _five_day_chg(symbol: str) -> float:
+    df = _safe_hist(symbol, period="6d")
+    if df is None or len(df) < 2:
+        return 0.0
     close = df["Close"].astype(float)
-    ma20 = close.rolling(20).mean()
-    ma50 = close.rolling(50).mean()
-    c = float(close.iloc[-1])
-    m20 = float(ma20.iloc[-1])
-    m50 = float(ma50.iloc[-1])
-    m20_prev = float(ma20.iloc[-6]) if len(ma20) >= 6 else m20
-    slope20 = (m20 / (m20_prev + 1e-9) - 1.0)
+    return float((close.iloc[-1] / close.iloc[0] - 1.0) * 100.0)
 
-    chg5 = float(close.iloc[-1] / close.iloc[-6] - 1.0) * 100.0 if len(close) >= 6 else 0.0
-    chg20 = float(close.iloc[-1] / close.iloc[-21] - 1.0) * 100.0 if len(close) >= 21 else 0.0
+def _one_day_chg(symbol: str) -> float:
+    df = _safe_hist(symbol, period="3d")
+    if df is None or len(df) < 2:
+        return 0.0
+    close = df["Close"].astype(float)
+    # 最終値と直前値（週末などで欠けてもOK）
+    return float((close.iloc[-1] / close.iloc[-2] - 1.0) * 100.0)
 
-    atr = _atr(df, 14)
-    op = df["Open"].astype(float)
-    pc = close.shift(1)
-    gap = (op / (pc + 1e-9) - 1.0).abs()
-    if np.isfinite(atr) and atr > 0:
-        gap_thr = (atr / c) * 0.8
-        gap_freq = float((gap.tail(20) > gap_thr).mean()) if len(gap) >= 20 else float((gap > gap_thr).mean())
-    else:
-        gap_freq = float((gap.tail(20) > 0.02).mean()) if len(gap) >= 20 else float((gap > 0.02).mean())
+def _try_futures_change() -> tuple[float, str]:
+    """
+    先物リスクオン判定用（夜間の勢いを拾う）
+    - Yahoo Finance上の銘柄は時期で変わり得るため、複数シンボルをフォールバック
+    戻り: (pct, symbol_used)
+    """
+    candidates = [
+        "NKD=F",   # Nikkei/USD futures (CME)
+        "NIY=F",   # Nikkei/Yen futures (CME)
+        "NK-F26.SI",  # SGX current-ish contract (example)
+    ]
+    for sym in candidates:
+        pct = _one_day_chg(sym)
+        if np.isfinite(pct) and abs(pct) > 0:
+            return float(pct * 100.0), sym  # convert to %*100? wait pct already fraction? _one_day_chg returns percent
+    return 0.0, ""
 
-    ret = close.pct_change(fill_method=None)
-    vola20 = float(ret.rolling(20).std().iloc[-1]) if len(ret) >= 20 else 0.0
+def calc_market_score() -> dict:
+    """
+    日経平均・TOPIXの5日変化で 0-100 の地合いスコア（ベース）
+    """
+    nk = _five_day_chg("^N225")
+    tp = _five_day_chg("^TOPX")
 
-    s = 50.0
-    if c > m20 > m50:
-        s += 18
-    elif c > m20:
-        s += 10
-    elif m20 > m50:
-        s += 5
+    base = 50.0
+    base += float(np.clip((nk + tp) / 2.0, -20, 20))
 
-    s += np.clip(slope20 * 2000.0, -8, 8)
-    s += np.clip(chg5 * 0.6, -10, 10)
-    s += np.clip(chg20 * 0.25, -8, 8)
+    score = int(np.clip(round(base), 0, 100))
 
-    s -= np.clip(gap_freq * 40.0, 0, 12)
-    s -= np.clip(max(0.0, (vola20 - 0.018) * 800.0), 0, 10)
-
-    return float(np.clip(s, 0, 100))
-
-def rr_min_for_market(score: int) -> float:
     if score >= 70:
-        return 1.8
-    if score >= 60:
-        return 2.0
-    if score >= 50:
-        return 2.2
-    return 2.5
-
-def leverage_for_market(score: int, macro_on: bool) -> float:
-    if score >= 70:
-        lev = 2.0
+        comment = "強め"
     elif score >= 60:
-        lev = 1.7
+        comment = "やや強め"
     elif score >= 50:
-        lev = 1.3
+        comment = "中立"
     elif score >= 40:
-        lev = 1.1
+        comment = "弱め"
     else:
-        lev = 1.0
-    if macro_on:
-        lev = min(lev, 1.1)
-    return float(lev)
+        comment = "弱い"
 
-def calc_market_context(today_date) -> Dict[str, object]:
-    nk = _hist("^N225")
-    tp = _hist("^TOPX")
-    if nk is None or tp is None:
-        score = 50
-        return {"score": score, "delta3": 0.0, "regime": "中立", "rr_min": rr_min_for_market(score)}
+    return {"score": score, "comment": comment, "n225_5d": nk, "topix_5d": tp}
 
-    s1 = _score_index(nk)
-    s2 = _score_index(tp)
-    score = int(np.clip(round((s1 + s2) / 2.0), 0, 100))
+def enhance_market_score() -> dict:
+    """
+    calc_market_score + SOX/NVDA + 先物（Risk-ON）
+    """
+    mkt = calc_market_score()
+    score = float(mkt.get("score", 50))
 
-    cut = 4
-    nk3 = nk.iloc[:-cut] if len(nk) > cut + 60 else nk
-    tp3 = tp.iloc[:-cut] if len(tp) > cut + 60 else tp
-    s1_3 = _score_index(nk3)
-    s2_3 = _score_index(tp3)
-    score_3 = int(np.clip(round((s1_3 + s2_3) / 2.0), 0, 100))
-    delta3 = float(score - score_3)
+    # SOX
+    sox = _safe_hist("^SOX", period="6d")
+    if sox is not None and len(sox) >= 2:
+        chg = float((sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100.0)
+        score += float(np.clip(chg / 2.0, -5.0, 5.0))
+        mkt["sox_5d"] = chg
 
-    if score >= 70:
-        regime = "強い（順張りOK）"
-    elif score >= 60:
-        regime = "やや強い（順張り中心）"
-    elif score >= 50:
-        regime = "中立（押し目中心）"
-    elif score >= 45:
-        regime = "弱め（新規絞る）"
-    else:
-        regime = "弱い（新規NG）"
+    # NVDA
+    nv = _safe_hist("NVDA", period="6d")
+    if nv is not None and len(nv) >= 2:
+        chg = float((nv["Close"].iloc[-1] / nv["Close"].iloc[0] - 1.0) * 100.0)
+        score += float(np.clip(chg / 3.0, -4.0, 4.0))
+        mkt["nvda_5d"] = chg
 
-    return {"score": score, "delta3": delta3, "regime": regime, "rr_min": rr_min_for_market(score)}
+    # Futures Risk-ON (override macro cap)
+    fut_pct = 0.0
+    fut_sym = ""
+    # Use percent change (already %) from _one_day_chg
+    for sym in ["NKD=F", "NIY=F", "NK-F26.SI"]:
+        fut_pct = _one_day_chg(sym)  # %
+        if np.isfinite(fut_pct) and abs(fut_pct) > 0:
+            fut_sym = sym
+            break
+    mkt["futures_1d"] = float(fut_pct)
+    mkt["futures_symbol"] = fut_sym
+
+    score = int(np.clip(round(score), 0, 100))
+    mkt["score"] = score
+
+    # Risk-ON 判定（仕様）
+    # - 先物 +1.0%以上
+    # - または MarketScore≥65 & Δ3d≥+3（Δ3dはstate側で算出）
+    mkt["futures_risk_on"] = bool(np.isfinite(fut_pct) and fut_pct >= 1.0)
+
+    return mkt
