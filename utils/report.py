@@ -39,6 +39,25 @@ def build_report(
 
     lines: List[str] = []
     lines.append(f"📅 {today_str} stockbotTOM 日報")
+
+if macro_on and event_warnings:
+    lines.append("⚠ 本日は重要イベント警戒日")
+    lines.append("")
+    lines.append("対象イベント：")
+    for ev in event_warnings:
+        # ev example: "⚠ CPI（2026-01-12 00:00 JST / 1日後）"
+        core = ev.replace("⚠ ","")
+        name = core.split("（")[0]
+        time = core.split("（")[1].split("/")[0] if "（" in core else core
+        lines.append(f"・{name}（{time}）")
+    lines.append("")
+    lines.append("🛑 本日の方針（イベント警戒）")
+    lines.append("・新規は指値のみ（現値IN禁止）")
+    lines.append("・ロットは通常の50%以下を推奨")
+    lines.append("・エントリーは寄り後の値動き確認が前提")
+    lines.append("・条件未達なら見送りを優先")
+    lines.append("")
+
     lines.append("")
     lines.append(f"新規：{new_label}")
     lines.append("")
