@@ -36,7 +36,8 @@ def compute_exit_levels(hist: pd.DataFrame, entry_mid: float, atr: float, *, mac
     tp2 = min(entry + 3.5 * r, max(entry + 2.0 * r, min(high_60 * 0.995, tp2_raw)))
 
     if macro_on:
-        tp2 = min(tp2, entry + 2.6 * r)
+        # TP2圧縮は比率で行う（RR分布を潰さない）
+        tp2 = entry + (tp2 - entry) * 0.85
 
     rr = (tp2 - entry) / r if r > 0 else 0.0
     return {"sl": float(sl), "tp1": float(tp1), "tp2": float(tp2), "rr": float(rr), "r": float(r)}
