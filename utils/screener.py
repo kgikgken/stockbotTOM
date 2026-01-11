@@ -9,7 +9,8 @@ from utils.market import rr_min_for_market
 from utils.diversify import apply_diversification
 from utils.screen_logic import build_raw_candidates
 
-MAX_LINE = 5
+MAX_LINE = 5  # LINE表示の最大
+MAX_LINE_MACRO = 2  # Macro警戒時は候補数を絞る（仕様）
 MAX_PER_WEEK = 3
 GU_RATIO_MAX = 0.40
 
@@ -66,32 +67,24 @@ def run_screening(
 
     diversified = apply_diversification(raw, max_per_sector=2, corr_max=0.75)
 
-    candidates = diversified[:MAX_LINE]
+    risk_on = bool(state.get('futures_risk_on', False))
+    cap = MAX_LINE if (macro_on and risk_on) else (MAX_LINE_MACRO if macro_on else MAX_LINE)
+    candidates = diversified[:cap]
 
-    gu_ratio = float(np.mean([1.0 if c.get("gu", False) else 0.0 for c in candidates])) if candidates else 0.0
+        # GU過多なら、GU銘柄を優先的に落として候補を残す（ゼロにはしない）
+    gu_ratio = float(np.mean([1.0 if c.get('gu', False) else 0.0 for c in candidates])) if candidates else 0.0
     if gu_ratio > GU_RATIO_MAX:
-        return {
-            "no_trade": True,
-            "no_trade_reasons": ["GU_ratio_high"],
-            "candidates": [],
-            "stats": {"raw_n": int(st.get("raw_n", 0)), "final_n": 0, "avg_adjev": 0.0, "gu_ratio": gu_ratio, "rr_min": rr_min},
-        }
+        candidates = [c for c in candidates if not bool(c.get('gu', False))]
+        gu_ratio = float(np.mean([1.0 if c.get('gu', False) else 0.0 for c in candidates])) if candidates else 0.0
 
-    avg_adjev = float(np.mean([float(c.get("adjev", 0.0)) for c in candidates])) if candidates else 0.0
-    if avg_adjev < 0.50:
-        return {
-            "no_trade": True,
-            "no_trade_reasons": ["avgAdjEV<0.5"],
-            "candidates": [],
-            "stats": {"raw_n": int(st.get("raw_n", 0)), "final_n": 0, "avg_adjev": avg_adjev, "gu_ratio": gu_ratio, "rr_min": rr_min},
-        }
+    avg_adjev = float(np.mean([float(c.get('adjev', 0.0)) for c in candidates])) if candidates else 0.0
 
     for c in candidates:
         gu = bool(c.get("gu", False))
         if gu:
             c["action"] = "寄り後再判定（GU）"
         else:
-            c["action"] = "指値（イベント警戒・ロット抑制）" if macro_on else "指値"
+            c["action"] = "指値（ロット50%・TP2控えめ）" if macro_on else "指値"
 
     return {
         "no_trade": False,
