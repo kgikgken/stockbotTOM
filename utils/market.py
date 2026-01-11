@@ -3,115 +3,82 @@ from __future__ import annotations
 import numpy as np
 import yfinance as yf
 
-def _safe_hist(symbol: str, period: str = "6d", interval: str | None = None):
+def _hist(symbol: str, period: str = "6d"):
     try:
-        t = yf.Ticker(symbol)
-        if interval:
-            df = t.history(period=period, interval=interval, auto_adjust=True)
-        else:
-            df = t.history(period=period, auto_adjust=True)
+        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
         if df is None or df.empty:
             return None
         return df
     except Exception:
         return None
 
-def _five_day_chg(symbol: str) -> float:
-    df = _safe_hist(symbol, period="6d")
-    if df is None or len(df) < 2:
+def _chg_pct(df) -> float:
+    try:
+        if df is None or len(df) < 2:
+            return 0.0
+        c = df["Close"].astype(float)
+        return float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0)
+    except Exception:
         return 0.0
-    close = df["Close"].astype(float)
-    return float((close.iloc[-1] / close.iloc[0] - 1.0) * 100.0)
 
-def _one_day_chg(symbol: str) -> float:
-    df = _safe_hist(symbol, period="3d")
-    if df is None or len(df) < 2:
+def _chg_1d_pct(symbol: str) -> float:
+    df = _hist(symbol, period="3d")
+    try:
+        if df is None or len(df) < 2:
+            return 0.0
+        c = df["Close"].astype(float)
+        return float((c.iloc[-1] / c.iloc[-2] - 1.0) * 100.0)
+    except Exception:
         return 0.0
-    close = df["Close"].astype(float)
-    # 最終値と直前値（週末などで欠けてもOK）
-    return float((close.iloc[-1] / close.iloc[-2] - 1.0) * 100.0)
-
-def _try_futures_change() -> tuple[float, str]:
-    """
-    先物リスクオン判定用（夜間の勢いを拾う）
-    - Yahoo Finance上の銘柄は時期で変わり得るため、複数シンボルをフォールバック
-    戻り: (pct, symbol_used)
-    """
-    candidates = [
-        "NKD=F",   # Nikkei/USD futures (CME)
-        "NIY=F",   # Nikkei/Yen futures (CME)
-        "NK-F26.SI",  # SGX current-ish contract (example)
-    ]
-    for sym in candidates:
-        pct = _one_day_chg(sym)
-        if np.isfinite(pct) and abs(pct) > 0:
-            return float(pct * 100.0), sym  # convert to %*100? wait pct already fraction? _one_day_chg returns percent
-    return 0.0, ""
 
 def calc_market_score() -> dict:
-    """
-    日経平均・TOPIXの5日変化で 0-100 の地合いスコア（ベース）
-    """
-    nk = _five_day_chg("^N225")
-    tp = _five_day_chg("^TOPX")
+    nk = _chg_pct(_hist("^N225", "6d"))
+    tp = _chg_pct(_hist("^TOPX", "6d"))
 
-    base = 50.0
-    base += float(np.clip((nk + tp) / 2.0, -20, 20))
-
+    base = 50.0 + float(np.clip((nk + tp) / 2.0, -20, 20))
     score = int(np.clip(round(base), 0, 100))
 
     if score >= 70:
-        comment = "強め"
+        comment = "強い（順張りOK）"
     elif score >= 60:
-        comment = "やや強め"
+        comment = "やや強い"
     elif score >= 50:
         comment = "中立"
     elif score >= 40:
-        comment = "弱め"
-    else:
         comment = "弱い"
+    else:
+        comment = "危険"
 
     return {"score": score, "comment": comment, "n225_5d": nk, "topix_5d": tp}
 
 def enhance_market_score() -> dict:
-    """
-    calc_market_score + SOX/NVDA + 先物（Risk-ON）
-    """
     mkt = calc_market_score()
     score = float(mkt.get("score", 50))
 
-    # SOX
-    sox = _safe_hist("^SOX", period="6d")
-    if sox is not None and len(sox) >= 2:
-        chg = float((sox["Close"].iloc[-1] / sox["Close"].iloc[0] - 1.0) * 100.0)
-        score += float(np.clip(chg / 2.0, -5.0, 5.0))
-        mkt["sox_5d"] = chg
+    sox_df = _hist("^SOX", "6d")
+    if sox_df is not None and len(sox_df) >= 2:
+        sox_5d = _chg_pct(sox_df)
+        score += float(np.clip(sox_5d / 2.0, -5.0, 5.0))
+        mkt["sox_5d"] = sox_5d
 
-    # NVDA
-    nv = _safe_hist("NVDA", period="6d")
-    if nv is not None and len(nv) >= 2:
-        chg = float((nv["Close"].iloc[-1] / nv["Close"].iloc[0] - 1.0) * 100.0)
-        score += float(np.clip(chg / 3.0, -4.0, 4.0))
-        mkt["nvda_5d"] = chg
+    nv_df = _hist("NVDA", "6d")
+    if nv_df is not None and len(nv_df) >= 2:
+        nv_5d = _chg_pct(nv_df)
+        score += float(np.clip(nv_5d / 3.0, -4.0, 4.0))
+        mkt["nvda_5d"] = nv_5d
 
-    # Futures Risk-ON (override macro cap)
-    fut_pct = 0.0
-    fut_sym = ""
-    # Use percent change (already %) from _one_day_chg
-    for sym in ["NKD=F", "NIY=F", "NK-F26.SI"]:
-        fut_pct = _one_day_chg(sym)  # %
-        if np.isfinite(fut_pct) and abs(fut_pct) > 0:
-            fut_sym = sym
+    fut_sym_used = ""
+    fut_1d = 0.0
+    for sym in ("NKD=F", "NIY=F", "NK=F", "N225=F"):
+        v = _chg_1d_pct(sym)
+        if np.isfinite(v) and abs(v) > 0:
+            fut_1d = float(v)
+            fut_sym_used = sym
             break
-    mkt["futures_1d"] = float(fut_pct)
-    mkt["futures_symbol"] = fut_sym
 
-    score = int(np.clip(round(score), 0, 100))
-    mkt["score"] = score
+    mkt["futures_1d"] = float(fut_1d)
+    mkt["futures_symbol"] = fut_sym_used
+    mkt["futures_risk_on"] = bool(np.isfinite(fut_1d) and fut_1d >= 1.0)
 
-    # Risk-ON 判定（仕様）
-    # - 先物 +1.0%以上
-    # - または MarketScore≥65 & Δ3d≥+3（Δ3dはstate側で算出）
-    mkt["futures_risk_on"] = bool(np.isfinite(fut_pct) and fut_pct >= 1.0)
-
+    mkt["score"] = int(np.clip(round(score), 0, 100))
     return mkt
