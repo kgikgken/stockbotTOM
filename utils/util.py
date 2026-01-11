@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone, date
 from typing import Optional
-import pandas as pd
 
 JST = timezone(timedelta(hours=9))
 
@@ -41,16 +40,3 @@ def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str:
             return None
 
     return None
-
-def business_days_diff(a: date, b: date) -> int:
-    """Signed business day difference: b - a."""
-    try:
-        if a == b:
-            return 0
-        if a < b:
-            rng = pd.bdate_range(a, b)
-            return int(len(rng) - 1)
-        rng = pd.bdate_range(b, a)
-        return -int(len(rng) - 1)
-    except Exception:
-        return (b - a).days
