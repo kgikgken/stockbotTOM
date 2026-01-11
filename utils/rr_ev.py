@@ -10,7 +10,20 @@ def _swing_low(df: pd.DataFrame, lookback: int = 12) -> float:
     except Exception:
         return np.nan
 
-def compute_exit_levels(hist: pd.DataFrame, entry_mid: float, atr: float) -> Dict[str, float]:
+def compute_exit_levels(
+    hist: pd.DataFrame,
+    entry_mid: float,
+    atr: float,
+    *,
+    macro_on: bool = False,
+) -> Dict[str, float]:
+    """
+    Exit設計（仕様準拠）
+    - STOP: IN - 1.2ATR を基本、直近安値が近い場合はそちら優先
+    - TP1: +1.5R（部分利確）
+    - TP2: +2.0〜3.5R（構造＋抵抗で自然決定）
+    - Macro警戒日は「やらない日」ではなく「取り方を変える日」：TP2を控えめに圧縮
+    """
     df = hist.copy()
     entry = float(entry_mid)
     atr = float(atr) if np.isfinite(atr) and atr > 0 else max(entry * 0.015, 1.0)
@@ -34,6 +47,9 @@ def compute_exit_levels(hist: pd.DataFrame, entry_mid: float, atr: float) -> Dic
 
     tp2_raw = entry + 2.8 * r
     tp2 = min(entry + 3.5 * r, max(entry + 2.0 * r, min(high_60 * 0.995, tp2_raw)))
+
+    if macro_on:
+        tp2 = min(tp2, entry + 2.6 * r)
 
     rr = (tp2 - entry) / r if r > 0 else 0.0
 
@@ -69,16 +85,12 @@ def compute_ev_metrics(
     elif mkt_score <= 45:
         p -= 0.03
 
-    if macro_on:
-        p -= 0.05
-
+    # Macro警戒は「減点で候補ゼロ」に直結するので、EV側の一律減点はしない。
     p = float(np.clip(p, 0.20, 0.60))
 
     ev = p * rr - (1.0 - p)
 
     adjev = ev
-    if macro_on:
-        adjev -= 0.15
     if gu:
         adjev -= 0.10
 
