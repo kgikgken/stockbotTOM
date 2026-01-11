@@ -9,8 +9,8 @@ def send_line_text(text: str, worker_url: str | None = None) -> None:
         print(text)
         return
 
-    chunk = 3800
-    for i in range(0, len(text), chunk):
-        ch = text[i:i+chunk]
+    chunk_size = 3800
+    for i in range(0, len(text), chunk_size):
+        ch = text[i:i + chunk_size]
         r = requests.post(url, json={"text": ch}, timeout=20)
         print("[LINE]", r.status_code, str(r.text)[:200])
