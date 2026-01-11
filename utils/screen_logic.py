@@ -121,7 +121,7 @@ def build_raw_candidates(universe: pd.DataFrame, today_date, mkt_score: int, mac
         if adv < 200_000_000:
             continue
 
-        exits = compute_exit_levels(hist, anchors["entry_mid"], atr)
+        exits = compute_exit_levels(hist, anchors["entry_mid"], atr, macro_on=macro_on)
         rr = float(exits["rr"])
         if rr < rr_min:
             continue
