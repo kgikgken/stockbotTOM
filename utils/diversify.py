@@ -4,38 +4,39 @@ from typing import List, Dict
 import numpy as np
 import pandas as pd
 
-def _corr(a: pd.Series | None, b: pd.Series | None) -> float:
+def _corr(a: pd.Series, b: pd.Series) -> float:
     try:
-        if a is None or b is None:
-            return 0.0
         df = pd.concat([a, b], axis=1).dropna()
         if len(df) < 40:
             return 0.0
-        return float(df.iloc[:, 0].corr(df.iloc[:, 1]))
+        return float(df.iloc[:,0].pct_change().corr(df.iloc[:,1].pct_change()))
     except Exception:
         return 0.0
 
-def apply_diversification(candidates: List[Dict], max_per_sector: int = 2, corr_max: float = 0.75) -> List[Dict]:
-    selected: List[Dict] = []
-    sector_count: Dict[str, int] = {}
+def diversify(cands: List[Dict], *, sector_cap: int = 2, corr_max: float = 0.75) -> List[Dict]:
+    out: List[Dict] = []
+    sec_cnt = {}
 
-    for c in candidates:
+    for c in cands:
         sec = str(c.get("sector", "不明"))
-        if sector_count.get(sec, 0) >= max_per_sector:
+        if sec_cnt.get(sec, 0) >= sector_cap:
             continue
 
         ok = True
-        for s in selected:
-            corr = _corr(c.get("_ret60"), s.get("_ret60"))
-            if np.isfinite(corr) and corr > corr_max:
-                ok = False
-                break
+        for chosen in out:
+            s1 = c.get("_close_series")
+            s2 = chosen.get("_close_series")
+            if isinstance(s1, pd.Series) and isinstance(s2, pd.Series):
+                corr = _corr(s1, s2)
+                if np.isfinite(corr) and corr > corr_max:
+                    ok = False
+                    break
         if not ok:
             continue
 
-        selected.append(c)
-        sector_count[sec] = sector_count.get(sec, 0) + 1
+        out.append(c)
+        sec_cnt[sec] = sec_cnt.get(sec, 0) + 1
 
-    for c in selected:
-        c.pop("_ret60", None)
-    return selected
+    for c in out:
+        c.pop("_close_series", None)
+    return out
