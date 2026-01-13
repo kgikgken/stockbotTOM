@@ -1,42 +1,38 @@
 from __future__ import annotations
 
-from typing import List, Dict
+from typing import Dict, List
+
 import numpy as np
-import pandas as pd
 
-def _corr(a: pd.Series, b: pd.Series) -> float:
-    try:
-        df = pd.concat([a, b], axis=1).dropna()
-        if len(df) < 40:
-            return 0.0
-        return float(df.iloc[:,0].pct_change().corr(df.iloc[:,1].pct_change()))
-    except Exception:
-        return 0.0
+from utils.util import corr_60d
 
-def diversify(cands: List[Dict], *, sector_cap: int = 2, corr_max: float = 0.75) -> List[Dict]:
-    out: List[Dict] = []
-    sec_cnt = {}
-
+def apply_sector_cap(cands: List[Dict], max_per_sector: int = 2) -> List[Dict]:
+    out = []
+    cnt = {}
     for c in cands:
         sec = str(c.get("sector", "不明"))
-        if sec_cnt.get(sec, 0) >= sector_cap:
+        cnt.setdefault(sec, 0)
+        if cnt[sec] >= max_per_sector:
             continue
+        out.append(c)
+        cnt[sec] += 1
+    return out
 
+def apply_corr_filter(cands: List[Dict], ohlc_map: Dict[str, object], max_corr: float = 0.75) -> List[Dict]:
+    out: List[Dict] = []
+    for c in cands:
+        t = c.get("ticker")
         ok = True
         for chosen in out:
-            s1 = c.get("_close_series")
-            s2 = chosen.get("_close_series")
-            if isinstance(s1, pd.Series) and isinstance(s2, pd.Series):
-                corr = _corr(s1, s2)
-                if np.isfinite(corr) and corr > corr_max:
-                    ok = False
-                    break
-        if not ok:
-            continue
-
-        out.append(c)
-        sec_cnt[sec] = sec_cnt.get(sec, 0) + 1
-
-    for c in out:
-        c.pop("_close_series", None)
+            t2 = chosen.get("ticker")
+            df1 = ohlc_map.get(t)
+            df2 = ohlc_map.get(t2)
+            if df1 is None or df2 is None:
+                continue
+            cr = corr_60d(df1, df2)
+            if np.isfinite(cr) and cr > max_corr:
+                ok = False
+                break
+        if ok:
+            out.append(c)
     return out
