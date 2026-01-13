@@ -1,204 +1,218 @@
 from __future__ import annotations
 
 import os
-import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Tuple
+
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
-from utils.screen_logic import detect_setup, score_candidate
-from utils.diversify import diversify
+from utils.util import download_history_bulk, safe_float, is_abnormal_stock
+from utils.setup import build_setup_info, liquidity_filters
+from utils.rr_ev import calc_ev, pass_thresholds
+from utils.diversify import apply_sector_cap, apply_corr_filter
+from utils.screen_logic import no_trade_conditions, max_display
+from utils.state import (
+    in_cooldown,
+    set_cooldown_days,
+    record_paper_trade,
+    update_paper_trades_with_ohlc,
+    kpi_distortion,
+)
 
-PRICE_MIN = 200
-PRICE_MAX = 15000
-ADV20_MIN = 200_000_000
-ATR_PCT_MIN = 1.5
-EARN_EXCLUDE_DDAYS = 3
+UNIVERSE_PATH = "universe_jpx.csv"
+EARNINGS_EXCLUDE_DAYS = 3  # 暦日近似（±3日）
 
-MAX_LINE = 5
-MAX_LINE_MACRO = 2
-GU_RATIO_MAX = 0.60
+def _get_ticker_col(df: pd.DataFrame) -> str:
+    if "ticker" in df.columns:
+        return "ticker"
+    if "code" in df.columns:
+        return "code"
+    return ""
 
-def rr_min_by_market(mkt_score: int) -> float:
-    if mkt_score >= 70:
-        return 1.8
-    if mkt_score >= 60:
-        return 2.0
-    if mkt_score >= 50:
-        return 2.2
-    return 2.5
-
-def _fetch_history(ticker: str, period: str = "260d") -> Optional[pd.DataFrame]:
-    for _ in range(2):
+def _filter_earnings(uni: pd.DataFrame, today_date) -> pd.DataFrame:
+    if "earnings_date" not in uni.columns:
+        return uni
+    d = pd.to_datetime(uni["earnings_date"], errors="coerce").dt.date
+    uni = uni.copy()
+    keep = []
+    for x in d:
+        if x is None or pd.isna(x):
+            keep.append(True)
+            continue
         try:
-            df = yf.Ticker(ticker).history(period=period, auto_adjust=True)
-            if df is not None and not df.empty and len(df) >= 120:
-                return df
+            keep.append(abs((x - today_date).days) > EARNINGS_EXCLUDE_DAYS)
         except Exception:
-            time.sleep(0.25)
-    return None
+            keep.append(True)
+    return uni[keep]
 
-def _earnings_block(earn_date_str: str, today_date) -> bool:
-    if not earn_date_str or str(earn_date_str).strip() == "" or str(earn_date_str).lower() == "nan":
-        return False
-    try:
-        d = pd.to_datetime(earn_date_str, errors="coerce").date()
-        if d is None:
-            return False
-        delta = abs((d - today_date).days)
-        return delta <= EARN_EXCLUDE_DDAYS
-    except Exception:
-        return False
-
-def _abnormal_filter(hist: pd.DataFrame) -> bool:
-    try:
-        close = hist["Close"].astype(float)
-        ret = close.pct_change().dropna()
-        if len(ret) < 5:
-            return False
-        spikes = int((ret.abs() >= 0.18).sum())
-        return spikes >= 2
-    except Exception:
-        return False
-
-def run_screening(
-    universe_path: str,
+def run_screen(
+    today_str: str,
     today_date,
-    mkt: Dict[str, Any],
+    mkt_score: int,
+    delta3: float,
     macro_on: bool,
-    futures_risk_on: bool,
-    state: Dict[str, Any],
-) -> Dict[str, Any]:
-    mkt_score = int(mkt.get("score", 50))
-    rr_min = rr_min_by_market(mkt_score)
-
-    delta3d = float(state.get("delta3d", 0.0) or 0.0)
-    if mkt_score < 45 or (delta3d <= -5 and mkt_score < 55):
-        return {"no_trade": True, "reason": "地合いNG", "candidates": [], "meta": {"rr_min": rr_min}}
-
-    weekly_new = int(state.get("weekly_new", 0) or 0)
-    if weekly_new >= 3:
-        return {"no_trade": True, "reason": "週次新規上限", "candidates": [], "meta": {"rr_min": rr_min}}
-
-    if not os.path.exists(universe_path):
-        return {"no_trade": True, "reason": "universe_jpx.csvが見つからない", "candidates": [], "meta": {"rr_min": rr_min}}
+    state: Dict,
+) -> Tuple[List[Dict], Dict, Dict[str, pd.DataFrame]]:
+    """
+    戻り: (final_candidates_for_line, debug_meta, ohlc_map)
+    ※ 歪みEVは内部処理のみ（LINE非表示）
+    """
+    if not os.path.exists(UNIVERSE_PATH):
+        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
 
     try:
-        uni = pd.read_csv(universe_path)
+        uni = pd.read_csv(UNIVERSE_PATH)
     except Exception:
-        return {"no_trade": True, "reason": "universe読み込み失敗", "candidates": [], "meta": {"rr_min": rr_min}}
+        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
 
-    if "ticker" in uni.columns:
-        t_col = "ticker"
-    elif "code" in uni.columns:
-        t_col = "code"
-    else:
-        return {"no_trade": True, "reason": "ticker列なし", "candidates": [], "meta": {"rr_min": rr_min}}
+    tcol = _get_ticker_col(uni)
+    if not tcol:
+        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
 
-    if "sector" in uni.columns:
-        s_col = "sector"
-    elif "industry_big" in uni.columns:
-        s_col = "industry_big"
-    else:
-        s_col = None
+    uni = _filter_earnings(uni, today_date)
+    tickers = uni[tcol].astype(str).tolist()
+    ohlc_map = download_history_bulk(tickers, period="260d", auto_adjust=True, group_size=200)
+
+    # paper trade update
+    update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
+    update_paper_trades_with_ohlc(state, "distortion", ohlc_map, today_str)
+
+    # distortion KPI -> auto OFF
+    kpi = kpi_distortion(state)
+    if kpi["count"] >= 10:
+        if (kpi["median_r"] < -0.10) or (kpi["exp_gap"] < -0.30) or (kpi["neg_streak"] >= 3):
+            set_cooldown_days(state, "distortion_until", days=4)
+
+    no_trade = no_trade_conditions(int(mkt_score), float(delta3))
 
     cands: List[Dict] = []
+    gu_cnt = 0
 
     for _, row in uni.iterrows():
-        ticker = str(row.get(t_col, "")).strip()
+        ticker = str(row.get(tcol, "")).strip()
         if not ticker:
             continue
-
-        if _earnings_block(str(row.get("earnings_date", "")).strip(), today_date):
+        df = ohlc_map.get(ticker)
+        if df is None or df.empty or len(df) < 120:
             continue
 
-        hist = _fetch_history(ticker)
-        if hist is None:
+        if is_abnormal_stock(df):
             continue
 
-        try:
-            close = hist["Close"].astype(float)
-            price = float(close.iloc[-1])
-            if not (PRICE_MIN <= price <= PRICE_MAX):
-                continue
-        except Exception:
+        ok_liq, price, adv, atrp = liquidity_filters(df)
+        if not ok_liq:
             continue
 
-        if _abnormal_filter(hist):
+        info = build_setup_info(df, macro_on=macro_on)
+        if info.setup == "NONE":
             continue
 
-        try:
-            vol = hist["Volume"].astype(float)
-            adv20 = float((close * vol).rolling(20).mean().iloc[-1])
-            if not (np.isfinite(adv20) and adv20 >= ADV20_MIN):
-                continue
-        except Exception:
-            continue
+        if info.gu:
+            gu_cnt += 1
 
-        try:
-            high = hist["High"].astype(float)
-            low = hist["Low"].astype(float)
-            prev_close = close.shift(1)
-            tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-            atr14 = float(tr.rolling(14).mean().iloc[-1])
-            atr_pct = float(atr14 / price * 100.0) if price > 0 else 0.0
-            if not (np.isfinite(atr_pct) and atr_pct >= ATR_PCT_MIN):
-                continue
-        except Exception:
-            continue
-
-        setup, anchors = detect_setup(hist)
-        if setup == "NA":
-            continue
-
-        scored = score_candidate(hist, setup, anchors, mkt_score=mkt_score, macro_on=macro_on)
-        if not scored:
-            continue
-
-        if float(scored["rr"]) < rr_min:
-            continue
-        if float(scored["adjev"]) < 0.50:
-            continue
-        if float(scored["rday"]) < 0.50:
+        ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
+        ok, _ = pass_thresholds(info, ev)
+        if not ok:
             continue
 
         name = str(row.get("name", ticker))
-        sector = str(row.get(s_col, "不明")) if s_col else "不明"
+        sector = str(row.get("sector", row.get("industry_big", "不明")))
 
-        c = {
-            "ticker": ticker,
-            "name": name,
-            "sector": sector,
-            "setup": setup,
-            "entry_lo": scored["entry_lo"],
-            "entry_hi": scored["entry_hi"],
-            "rr": scored["rr"],
-            "adjev": scored["adjev"],
-            "rday": scored["rday"],
-            "expected_days": scored["expected_days"],
-            "sl": scored["sl"],
-            "tp1": scored["tp1"],
-            "tp2": scored["tp2"],
-            "gu": scored["gu"],
-            "action": "寄り後再判定（GU）" if scored["gu"] else ("指値（ロット50%・TP2控えめ）" if macro_on else "指値"),
-            "_close_series": hist["Close"].astype(float).tail(90),
-        }
-        cands.append(c)
+        cands.append(
+            {
+                "ticker": ticker,
+                "name": name,
+                "sector": sector,
+                "setup": info.setup,
+                "tier": int(info.tier),
+                "entry_low": float(info.entry_low),
+                "entry_high": float(info.entry_high),
+                "sl": float(info.sl),
+                "tp1": float(info.tp1),
+                "tp2": float(info.tp2),
+                "rr": float(ev.rr),
+                "struct_ev": float(ev.structural_ev),
+                "adj_ev": float(ev.adj_ev),
+                "expected_days": float(ev.expected_days),
+                "rday": float(ev.rday),
+                "gu": bool(info.gu),
+                "adv20": float(adv),
+                "atrp": float(atrp),
+            }
+        )
 
-    cands.sort(key=lambda x: (float(x["adjev"]), float(x["rday"]), float(x["rr"])), reverse=True)
+    cands.sort(key=lambda x: (x["adj_ev"], x["rday"], x["rr"]), reverse=True)
+    raw_n = len(cands)
 
-    diversified = diversify(cands[:120], sector_cap=2, corr_max=0.75)
+    # diversify
+    cands = apply_sector_cap(cands, max_per_sector=2)
+    cands = apply_corr_filter(cands, ohlc_map, max_corr=0.75)
 
-    cap = MAX_LINE if (macro_on and futures_risk_on) else (MAX_LINE_MACRO if macro_on else MAX_LINE)
-    candidates = diversified[:cap]
+    final: List[Dict] = []
 
-    gu_ratio = float(np.mean([1.0 if c.get("gu", False) else 0.0 for c in candidates])) if candidates else 0.0
-    if gu_ratio > GU_RATIO_MAX:
-        candidates = [c for c in candidates if not bool(c.get("gu", False))][:cap]
-        gu_ratio = float(np.mean([1.0 if c.get("gu", False) else 0.0 for c in candidates])) if candidates else 0.0
+    if no_trade:
+        # Tier0 exception: max 1, cooldownあり
+        if not in_cooldown(state, "tier0_exception_until"):
+            tier0 = [c for c in cands if c.get("setup") == "A1-Strong"]
+            if tier0:
+                pick = tier0[0]
+                final = [pick]
+                entry_mid = (pick["entry_low"] + pick["entry_high"]) / 2.0
+                record_paper_trade(
+                    state,
+                    bucket="tier0_exception",
+                    ticker=pick["ticker"],
+                    date_str=today_str,
+                    entry=entry_mid,
+                    sl=pick["sl"],
+                    tp2=pick["tp2"],
+                    expected_r=float(pick["rr"]),
+                )
+    else:
+        final = cands[:max_display(macro_on)]
 
-    if not candidates:
-        return {"no_trade": True, "reason": "条件未達（候補ゼロ）", "candidates": [], "meta": {"rr_min": rr_min}}
+    # Tier2 liquidity cushion
+    filtered = []
+    for c in final:
+        if c.get("tier") == 2 and c.get("setup") in ("A2", "B"):
+            if float(c.get("adv20", 0.0)) < 300e6:
+                continue
+        filtered.append(c)
+    final = filtered
 
-    return {"no_trade": False, "reason": "", "candidates": candidates, "meta": {"rr_min": rr_min}}
+    # distortion internal (non-display)
+    if not in_cooldown(state, "distortion_until"):
+        internal = [c for c in cands if c.get("setup") in ("A1-Strong", "A2")][:2]
+        for c in internal:
+            entry_mid = (c["entry_low"] + c["entry_high"]) / 2.0
+            record_paper_trade(
+                state,
+                bucket="distortion",
+                ticker=c["ticker"],
+                date_str=today_str,
+                entry=entry_mid,
+                sl=c["sl"],
+                tp2=c["tp2"],
+                expected_r=float(c["rr"]),
+            )
+
+    # Tier0 exception brake
+    pt = state.get("paper_trades", {}).get("tier0_exception", [])
+    closed = [x for x in pt if x.get("status") == "CLOSED" and x.get("realized_r") is not None]
+    if len(closed) >= 4:
+        lastN = closed[-4:]
+        s = float(np.sum([safe_float(x.get("realized_r"), 0.0) for x in lastN]))
+        if s <= -2.0:
+            set_cooldown_days(state, "tier0_exception_until", days=4)
+
+    avg_adj = float(np.mean([c["adj_ev"] for c in final])) if final else 0.0
+    gu_ratio = float(gu_cnt / max(1, raw_n)) if raw_n > 0 else 0.0
+
+    meta = {
+        "raw": int(raw_n),
+        "final": int(len(final)),
+        "avgAdjEV": float(avg_adj),
+        "GU": float(gu_ratio),
+    }
+
+    return final, meta, ohlc_map
