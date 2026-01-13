@@ -1,68 +1,57 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
-import numpy as np
-import pandas as pd
+from dataclasses import dataclass
+from typing import Tuple
 
-def _swing_low(df: pd.DataFrame, lookback: int = 12) -> float:
-    try:
-        return float(df["Low"].astype(float).tail(lookback).min())
-    except Exception:
-        return np.nan
+from utils.screen_logic import rr_min_by_market, rday_min_by_setup
+from utils.util import clamp
+from utils.setup import SetupInfo
 
-def compute_exit_levels(hist: pd.DataFrame, entry_mid: float, atr: float, *, macro_on: bool) -> Dict[str, float]:
-    df = hist
-    entry = float(entry_mid)
-    atr = float(atr) if np.isfinite(atr) and atr > 0 else max(entry * 0.015, 1.0)
+@dataclass
+class EVInfo:
+    rr: float
+    structural_ev: float
+    adj_ev: float
+    expected_days: float
+    rday: float
+    rr_min: float
+    rday_min: float
 
-    sl_base = entry - 1.2 * atr
-    s_low = _swing_low(df, lookback=12)
-    if np.isfinite(s_low):
-        sl_struct = s_low - 0.2 * atr
-        sl = max(sl_base, sl_struct)
-    else:
-        sl = sl_base
+def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
+    rr_min = float(rr_min_by_market(mkt_score))
+    rday_min = float(rday_min_by_setup(setup.setup))
 
-    sl = float(np.clip(sl, entry * 0.90, entry * 0.98))
-    r = max(1e-6, entry - sl)
+    rr = float(setup.rr)
+    expected_days = float(max(setup.expected_days, 0.5))
+    rday = float(rr / expected_days)
 
-    tp1 = entry + 1.5 * r
+    # 正統EV = RR × TrendStrength × PullbackQuality（因子圧縮）
+    structural_ev = rr * float(setup.trend_strength) * float(setup.pullback_quality)
 
-    close = df["Close"].astype(float)
-    hi_window = 60 if len(close) >= 60 else len(close)
-    high_60 = float(close.tail(hi_window).max()) if hi_window > 0 else entry
-
-    tp2_raw = entry + 2.8 * r
-    tp2 = min(entry + 3.5 * r, max(entry + 2.0 * r, min(high_60 * 0.995, tp2_raw)))
-
+    # AdjEV: 後段補正のみ（軽く）
+    adj = structural_ev
+    if setup.gu:
+        adj -= 0.10
     if macro_on:
-        # TP2圧縮は比率で行う（RR分布を潰さない）
-        tp2 = entry + (tp2 - entry) * 0.85
+        adj -= 0.08
 
-    rr = (tp2 - entry) / r if r > 0 else 0.0
-    return {"sl": float(sl), "tp1": float(tp1), "tp2": float(tp2), "rr": float(rr), "r": float(r)}
+    adj = float(clamp(adj, -5.0, 10.0))
 
-def pwin_for_setup(setup: str) -> float:
-    return {"A1": 0.45, "A2": 0.40, "B": 0.35}.get(setup, 0.30)
+    return EVInfo(
+        rr=rr,
+        structural_ev=float(structural_ev),
+        adj_ev=float(adj),
+        expected_days=float(expected_days),
+        rday=float(rday),
+        rr_min=float(rr_min),
+        rday_min=float(rday_min),
+    )
 
-def compute_ev_metrics(setup: str, rr: float, atr: float, entry: float, tp2: float, mkt_score: int, gu: bool) -> Tuple[float, float, float, float]:
-    rr = float(rr)
-    if rr <= 0:
-        return -999.0, -999.0, 999.0, 0.0
-
-    p = pwin_for_setup(setup)
-    if mkt_score >= 70:
-        p += 0.03
-    elif mkt_score <= 45:
-        p -= 0.03
-    p = float(np.clip(p, 0.20, 0.60))
-
-    ev = p * rr - (1.0 - p)
-    adjev = float(ev) - (0.10 if gu else 0.0)
-
-    atr = float(atr) if np.isfinite(atr) and atr > 0 else max(float(entry) * 0.015, 1.0)
-    expected_days = float((tp2 - entry) / atr) if atr > 0 else 999.0
-    expected_days = float(np.clip(expected_days, 0.8, 30.0))
-
-    rday = float(rr / expected_days) if expected_days > 0 else 0.0
-    return float(ev), float(adjev), float(expected_days), float(rday)
+def pass_thresholds(setup: SetupInfo, ev: EVInfo) -> Tuple[bool, str]:
+    if ev.rr < ev.rr_min:
+        return False, "RR"
+    if ev.rday < ev.rday_min:
+        return False, "RDAY"
+    if ev.adj_ev < 0.50:
+        return False, "ADJEV"
+    return True, "OK"
