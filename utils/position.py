@@ -1,51 +1,68 @@
 from __future__ import annotations
 
-import os
+from typing import Tuple
+
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.screen_logic import detect_setup, score_candidate
+from utils.setup import build_setup_info
+from utils.rr_ev import calc_ev
+from utils.util import safe_float
 
-def load_positions(path: str) -> pd.DataFrame:
+def load_positions(path: str = "positions.csv") -> pd.DataFrame:
     try:
-        if not os.path.exists(path):
-            return pd.DataFrame()
         return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
 
-def analyze_positions(df: pd.DataFrame, *, mkt_score: int, macro_on: bool) -> str:
+def analyze_positions(df: pd.DataFrame, mkt_score: int, macro_on: bool) -> Tuple[str, float]:
     if df is None or len(df) == 0:
-        return "ノーポジション"
+        return "ノーポジション", 2_000_000.0
 
     lines = []
+    total_value = 0.0
+
     for _, row in df.iterrows():
         ticker = str(row.get("ticker", "")).strip()
         if not ticker:
             continue
 
+        entry_price = safe_float(row.get("entry_price", 0), 0.0)
+        qty = safe_float(row.get("quantity", 0), 0.0)
+
+        cur = entry_price
+        hist = None
         try:
             hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
-            if hist is None or hist.empty or len(hist) < 120:
-                lines.append(f"- {ticker}: データ不足")
-                continue
+            if hist is not None and not hist.empty:
+                cur = float(hist["Close"].iloc[-1])
         except Exception:
-            lines.append(f"- {ticker}: 取得失敗")
-            continue
+            pass
 
-        setup, anchors = detect_setup(hist)
-        if setup == "NA":
-            lines.append(f"- {ticker}: setup不明")
-            continue
+        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
+        value = cur * qty
+        if np.isfinite(value) and value > 0:
+            total_value += value
 
-        scored = score_candidate(hist, setup, anchors, mkt_score=mkt_score, macro_on=macro_on)
-        if not scored:
-            lines.append(f"- {ticker}: 評価失敗")
-            continue
+        rr = np.nan
+        adj = np.nan
+        if hist is not None and hist is not None and len(hist) >= 120:
+            info = build_setup_info(hist, macro_on=macro_on)
+            ev = calc_ev(info, mkt_score=mkt_score, macro_on=macro_on)
+            rr = ev.rr
+            adj = ev.adj_ev
 
-        adjev = float(scored.get("adjev", 0.0))
-        rr = float(scored.get("rr", 0.0))
-        note = "（要注意）" if adjev < 0.5 else ""
-        lines.append(f"- {ticker}: RR:{rr:.2f} AdjEV:{adjev:.2f}{note}")
+        if np.isfinite(rr) and np.isfinite(adj):
+            if adj < 0.5:
+                lines.append(f"- {ticker}: RR:{rr:.2f} AdjEV:{adj:.2f}（要注意）")
+            else:
+                lines.append(f"- {ticker}: RR:{rr:.2f} AdjEV:{adj:.2f}")
+        else:
+            lines.append(f"- {ticker}: 損益 {pnl_pct:+.2f}%")
 
-    return "\n".join(lines) if lines else "ノーポジション"
+    if not lines:
+        return "ノーポジション", 2_000_000.0
+
+    asset_est = total_value if total_value > 0 else 2_000_000.0
+    return "\n".join(lines), float(asset_est)
