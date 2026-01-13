@@ -1,45 +1,90 @@
 from __future__ import annotations
 
+from typing import Dict, Tuple
+
 import numpy as np
+import pandas as pd
 import yfinance as yf
 
-def _hist(symbol: str, period: str = "6d"):
+from utils.util import sma, returns, safe_float, clamp
+
+def _fetch_index(symbol: str, period: str = "220d") -> pd.DataFrame:
     try:
         df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        return df
+        return df if df is not None else pd.DataFrame()
     except Exception:
-        return None
+        return pd.DataFrame()
 
-def _chg_pct(df) -> float:
-    try:
-        if df is None or len(df) < 2:
-            return 0.0
-        c = df["Close"].astype(float)
-        return float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0)
-    except Exception:
+def _ma_structure_score(df: pd.DataFrame) -> float:
+    if df is None or df.empty or len(df) < 60:
+        return 0.0
+    c = df["Close"].astype(float)
+    ma20 = sma(c, 20)
+    ma50 = sma(c, 50)
+    c_last = safe_float(c.iloc[-1], np.nan)
+    m20 = safe_float(ma20.iloc[-1], np.nan)
+    m50 = safe_float(ma50.iloc[-1], np.nan)
+    if not (np.isfinite(c_last) and np.isfinite(m20) and np.isfinite(m50)):
         return 0.0
 
-def _chg_1d_pct(symbol: str) -> float:
-    df = _hist(symbol, period="3d")
-    try:
-        if df is None or len(df) < 2:
-            return 0.0
-        c = df["Close"].astype(float)
-        return float((c.iloc[-1] / c.iloc[-2] - 1.0) * 100.0)
-    except Exception:
+    sc = 0.0
+    if c_last > m20 > m50:
+        sc += 12
+    elif c_last > m20:
+        sc += 6
+    elif m20 > m50:
+        sc += 3
+
+    slope20 = safe_float(ma20.pct_change(fill_method=None).iloc[-1], 0.0)
+    if slope20 >= 0.004:
+        sc += 8
+    elif slope20 > 0:
+        sc += 4 + slope20 / 0.004 * 4
+    else:
+        sc += max(0.0, 4 + slope20 * 200)
+
+    return float(clamp(sc, 0, 20))
+
+def _momentum_score(df: pd.DataFrame) -> float:
+    if df is None or df.empty or len(df) < 21:
         return 0.0
+    c = df["Close"].astype(float)
+    r5 = safe_float(c.iloc[-1] / c.iloc[-6] - 1.0, 0.0) * 100.0
+    r20 = safe_float(c.iloc[-1] / c.iloc[-21] - 1.0, 0.0) * 100.0
+    sc = 0.0
+    sc += clamp(r5, -6, 6) * 2.0
+    sc += clamp(r20, -12, 12) * 1.0
+    return float(clamp(sc, -25, 25))
 
-def calc_market_score() -> dict:
-    nk = _chg_pct(_hist("^N225", "6d"))
-    tp = _chg_pct(_hist("^TOPX", "6d"))
+def _vol_gap_penalty(df: pd.DataFrame) -> float:
+    if df is None or df.empty or len(df) < 30:
+        return 0.0
+    c = df["Close"].astype(float)
+    o = df["Open"].astype(float)
+    prev = c.shift(1)
+    gap = ((o - prev).abs() / (prev + 1e-9))
+    gap_freq = float((gap.tail(20) > 0.012).mean())
+    vola = safe_float(returns(df).tail(20).std(), 0.0)
+    pen = 0.0
+    pen += gap_freq * 10.0
+    pen += clamp((vola - 0.012) * 500.0, 0.0, 10.0)
+    return float(-pen)
 
-    base = 50.0 + float(np.clip((nk + tp) / 2.0, -20, 20))
-    score = int(np.clip(round(base), 0, 100))
+def market_score() -> Dict[str, float]:
+    n225 = _fetch_index("^N225")
+    topx = _fetch_index("^TOPX")
+
+    base = 50.0
+    base += _ma_structure_score(n225)
+    base += _ma_structure_score(topx)
+    base += _momentum_score(n225) * 0.6
+    base += _momentum_score(topx) * 0.6
+    base += (_vol_gap_penalty(n225) + _vol_gap_penalty(topx)) * 0.7
+
+    score = int(clamp(round(base), 0, 100))
 
     if score >= 70:
-        comment = "強い（順張りOK）"
+        comment = "強い"
     elif score >= 60:
         comment = "やや強い"
     elif score >= 50:
@@ -47,38 +92,16 @@ def calc_market_score() -> dict:
     elif score >= 40:
         comment = "弱い"
     else:
-        comment = "危険"
+        comment = "かなり弱い"
 
-    return {"score": score, "comment": comment, "n225_5d": nk, "topix_5d": tp}
+    return {"score": float(score), "comment": comment}
 
-def enhance_market_score() -> dict:
-    mkt = calc_market_score()
-    score = float(mkt.get("score", 50))
-
-    sox_df = _hist("^SOX", "6d")
-    if sox_df is not None and len(sox_df) >= 2:
-        sox_5d = _chg_pct(sox_df)
-        score += float(np.clip(sox_5d / 2.0, -5.0, 5.0))
-        mkt["sox_5d"] = sox_5d
-
-    nv_df = _hist("NVDA", "6d")
-    if nv_df is not None and len(nv_df) >= 2:
-        nv_5d = _chg_pct(nv_df)
-        score += float(np.clip(nv_5d / 3.0, -4.0, 4.0))
-        mkt["nvda_5d"] = nv_5d
-
-    fut_sym_used = ""
-    fut_1d = 0.0
-    for sym in ("NKD=F", "NIY=F", "NK=F", "N225=F"):
-        v = _chg_1d_pct(sym)
-        if np.isfinite(v) and abs(v) > 0:
-            fut_1d = float(v)
-            fut_sym_used = sym
-            break
-
-    mkt["futures_1d"] = float(fut_1d)
-    mkt["futures_symbol"] = fut_sym_used
-    mkt["futures_risk_on"] = bool(np.isfinite(fut_1d) and fut_1d >= 1.0)
-
-    mkt["score"] = int(np.clip(round(score), 0, 100))
-    return mkt
+def futures_risk_on() -> Tuple[bool, float]:
+    try:
+        df = yf.Ticker("NKD=F").history(period="6d", auto_adjust=True)
+        if df is None or df.empty or len(df) < 2:
+            return False, 0.0
+        chg = float(df["Close"].iloc[-1] / df["Close"].iloc[0] - 1.0) * 100.0
+        return bool(chg >= 1.0), float(chg)
+    except Exception:
+        return False, 0.0
