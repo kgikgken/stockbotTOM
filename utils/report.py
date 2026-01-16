@@ -4,9 +4,9 @@ from typing import Dict, List
 
 from utils.screen_logic import rr_min_by_market
 
-def _fmt_price(x: float) -> str:
+def _fmt_yen(x: float) -> str:
     try:
-        return f"{x:,.1f}"
+        return f"{x:,.0f}"
     except Exception:
         return "-"
 
@@ -83,9 +83,9 @@ def build_report(
 
             lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
             lines.append(f"  Setup:{c['setup']}  行動:{action}")
-            lines.append(f"  Entry帯:{_fmt_price(c['entry_low'])}〜{_fmt_price(c['entry_high'])}")
-            lines.append(f"  RR:{c['rr']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['rday']:.2f}  ExpectedDays:{c['expected_days']:.1f}")
-            lines.append(f"  SL:{_fmt_price(c['sl'])}  TP1:{_fmt_price(c['tp1'])}  TP2:{_fmt_price(c['tp2'])}")
+            lines.append(f"  Entry帯:{_fmt_yen(c['entry_low'])}〜{_fmt_yen(c['entry_high'])} 円")
+            lines.append(f"  RR:{c['rr']:.2f}  AdjEV:{c['adj_ev']:.2f}  R/day:{c['rday']:.2f}  想定日数:{c['expected_days']:.1f}日")
+            lines.append(f"  損切り:{_fmt_yen(c['sl'])} 円  利確①:{_fmt_yen(c['tp1'])} 円  利確②:{_fmt_yen(c['tp2'])} 円")
             lines.append("")
     else:
         lines.append("- 該当なし")
