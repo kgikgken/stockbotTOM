@@ -1,78 +1,60 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
-from typing import List, Optional
+import os
+from typing import Dict, List, Tuple
 
-import csv
+import pandas as pd
 
-from utils.util import parse_event_datetime_jst, JST
+from utils.util import parse_event_datetime_jst
 
+EVENTS_PATH = "events.csv"
 
-@dataclass(frozen=True)
-class MacroEvent:
-    name: str
-    dt_jst: str  # "YYYY-mm-dd HH:MM"
-    days_until: int
-
-
-IMPORTANT_KEYWORDS = (
-    "CPI",
-    "FOMC",
-    "雇用統計",
-    "日銀",
-    "BOJ",
-    "GDP",
-    "PCE",
-    "CPI",
-)
-
-
-def load_macro_events(events_path: str, today: date, lookahead_days: int = 3) -> List[MacroEvent]:
-    """events.csv から重要イベントを抽出。
-
-    想定カラム例：
-      - name
-      - datetime (or date/time)
-
-    形式が違っても、name/date/time/datetime を探して読む。
-    """
-    out: List[MacroEvent] = []
-    try:
-        with open(events_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                name = (row.get("name") or row.get("event") or row.get("title") or "").strip()
-                if not name:
-                    continue
-                if not any(k in name for k in IMPORTANT_KEYWORDS):
-                    continue
-
-                dt = parse_event_datetime_jst(
-                    row.get("datetime"),
-                    row.get("date"),
-                    row.get("time"),
-                )
-                if not dt:
-                    continue
-
-                days_until = (dt.date() - today).days
-                if -1 <= days_until <= lookahead_days:
-                    out.append(
-                        MacroEvent(
-                            name=name,
-                            dt_jst=dt.astimezone(JST).strftime("%Y-%m-%d %H:%M"),
-                            days_until=days_until,
-                        )
-                    )
-    except FileNotFoundError:
+def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
+    if not os.path.exists(path):
         return []
+    try:
+        df = pd.read_csv(path)
     except Exception:
         return []
-
-    out.sort(key=lambda e: (e.days_until, e.dt_jst, e.name))
+    out: List[Dict[str, str]] = []
+    for _, row in df.iterrows():
+        label = str(row.get("label", "")).strip()
+        if not label:
+            continue
+        out.append(
+            {
+                "label": label,
+                "kind": str(row.get("kind", "")).strip(),
+                "date": str(row.get("date", "")).strip(),
+                "time": str(row.get("time", "")).strip(),
+                "datetime": str(row.get("datetime", "")).strip(),
+            }
+        )
     return out
 
+def build_event_section(today_date) -> Tuple[List[str], bool]:
+    """
+    直近（-1〜+2日）のイベントを警告に出す。
+    Macro警戒: kind == 'macro' のイベントが存在する場合 True
+    """
+    events = load_events()
+    warns: List[str] = []
+    macro_on = False
 
-def macro_alert_on(events: List[MacroEvent]) -> bool:
-    return len(events) > 0
+    for ev in events:
+        dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
+        if dt is None:
+            continue
+        d = dt.date()
+        delta = (d - today_date).days
+        if -1 <= delta <= 2:
+            when = "本日" if delta == 0 else ("直近" if delta < 0 else f"{delta}日後")
+            dt_disp = dt.strftime("%Y-%m-%d %H:%M JST")
+            warns.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
+            if str(ev.get("kind", "")).lower() == "macro":
+                macro_on = True
+
+    if not warns:
+        warns.append("- 特になし")
+
+    return warns, macro_on
