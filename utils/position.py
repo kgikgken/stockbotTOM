@@ -53,16 +53,22 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int, macro_on: bool) -> Tuple
             rr = ev.rr
             adj = ev.adj_ev
 
+        # 表示は日本語で簡潔に（縦配置優先）
         if np.isfinite(rr) and np.isfinite(adj):
-            if adj < 0.5:
-                lines.append(f"- {ticker}: RR:{rr:.2f} AdjEV:{adj:.2f}（要注意）")
-            else:
-                lines.append(f"- {ticker}: RR:{rr:.2f} AdjEV:{adj:.2f}")
+            lines.append(f"■ {ticker}")
+            lines.append(f"・RR：{rr:.2f}")
+            lines.append(f"・期待値（補正）：{adj:.2f}" + ("（要注意）" if adj < 0.50 else ""))
+            lines.append("")
         else:
-            lines.append(f"- {ticker}: 損益 {pnl_pct:+.2f}%")
+            lines.append(f"■ {ticker}")
+            lines.append(f"・損益：{pnl_pct:+.2f}%")
+            lines.append("")
 
     if not lines:
         return "ノーポジション", 2_000_000.0
 
     asset_est = total_value if total_value > 0 else 2_000_000.0
+    # 末尾の空行を削除
+    while lines and lines[-1] == "":
+        lines.pop()
     return "\n".join(lines), float(asset_est)
