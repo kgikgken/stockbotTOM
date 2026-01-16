@@ -1,45 +1,48 @@
 from __future__ import annotations
 
-from typing import List
+from typing import Dict, List
 
-from utils.market import MarketSnapshot
-from utils.screener import ScreeningResult
-from utils.util import fmt_yen, fmt_pct
+from utils.screen_logic import rr_min_by_market
 
+def _fmt_yen(x: float) -> str:
+    try:
+        return f"{int(round(float(x))):,}"
+    except Exception:
+        return "-"
 
-def _market_text(score: float) -> str:
-    if score >= 70:
-        return "強い"
-    if score >= 55:
-        return "中立"
-    return "弱い"
+def build_report(
+    today_str: str,
+    market: Dict,
+    delta3: float,
+    futures_chg: float,
+    risk_on: bool,
+    macro_on: bool,
+    events_lines: List[str],
+    no_trade: bool,
+    weekly_used: int,
+    weekly_max: int,
+    leverage: float,
+    policy_lines: List[str],
+    cands: List[Dict],
+    pos_text: str,
+) -> str:
+    mkt_score = int(market.get("score", 50))
+    mkt_comment = str(market.get("comment", "中立"))
 
-
-def build_line_report(today_str: str, market: MarketSnapshot, screening: ScreeningResult, positions_text: str) -> str:
     lines: List[str] = []
-
     lines.append(f"📅 {today_str} stockbotTOM 日報")
     lines.append("")
 
-    # Event warning block
-    if market.macro_on and market.events:
+    if macro_on:
         lines.append("⚠ 本日は重要イベント警戒日")
-        if market.risk_text == "Risk-ON":
+        if risk_on:
             lines.append("※ 先物Risk-ONにつき、警戒しつつ最大5まで表示")
         lines.append("")
         lines.append("対象イベント：")
-        for ev in market.events:
-            if "\n" in ev.name:
-                name = ev.name.split("\n")[0]
-            else:
-                name = ev.name
-            # 仕様：イベント名は正確に。時刻がある場合だけ付与
-            if ev.dt_jst.endswith("00:00"):
-                lines.append(f"・{name}")
-            else:
-                lines.append(f"・{name}（{ev.dt_jst}）")
+        for ev in events_lines:
+            if ev.startswith("⚠ "):
+                lines.append("・" + ev.replace("⚠ ", "").split("（")[0])
         lines.append("")
-
         lines.append("🛑 本日の方針（イベント警戒）")
         lines.append("・新規は指値のみ（現値IN禁止）")
         lines.append("・ロットは通常の50%以下を推奨")
@@ -47,54 +50,53 @@ def build_line_report(today_str: str, market: MarketSnapshot, screening: Screeni
         lines.append("・GU銘柄は寄り後再判定のみ")
         lines.append("")
 
-    # Allow new
-    new_txt = "✅ OK（指値のみ / 現値IN禁止）" if screening.allow_new else "🛑 NO（新規ゼロ）"
-    lines.append(f"新規：{new_txt}")
-    lines.append("")
-
-    # Market
-    lines.append(
-        f"地合い：{int(round(market.market_score))}（{_market_text(market.market_score)}）  "
-        f"ΔMarketScore_3d:{market.delta_score_3d:+.1f}  "
-        f"先物:{fmt_pct(market.futures_pct)}({market.futures_symbol})"
-    )
-    lines.append(f"Macro警戒：{'ON' if market.macro_on else 'OFF'}")
-    lines.append("週次新規：0 / 3")
-    lines.append("推奨レバ：1.1x")
-    lines.append(f"RR下限：{screening.rr_min:.1f}  期待効率下限：{screening.adj_ev_min:.2f}  速度下限：Setup別")
-    lines.append("")
-
-    # Rules (always)
-    lines.append("🛑 本日の方針")
-    lines.append("・新規は指値のみ（現値IN禁止）")
-    if not screening.allow_new and screening.no_trade_reason:
-        lines.append(f"・見送り理由：{screening.no_trade_reason}")
-    lines.append("")
-
-    # Candidates
-    lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
-    if not screening.candidates:
-        lines.append("- 該当なし")
+    if no_trade and not cands:
+        lines.append("新規：🛑 NO（新規ゼロ）")
     else:
-        for c in screening.candidates:
-            # Entryは中央のみ表示（仕様）
-            entry_txt = f"{fmt_yen(c.entry_center)} 円"
+        lines.append("新規：✅ OK（指値のみ / 現値IN禁止）")
+    lines.append("")
+
+    fut_txt = f"  先物:{futures_chg:+.2f}%(NKD=F) {'Risk-ON' if risk_on else ''}".rstrip()
+    lines.append(f"地合い：{mkt_score}（{mkt_comment}）  ΔMarketScore_3d:{delta3:.1f}{fut_txt}")
+    lines.append(f"Macro警戒：{'ON' if macro_on else 'OFF'}")
+    lines.append(f"週次新規：{weekly_used} / {weekly_max}")
+    lines.append(f"推奨レバ：{leverage:.1f}x")
+    lines.append(f"RR下限：{rr_min_by_market(mkt_score):.1f}  期待値（補正）下限：0.50  回転効率（R/日）下限：Setup別")
+    lines.append("")
+
+    if policy_lines:
+        lines.append("🛑 本日の方針")
+        for p in policy_lines:
+            lines.append("・" + p)
+        if no_trade and not cands:
+            lines.append("・NO-TRADE理由：地合い条件 or 例外停止")
+        lines.append("")
+
+    lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
+    if cands:
+        for c in cands:
+            entry_mid = (float(c.get("entry_low")) + float(c.get("entry_high"))) / 2.0
             action = "指値（Entry帯で待つ）"
-            if market.macro_on:
+            if macro_on:
                 action = "指値（ロット50%・TP2控えめ）"
-            lines.append(f"- {c.ticker} {c.name} [{c.sector}]")
-            lines.append(f"  Setup:{c.setup}  行動:{action}")
-            lines.append(f"  Entry価格:{entry_txt}")
-            lines.append(
-                f"  RR:{c.rr:.2f}  期待効率:{c.adj_ev:.2f}  速度:{c.speed:.2f}  想定日数:{c.exp_days:.1f}日"
-            )
-            lines.append(
-                f"  損切り:{fmt_yen(c.sl)} 円  利確①:{fmt_yen(c.tp1)} 円  利確②:{fmt_yen(c.tp2)} 円"
-            )
+            if c.get("gu"):
+                action = "寄り後再判定（GU）"
+
+            entry_mid = float(c.get('entry_mid', (float(c['entry_low']) + float(c['entry_high'])) / 2.0))
+            lines.append(f"- {c['ticker']} {c['name']} [{c['sector']}]")
+            lines.append(f"  形:{c['setup']}  行動:{action}")
+            lines.append(f"  指値目安（中央）:{_fmt_yen(entry_mid)} 円")
+            lines.append(f"  RR:{c['rr']:.2f}  期待値（補正）:{c['adj_ev']:.2f}  回転効率:{c['rday']:.2f}  想定日数:{c['expected_days']:.1f}日")
+            lines.append(f"  損切り:{_fmt_yen(c['sl'])} 円  利確①:{_fmt_yen(c['tp1'])} 円  利確②:{_fmt_yen(c['tp2'])} 円")
             lines.append("")
+    else:
+        lines.append("- 該当なし")
+        lines.append("")
 
-    # Positions
+    lines.append("※ 用語：期待値（補正）=想定期待R（補正後） / 回転効率（R/日）=1日あたり想定R")
+    lines.append("")
+
     lines.append("📊 ポジション")
-    lines.append(positions_text)
+    lines.append(pos_text.strip() if pos_text else "ノーポジション")
 
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(lines)
