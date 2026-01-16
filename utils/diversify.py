@@ -1,53 +1,62 @@
 from __future__ import annotations
 
-from typing import List, Dict
+from typing import List
 
-import numpy as np
 import pandas as pd
+import numpy as np
+import yfinance as yf
+
+from utils.screen_logic import Candidate
 
 
-def _corr(a: pd.Series, b: pd.Series) -> float:
+def _corr(tickers: List[str], lookback: int = 60) -> pd.DataFrame:
+    if len(tickers) <= 1:
+        return pd.DataFrame()
+    end = pd.Timestamp.today() + pd.Timedelta(days=1)
+    start = end - pd.Timedelta(days=lookback*2)
     try:
-        df = pd.concat([a, b], axis=1).dropna()
-        if len(df) < 30:
-            return 0.0
-        return float(df.corr().iloc[0, 1])
+        data = yf.download(tickers, start=start, end=end, interval="1d", auto_adjust=True, progress=False)
+        closes = data["Close"].dropna(how="all")
+        rets = closes.pct_change().dropna()
+        if rets.empty:
+            return pd.DataFrame()
+        return rets.corr()
     except Exception:
-        return 0.0
+        return pd.DataFrame()
 
 
-def apply_diversification(
-    cands: List[Dict],
-    max_per_sector: int = 2,
-    corr_limit: float = 0.75,
-) -> List[Dict]:
-    """Apply sector max and correlation constraint.
-
-    Requires each candidate to include:
-      - sector (string)
-      - returns (pd.Series) daily returns index aligned
-    """
-    out: List[Dict] = []
+def diversify(cands: List[Candidate], max_per_sector: int = 2, corr_limit: float = 0.75, max_total: int = 5) -> List[Candidate]:
+    # sector cap first
+    picked: List[Candidate] = []
     sector_counts: dict[str, int] = {}
 
+    # Precompute correlation on top candidates only (speed)
+    top = cands[: min(30, len(cands))]
+    corr = _corr([c.ticker for c in top])
+
+    def ok_corr(new: Candidate) -> bool:
+        if corr.empty or not picked:
+            return True
+        for p in picked:
+            try:
+                v = float(corr.loc[new.ticker, p.ticker])
+                if np.isnan(v):
+                    continue
+                if v >= corr_limit:
+                    return False
+            except Exception:
+                continue
+        return True
+
     for c in cands:
-        sec = str(c.get("sector", "不明"))
+        if len(picked) >= max_total:
+            break
+        sec = c.sector
         if sector_counts.get(sec, 0) >= max_per_sector:
             continue
-
-        ok = True
-        for kept in out:
-            r1 = c.get("returns")
-            r2 = kept.get("returns")
-            if isinstance(r1, pd.Series) and isinstance(r2, pd.Series):
-                corr = _corr(r1, r2)
-                if corr > corr_limit:
-                    ok = False
-                    break
-        if not ok:
+        if not ok_corr(c):
             continue
-
-        out.append(c)
+        picked.append(c)
         sector_counts[sec] = sector_counts.get(sec, 0) + 1
 
-    return out
+    return picked
