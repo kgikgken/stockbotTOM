@@ -1,13 +1,28 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
 
 from utils.util import parse_event_datetime_jst
 
 EVENTS_PATH = "events.csv"
+
+# Important macro keywords to treat as warning day
+IMPORTANT_KEYWORDS = (
+    "FOMC",
+    "CPI",
+    "雇用統計",
+    "日銀",
+    "BOJ",
+    "GDP",
+    "PPI",
+    "ISM",
+    "利上げ",
+    "金利",
+)
+
 
 def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
     if not os.path.exists(path):
@@ -16,45 +31,52 @@ def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
         df = pd.read_csv(path)
     except Exception:
         return []
-    out: List[Dict[str, str]] = []
+
+    events: List[Dict[str, str]] = []
     for _, row in df.iterrows():
         label = str(row.get("label", "")).strip()
+        kind = str(row.get("kind", "")).strip()
+        date_str = str(row.get("date", "")).strip()
+        time_str = str(row.get("time", "")).strip()
+        dt_str = str(row.get("datetime", "")).strip()
+
         if not label:
             continue
-        out.append(
-            {
-                "label": label,
-                "kind": str(row.get("kind", "")).strip(),
-                "date": str(row.get("date", "")).strip(),
-                "time": str(row.get("time", "")).strip(),
-                "datetime": str(row.get("datetime", "")).strip(),
-            }
-        )
-    return out
+        events.append({"label": label, "kind": kind, "date": date_str, "time": time_str, "datetime": dt_str})
+    return events
 
-def build_event_section(today_date) -> Tuple[List[str], bool]:
-    """
-    直近（-1〜+2日）のイベントを警告に出す。
-    Macro警戒: kind == 'macro' のイベントが存在する場合 True
-    """
-    events = load_events()
-    warns: List[str] = []
-    macro_on = False
 
-    for ev in events:
+def upcoming_events(today_date, window_days: int = 2) -> List[Tuple[str, str, int]]:
+    """Return list of (label, dt_disp, delta_days) for events in [-1, window_days]."""
+    out: List[Tuple[str, str, int]] = []
+    for ev in load_events():
         dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
         if dt is None:
             continue
-        d = dt.date()
-        delta = (d - today_date).days
-        if -1 <= delta <= 2:
-            when = "本日" if delta == 0 else ("直近" if delta < 0 else f"{delta}日後")
-            dt_disp = dt.strftime("%Y-%m-%d %H:%M JST")
-            warns.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
-            if str(ev.get("kind", "")).lower() == "macro":
-                macro_on = True
+        delta = (dt.date() - today_date).days
+        if -1 <= delta <= window_days:
+            out.append((str(ev.get("label", "")), dt.strftime("%Y-%m-%d %H:%M JST"), int(delta)))
+    # sort by date
+    out.sort(key=lambda x: x[1])
+    return out
 
-    if not warns:
-        warns.append("- 特になし")
 
-    return warns, macro_on
+def is_macro_caution_day(today_date) -> Tuple[bool, List[str]]:
+    """Macro caution ON if any upcoming event matches important keywords."""
+    evs = upcoming_events(today_date, window_days=2)
+    if not evs:
+        return False, []
+
+    hits: List[str] = []
+    for label, dt_disp, _delta in evs:
+        key = label
+        if any(k.lower() in label.lower() for k in IMPORTANT_KEYWORDS):
+            hits.append(f"{key}（{dt_disp}）")
+        else:
+            # also treat explicit kind=macro if provided
+            # (kept flexible without hard dependency)
+            hits.append(f"{key}（{dt_disp}）")
+
+    # If events exist but none are macro, we still return caution False.
+    macro = any(any(k.lower() in label.lower() for k in IMPORTANT_KEYWORDS) for label, _dt, _d in evs)
+    return macro, hits
