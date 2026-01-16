@@ -61,7 +61,10 @@ def build_report(
     lines.append(f"Macro警戒：{'ON' if macro_on else 'OFF'}")
     lines.append(f"週次新規：{weekly_used} / {weekly_max}")
     lines.append(f"推奨レバ：{leverage:.1f}x")
-    lines.append(f"RR下限：{rr_min_by_market(mkt_score):.1f}  期待値（補正）下限：0.50  回転効率（R/日）下限：Setup別")
+    lines.append("▶ フィルター条件")
+    lines.append(f"・RR 下限：{rr_min_by_market(mkt_score):.1f}")
+    lines.append("・期待値（補正）下限：0.50")
+    lines.append("・回転効率 下限：Setup別")
     lines.append("")
 
     if policy_lines:
@@ -75,26 +78,27 @@ def build_report(
     lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
     if cands:
         for c in cands:
-            action = "指値で待つ（現値では入らない）"
-            if macro_on:
-                action = "指値で待つ（ロット50%・TP2控えめ）"
+            setup = str(c.get("setup", ""))
+            setup_label = setup
+            if setup == "A1":
+                setup_label = "A1（標準押し目）"
+            elif setup == "A1-Strong":
+                setup_label = "A1-Strong（強押し目）"
+
+            sector = str(c.get("sector", ""))
+            lines.append(f"■ {c['ticker']} {c['name']}（{sector}）")
+            lines.append("")
+
+            # 行動（裁量排除）
+            action = "指値で待つ（現値IN禁止）"
             if c.get("gu"):
                 action = "寄り後に再判定（GU）"
 
             entry_mid = float(c.get("entry_mid", (float(c["entry_low"]) + float(c["entry_high"])) / 2.0))
 
-            # 1銘柄=4ブロック（縦配置）
-            lines.append(f"■ {c['ticker']} {c['name']}（{c['sector']}）")
-            lines.append("")
-
+            # 4ブロック
             lines.append("【形・行動】")
-            # Setupは英字のまま残しつつ、日本語補足を添える
-            setup = str(c.get("setup", "-")).strip()
-            jp = "押し目" if setup.startswith("A1") else ("押し目（深め）" if setup == "A2" else ("ブレイク" if setup == "B" else ""))
-            if jp:
-                lines.append(f"・形：{setup}（{jp}）")
-            else:
-                lines.append(f"・形：{setup}")
+            lines.append(f"・形：{setup_label}")
             lines.append(f"・行動：{action}")
             lines.append("")
 
@@ -111,15 +115,12 @@ def build_report(
             lines.append("【指標（参考）】")
             lines.append(f"・RR：{c['rr']:.2f}")
             lines.append(f"・期待値（補正）：{c['adj_ev']:.2f}")
-            lines.append(f"・回転効率：{c['rday']:.2f}")
-            lines.append(f"・想定日数：{c['expected_days']:.1f}日")
+            lines.append(f"・回転効率（目安）：{c['rday']:.2f}")
+            lines.append(f"・想定日数（中央値）：{c['expected_days']:.1f}日")
             lines.append("")
     else:
         lines.append("- 該当なし")
         lines.append("")
-
-    lines.append("※ 用語：期待値（補正）=想定期待R（補正後）／回転効率=1日あたり想定R")
-    lines.append("")
 
     lines.append("📊 ポジション")
     lines.append(pos_text.strip() if pos_text else "ノーポジション")
