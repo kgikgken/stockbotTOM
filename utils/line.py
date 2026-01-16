@@ -1,36 +1,34 @@
 from __future__ import annotations
 
 import os
-import json
-import urllib.request
+from typing import List
 
+import requests
 
-def send_line(message: str) -> None:
-    """LINE Notify 互換の簡易送信。
+WORKER_URL = os.getenv("WORKER_URL")
 
-    環境変数：
-      - LINE_WORKER_URL: Webhook エンドポイント
-      - LINE_TOKEN: (任意) bearer token
-
-    ※ 送信失敗してもプロセスを落とさない（CIでログ確認）
+def send_line(text: str) -> None:
     """
-    url = os.getenv("LINE_WORKER_URL")
-    if not url:
-        # ローカル/CIで未設定でも実行できるようにする
+    Cloudflare Worker へ POST json={"text": "..."} を送る（既存仕様維持）
+    """
+    if not WORKER_URL:
+        print(text)
         return
 
-    token = os.getenv("LINE_TOKEN", "").strip()
-    payload = {"message": message}
+    chunk_size = 3800
+    chunks: List[str] = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            _ = resp.read()
-    except Exception:
-        # 送信はベストエフォート
-        return
+    for ch in chunks:
+        ok = False
+        last_err = ""
+        for attempt in range(3):
+            try:
+                r = requests.post(WORKER_URL, json={"text": ch}, timeout=20)
+                print("[LINE RESULT]", r.status_code, str(r.text)[:200])
+                ok = True
+                break
+            except Exception as e:
+                last_err = repr(e)
+        if not ok:
+            # Never fail the whole run because LINE is temporarily unavailable.
+            print("[LINE ERROR]", last_err)
