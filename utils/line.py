@@ -1,29 +1,36 @@
 from __future__ import annotations
 
 import os
-import time
-from typing import List
-
-import requests
+import json
+import urllib.request
 
 
-def send_line(text: str, worker_url: str | None = None) -> None:
-    """Send text to LINE via Worker. Expects JSON {"text": "..."}.
+def send_line(message: str) -> None:
+    """LINE Notify 互換の簡易送信。
 
-    If WORKER_URL is missing, prints to stdout.
+    環境変数：
+      - LINE_WORKER_URL: Webhook エンドポイント
+      - LINE_TOKEN: (任意) bearer token
+
+    ※ 送信失敗してもプロセスを落とさない（CIでログ確認）
     """
-    worker_url = worker_url or os.getenv("WORKER_URL")
-    if not worker_url:
-        print(text)
+    url = os.getenv("LINE_WORKER_URL")
+    if not url:
+        # ローカル/CIで未設定でも実行できるようにする
         return
 
-    chunk_size = 3800  # LINE safety
-    chunks: List[str] = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+    token = os.getenv("LINE_TOKEN", "").strip()
+    payload = {"message": message}
 
-    for ch in chunks:
-        try:
-            r = requests.post(worker_url, json={"text": ch}, timeout=25)
-            print("[LINE RESULT]", r.status_code, str(r.text)[:200])
-            time.sleep(0.2)
-        except Exception as e:
-            print("[LINE ERROR]", type(e).__name__, str(e)[:200])
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            _ = resp.read()
+    except Exception:
+        # 送信はベストエフォート
+        return
