@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.setup import build_setup_info
-from utils.rr_ev import calc_ev
-from utils.util import safe_float
+from utils.setup import classify_setup
+from utils.rr_ev import compute_trade_plan
+
 
 def load_positions(path: str = "positions.csv") -> pd.DataFrame:
     try:
@@ -16,7 +16,13 @@ def load_positions(path: str = "positions.csv") -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
-def analyze_positions(df: pd.DataFrame, mkt_score: int, macro_on: bool) -> Tuple[str, float]:
+
+def analyze_positions(df: pd.DataFrame, mkt_score: int, macro_caution: bool) -> Tuple[str, float]:
+    """Return (text, asset_est).
+
+    positions.csv expected columns: ticker, entry_price, quantity (optional).
+    If missing, still works.
+    """
     if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
 
@@ -28,41 +34,47 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int, macro_on: bool) -> Tuple
         if not ticker:
             continue
 
-        entry_price = safe_float(row.get("entry_price", 0), 0.0)
-        qty = safe_float(row.get("quantity", 0), 0.0)
+        entry_price = float(row.get("entry_price", 0) or 0)
+        qty = float(row.get("quantity", 0) or 0)
 
         cur = entry_price
-        hist = None
         try:
-            hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
-            if hist is not None and not hist.empty:
-                cur = float(hist["Close"].iloc[-1])
+            h = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
+            if h is not None and not h.empty:
+                cur = float(h["Close"].iloc[-1])
         except Exception:
             pass
 
-        pnl_pct = (cur - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
         value = cur * qty
         if np.isfinite(value) and value > 0:
             total_value += value
 
-        rr = np.nan
-        adj = np.nan
-        if hist is not None and hist is not None and len(hist) >= 120:
-            info = build_setup_info(hist, macro_on=macro_on)
-            ev = calc_ev(info, mkt_score=mkt_score, macro_on=macro_on)
-            rr = ev.rr
-            adj = ev.adj_ev
+        rr = float("nan")
+        adjev = float("nan")
+        try:
+            hist = yf.Ticker(ticker).history(period="260d", auto_adjust=True)
+            if hist is not None and len(hist) >= 80:
+                s = classify_setup(hist)
+                plan = compute_trade_plan(
+                    df=hist,
+                    setup=s.name,
+                    atr=s.atr,
+                    sma20=s.sma20,
+                    mkt_score=mkt_score,
+                    macro_caution=macro_caution,
+                    allow_tp2_tight=macro_caution,
+                )
+                rr = float(plan.get("rr", float("nan")))
+                adjev = float(plan.get("adjev", float("nan")))
+        except Exception:
+            pass
 
-        if np.isfinite(rr) and np.isfinite(adj):
-            if adj < 0.5:
-                lines.append(f"- {ticker}: RR:{rr:.2f} AdjEV:{adj:.2f}（要注意）")
-            else:
-                lines.append(f"- {ticker}: RR:{rr:.2f} AdjEV:{adj:.2f}")
+        if np.isfinite(rr) and np.isfinite(adjev):
+            lines.append(f"- {ticker}: RR:{rr:.2f} 期待値:{adjev:+.2f}（注意）" if adjev < 0.50 else f"- {ticker}: RR:{rr:.2f} 期待値:{adjev:+.2f}")
+        elif np.isfinite(rr):
+            lines.append(f"- {ticker}: RR:{rr:.2f}")
         else:
-            lines.append(f"- {ticker}: 損益 {pnl_pct:+.2f}%")
+            lines.append(f"- {ticker}")
 
-    if not lines:
-        return "ノーポジション", 2_000_000.0
-
-    asset_est = total_value if total_value > 0 else 2_000_000.0
-    return "\n".join(lines), float(asset_est)
+    asset_est = float(total_value) if total_value > 0 else 2_000_000.0
+    return ("\n".join(lines) if lines else "ノーポジション"), asset_est
