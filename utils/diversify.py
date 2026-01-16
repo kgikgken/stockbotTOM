@@ -1,38 +1,53 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import List, Dict
 
 import numpy as np
+import pandas as pd
 
-from utils.util import corr_60d
 
-def apply_sector_cap(cands: List[Dict], max_per_sector: int = 2) -> List[Dict]:
-    out = []
-    cnt = {}
+def _corr(a: pd.Series, b: pd.Series) -> float:
+    try:
+        df = pd.concat([a, b], axis=1).dropna()
+        if len(df) < 30:
+            return 0.0
+        return float(df.corr().iloc[0, 1])
+    except Exception:
+        return 0.0
+
+
+def apply_diversification(
+    cands: List[Dict],
+    max_per_sector: int = 2,
+    corr_limit: float = 0.75,
+) -> List[Dict]:
+    """Apply sector max and correlation constraint.
+
+    Requires each candidate to include:
+      - sector (string)
+      - returns (pd.Series) daily returns index aligned
+    """
+    out: List[Dict] = []
+    sector_counts: dict[str, int] = {}
+
     for c in cands:
         sec = str(c.get("sector", "不明"))
-        cnt.setdefault(sec, 0)
-        if cnt[sec] >= max_per_sector:
+        if sector_counts.get(sec, 0) >= max_per_sector:
             continue
-        out.append(c)
-        cnt[sec] += 1
-    return out
 
-def apply_corr_filter(cands: List[Dict], ohlc_map: Dict[str, object], max_corr: float = 0.75) -> List[Dict]:
-    out: List[Dict] = []
-    for c in cands:
-        t = c.get("ticker")
         ok = True
-        for chosen in out:
-            t2 = chosen.get("ticker")
-            df1 = ohlc_map.get(t)
-            df2 = ohlc_map.get(t2)
-            if df1 is None or df2 is None:
-                continue
-            cr = corr_60d(df1, df2)
-            if np.isfinite(cr) and cr > max_corr:
-                ok = False
-                break
-        if ok:
-            out.append(c)
+        for kept in out:
+            r1 = c.get("returns")
+            r2 = kept.get("returns")
+            if isinstance(r1, pd.Series) and isinstance(r2, pd.Series):
+                corr = _corr(r1, r2)
+                if corr > corr_limit:
+                    ok = False
+                    break
+        if not ok:
+            continue
+
+        out.append(c)
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+
     return out
