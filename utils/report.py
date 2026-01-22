@@ -84,6 +84,10 @@ def build_report(
                 setup_label = "A1（標準押し目）"
             elif setup == "A1-Strong":
                 setup_label = "A1-Strong（強押し目）"
+            elif setup == "A2":
+                setup_label = "A2（初動ブレイク）"
+            elif setup == "B":
+                setup_label = "B（需給歪み）"
 
             sector = str(c.get("sector", ""))
             lines.append(f"■ {c['ticker']} {c['name']}（{sector}）")
@@ -91,6 +95,10 @@ def build_report(
 
             # 行動（裁量排除）
             action = "指値で待つ（現値IN禁止）"
+            if setup == "A2":
+                action = "ブレイク後の押し待ち（指値）／ロット小さめ"
+            elif setup == "B":
+                action = "需給歪み（短命）／小ロット・崩れたら即撤退"
             if c.get("gu"):
                 action = "寄り後に再判定（GU）"
 
