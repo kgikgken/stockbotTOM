@@ -13,9 +13,9 @@ def rday_min_by_setup(setup: str) -> float:
     if setup == "A1-Strong":
         return 0.45
     if setup == "A1":
-        return 0.50
+        return 0.45
     if setup == "A2":
-        return 0.55
+        return 0.50
     if setup == "B":
         return 0.65
     return 0.50
