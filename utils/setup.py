@@ -1,143 +1,198 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Tuple
+import json
+import os
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from utils.util import sma, ema, rsi14, atr14, adv20, atr_pct_last, safe_float, clamp
+from utils.util import jst_now, safe_float
 
-@dataclass
-class SetupInfo:
-    setup: str
-    tier: int
-    entry_low: float
-    entry_high: float
-    sl: float
-    tp2: float
-    tp1: float
-    rr: float
-    expected_days: float
-    rday: float
-    trend_strength: float
-    pullback_quality: float
-    gu: bool
-    breakout_line: Optional[float] = None
+STATE_PATH = "state.json"
 
-def _trend_strength(c: pd.Series, ma20: pd.Series, ma50: pd.Series) -> float:
-    c_last = safe_float(c.iloc[-1], np.nan)
-    m20 = safe_float(ma20.iloc[-1], np.nan)
-    m50 = safe_float(ma50.iloc[-1], np.nan)
-    if not (np.isfinite(c_last) and np.isfinite(m20) and np.isfinite(m50)):
-        return 0.0
+def _default_state() -> Dict[str, Any]:
+    return {
+        "version": "v2.3",
+        "week_id": "",
+        "weekly_new_count": 0,
+        "market_scores": [],  # [{"date": "...", "score": int}]
+        "cooldowns": {
+            "tier0_exception_until": None,
+            "distortion_until": None,
+        },
+        "paper_trades": {
+            "tier0_exception": [],
+            "distortion": [],
+        },
+    }
 
-    slope = safe_float(ma20.pct_change(fill_method=None).iloc[-1], 0.0)
+def load_state(path: str = STATE_PATH) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return _default_state()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            st = json.load(f)
+        if not isinstance(st, dict):
+            return _default_state()
+        d = _default_state()
+        d.update(st)
+        d.setdefault("cooldowns", _default_state()["cooldowns"])
+        d.setdefault("paper_trades", _default_state()["paper_trades"])
+        return d
+    except Exception:
+        return _default_state()
 
-    if c_last > m20 > m50:
-        pos = 1.0
-    elif c_last > m20:
-        pos = 0.7
-    elif m20 > m50:
-        pos = 0.5
-    else:
-        pos = 0.3
+def save_state(state: Dict[str, Any], path: str = STATE_PATH) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
-    ang = clamp((slope / 0.004), -1.0, 1.5)
-    base = 0.85 + 0.20 * pos + 0.10 * ang
-    return float(clamp(base, 0.80, 1.20))
+def _week_id(dt: datetime) -> str:
+    iso = dt.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
 
-def _pullback_quality(
-    df: pd.DataFrame,
-    atr: float,
-    ema25: pd.Series,
-    ema50: pd.Series,
-) -> float:
-    """
-    押し目の健全性を 0.60〜1.40 でスコア化（高いほど良い）。
-    目的：高値更新後の「初押し」や「健全な調整」を優先する。
-    """
-    if atr <= 0 or len(df) < 40:
-        return 0.6
+def update_week(state: Dict[str, Any]) -> None:
+    wid = _week_id(jst_now())
+    if state.get("week_id") != wid:
+        state["week_id"] = wid
+        state["weekly_new_count"] = 0
 
-    h = df["High"]
-    l = df["Low"]
-    c = df["Close"]
-    v = df["Volume"].fillna(0)
+def inc_weekly_new(state: Dict[str, Any], n: int = 1) -> None:
+    state["weekly_new_count"] = int(state.get("weekly_new_count", 0)) + int(n)
 
-    # 直近20本の高値更新を検出（過去20本高値の上抜けが1回でもあれば採用）
-    hi20_prev = h.rolling(20).max().shift(1)
-    breakout = h > hi20_prev
+def weekly_left(state: Dict[str, Any], max_new: int = 3) -> Tuple[int, int]:
+    used = int(state.get("weekly_new_count", 0))
+    return used, max_new
 
-    # ブレイクがない場合は弱い押し目として扱う
-    if not breakout.iloc[-20:].any():
-        base = 0.75
-        # EMA付近で支えられていれば少し加点
-        e25 = safe_float(ema25.iloc[-1], np.nan)
-        e50 = safe_float(ema50.iloc[-1], np.nan)
-        cl = safe_float(c.iloc[-1], np.nan)
-        if np.isfinite(e25) and np.isfinite(e50) and np.isfinite(cl):
-            if cl >= e25 * 0.98 and cl >= e50 * 0.96:
-                base += 0.10
-        return float(clamp(base, 0.6, 1.4))
+def add_market_score(state: Dict[str, Any], date_str: str, score: int) -> float:
+    lst = state.get("market_scores", [])
+    if not isinstance(lst, list):
+        lst = []
+    lst = [x for x in lst if x.get("date") != date_str]
+    lst.append({"date": date_str, "score": int(score)})
+    lst = sorted(lst, key=lambda x: x.get("date", ""))[-10:]
+    state["market_scores"] = lst
+    if len(lst) >= 4:
+        return float(int(lst[-1]["score"]) - int(lst[-4]["score"]))
+    return 0.0
 
-    # 最新のブレイク位置（直近から遡って最初に見つかったブレイク）
-    bidx = int(np.where(breakout.values)[0][-1])
-    bars_since = (len(df) - 1) - bidx
+def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
-    score = 0.60
+def in_cooldown(state: Dict[str, Any], key: str) -> bool:
+    dt = _parse_iso(state.get("cooldowns", {}).get(key))
+    return bool(dt is not None and jst_now() < dt)
 
-    # ブレイク後 3〜7本の調整を最優先（=初押し/健全調整）
-    if 3 <= bars_since <= 7:
-        score += 0.35
-    elif 1 <= bars_since <= 12:
-        score += 0.15
+def set_cooldown_days(state: Dict[str, Any], key: str, days: int) -> None:
+    until = jst_now() + timedelta(days=int(days))
+    state.setdefault("cooldowns", {})[key] = until.isoformat()
 
-    # 調整の深さ：ブレイク高値からの押しが 0.3〜1.2 ATR が理想
-    bh = safe_float(h.iloc[bidx], np.nan)
-    pl = float(np.nanmin(l.iloc[bidx:])) if bidx < len(df) else np.nan
-    if np.isfinite(bh) and np.isfinite(pl):
-        depth_atr = (bh - pl) / atr
-        if 0.30 <= depth_atr <= 1.20:
-            score += 0.20
-        elif 0.20 <= depth_atr <= 1.60:
-            score += 0.10
+def _trim(trades: List[Dict[str, Any]], keep: int = 80) -> List[Dict[str, Any]]:
+    return trades[-keep:] if len(trades) > keep else trades
 
-    # EMA25〜EMA50 付近で止まる（割り込み過ぎない）
-    e25 = safe_float(ema25.iloc[-1], np.nan)
-    e50 = safe_float(ema50.iloc[-1], np.nan)
-    cl = safe_float(c.iloc[-1], np.nan)
-    lo = safe_float(l.iloc[-1], np.nan)
-    if np.isfinite(e25) and np.isfinite(e50) and np.isfinite(cl) and np.isfinite(lo):
-        # 現在値・安値がEMA帯の近辺（下に抜け過ぎない）
-        if lo >= e50 * 0.95:
-            score += 0.12
-        elif lo >= e50 * 0.92:
-            score += 0.06
-        if cl >= e25 * 0.98:
-            score += 0.08
+def record_paper_trade(
+    state: Dict[str, Any],
+    bucket: str,
+    ticker: str,
+    date_str: str,
+    entry: float,
+    sl: float,
+    tp2: float,
+    expected_r: float,
+) -> None:
+    tr = {
+        "ticker": ticker,
+        "open_date": date_str,
+        "entry": float(entry),
+        "sl": float(sl),
+        "tp2": float(tp2),
+        "expected_r": float(expected_r),
+        "status": "OPEN",
+        "close_date": None,
+        "realized_r": None,
+    }
+    pt = state.setdefault("paper_trades", {}).setdefault(bucket, [])
+    if isinstance(pt, list):
+        pt.append(tr)
+        state["paper_trades"][bucket] = _trim(pt)
 
-    # 出来高：ブレイク直後より調整局面で縮む（理想）
-    vol_pre = float(np.nanmean(v.iloc[max(0, bidx-10):bidx])) if bidx >= 5 else float(np.nanmean(v.iloc[-20:]))
-    vol_pb = float(np.nanmean(v.iloc[bidx:])) if bidx < len(df) else float(np.nanmean(v.iloc[-5:]))
-    if np.isfinite(vol_pre) and np.isfinite(vol_pb) and vol_pre > 0:
-        if vol_pb / vol_pre <= 0.85:
-            score += 0.10
-        elif vol_pb / vol_pre <= 1.00:
-            score += 0.05
+def update_paper_trades_with_ohlc(
+    state: Dict[str, Any],
+    bucket: str,
+    ohlc_map: Dict[str, pd.DataFrame],
+    today_str: str,
+) -> None:
+    pt = state.get("paper_trades", {}).get(bucket, [])
+    if not isinstance(pt, list) or not pt:
+        return
 
-    # 下値切り上げ（HL）を簡易チェック：直近5本の安値が上向き
-    l5 = pd.to_numeric(l.iloc[-5:], errors="coerce")
-    if l5.isna().sum() == 0:
-        if l5.iloc[-1] >= l5.iloc[0]:
-            score += 0.08
+    for tr in pt:
+        if tr.get("status") != "OPEN":
+            continue
+        t = tr.get("ticker")
+        df = ohlc_map.get(t)
+        if df is None or df.empty:
+            continue
 
-    # 反転兆候：直近終値が前日高値を超える/陽線
-    if len(df) >= 2:
-        if safe_float(c.iloc[-1], 0.0) > safe_float(df["High"].iloc[-2], 0.0):
-            score += 0.07
-        elif safe_float(c.iloc[-1], 0.0) > safe_float(df["Open"].iloc[-1], 0.0):
-            score += 0.04
+        try:
+            sub = df[df.index.strftime("%Y-%m-%d") >= tr.get("open_date", "")]
+        except Exception:
+            sub = df
+        if sub is None or sub.empty:
+            continue
 
-    return float(clamp(score, 0.60, 1.40))
+        entry = safe_float(tr.get("entry"), np.nan)
+        sl = safe_float(tr.get("sl"), np.nan)
+        tp2 = safe_float(tr.get("tp2"), np.nan)
+        if not (np.isfinite(entry) and np.isfinite(sl) and np.isfinite(tp2) and entry > sl and tp2 > entry):
+            continue
 
+        rr = (tp2 - entry) / max(entry - sl, 1e-9)
+        hit_tp = bool((sub["High"].astype(float) >= tp2).any())
+        hit_sl = bool((sub["Low"].astype(float) <= sl).any())
+
+        if hit_sl:
+            tr["status"] = "CLOSED"
+            tr["close_date"] = today_str
+            tr["realized_r"] = -1.0
+        elif hit_tp:
+            tr["status"] = "CLOSED"
+            tr["close_date"] = today_str
+            tr["realized_r"] = float(rr)
+
+    state["paper_trades"][bucket] = _trim(pt)
+
+def kpi_distortion(state: Dict[str, Any]) -> Dict[str, float]:
+    pt = state.get("paper_trades", {}).get("distortion", [])
+    if not isinstance(pt, list) or not pt:
+        return {"median_r": 0.0, "exp_gap": 0.0, "neg_streak": 0.0, "count": 0.0}
+
+    closed = [x for x in pt if x.get("status") == "CLOSED" and x.get("realized_r") is not None]
+    if not closed:
+        return {"median_r": 0.0, "exp_gap": 0.0, "neg_streak": 0.0, "count": 0.0}
+
+    last20 = closed[-20:]
+    r = np.array([safe_float(x.get("realized_r"), 0.0) for x in last20], dtype=float)
+    e = np.array([safe_float(x.get("expected_r"), 0.0) for x in last20], dtype=float)
+
+    median_r = float(np.median(r)) if len(r) else 0.0
+    exp_gap = float(np.median(r - e)) if len(r) and len(e) else 0.0
+
+    neg_streak = 0
+    for x in reversed(last20):
+        rr = safe_float(x.get("realized_r"), 0.0)
+        if rr < 0:
+            neg_streak += 1
+        else:
+            break
+
+    return {"median_r": median_r, "exp_gap": exp_gap, "neg_streak": float(neg_streak), "count": float(len(last20))}
