@@ -1,34 +1,25 @@
 from __future__ import annotations
 
 import os
-from typing import List
-
 import requests
 
-WORKER_URL = os.getenv("WORKER_URL")
 
-def send_line(text: str) -> None:
+def send_line(message: str) -> None:
     """
-    Cloudflare Worker へ POST json={"text": "..."} を送る（既存仕様維持）
+    LINE Notify sender.
+    If token is missing, prints only (never fail CI run).
     """
-    if not WORKER_URL:
-        print(text)
+    token = os.getenv("LINE_NOTIFY_TOKEN") or os.getenv("LINE_TOKEN")
+    if not token:
+        print("[LINE] token missing; printing message only.")
         return
 
-    chunk_size = 3800
-    chunks: List[str] = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
-
-    for ch in chunks:
-        ok = False
-        last_err = ""
-        for attempt in range(3):
-            try:
-                r = requests.post(WORKER_URL, json={"text": ch}, timeout=20)
-                print("[LINE RESULT]", r.status_code, str(r.text)[:200])
-                ok = True
-                break
-            except Exception as e:
-                last_err = repr(e)
-        if not ok:
-            # Never fail the whole run because LINE is temporarily unavailable.
-            print("[LINE ERROR]", last_err)
+    url = "https://notify-api.line.me/api/notify"
+    headers = {"Authorization": f"Bearer {token}"}
+    data = {"message": "\n" + message}
+    try:
+        r = requests.post(url, headers=headers, data=data, timeout=20)
+        if r.status_code != 200:
+            print(f"[LINE] send failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[LINE] send exception: {e}")
