@@ -1,64 +1,65 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Tuple
+import numpy as np
 
-from utils.screen_logic import rr_min_by_market, rday_min_by_setup
 from utils.util import clamp
-from utils.setup import SetupInfo
-
-@dataclass
-class EVInfo:
-    rr: float
-    structural_ev: float
-    adj_ev: float
-    expected_days: float
-    rday: float
-    rr_min: float
-    rday_min: float
-
-def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
-    rr_min = float(rr_min_by_market(mkt_score))
-    rday_min = float(rday_min_by_setup(setup.setup))
-
-    rr = float(setup.rr)
-    expected_days = float(max(setup.expected_days, 0.5))
-    rday = float(rr / expected_days)
-
-    # 正統EV（因子圧縮）: RR × TrendStrength × PullbackQuality
-    # ※内部スケールは後段で正規化（表示・閾値と整合）
-    structural_ev_raw = rr * float(setup.trend_strength) * float(setup.pullback_quality)
-
-    # --- AdjEV（内部スケール正規化） ---
-    # 目的：AdjEV を現実的レンジに収め、閾値0.50の意味を安定させる
-    # 目安：良い=0.6〜1.0 / 極端値は上限1.2に飽和
-    adj = float(structural_ev_raw) * 0.35
-
-    # 後段補正（軽く／同一スケール）
-    if setup.gu:
-        adj -= 0.10
-    if macro_on:
-        adj -= 0.08
-
-    # 内部上限・下限（運用安定のため）
-    adj = float(clamp(adj, -0.50, 1.20))
-
-    return EVInfo(
-        rr=rr,
-        structural_ev=float(structural_ev_raw),
-        adj_ev=float(adj),
-        expected_days=float(expected_days),
-        rday=float(rday),
-        rr_min=float(rr_min),
-        rday_min=float(rday_min),
-    )
 
 
-def pass_thresholds(setup: SetupInfo, ev: EVInfo) -> Tuple[bool, str]:
-    if ev.rr < ev.rr_min:
-        return False, "RR"
-    if ev.rday < ev.rday_min:
-        return False, "RDAY"
-    if ev.adj_ev < 0.50:
-        return False, "ADJEV"
-    return True, "OK"
+def rr(entry: float, sl: float, tp: float) -> float:
+    risk = entry - sl
+    reward = tp - entry
+    if risk <= 0:
+        return float("nan")
+    return float(reward / risk)
+
+
+def expected_days(entry: float, tp1: float, atr: float) -> float:
+    """Mechanical estimate of holding days.
+
+    v2.3+ spec: Expected days must be derived mechanically.
+    We use the TP1 distance in ATR units as a base estimator.
+    This is later clipped and penalized by the caller.
+    """
+    if atr <= 0:
+        return float("nan")
+    return float((tp1 - entry) / atr)
+
+
+def expected_value(tp1_rr: float, reach_prob: float) -> float:
+    """Expected value in R-units using TP1 RR and reach probability.
+
+    Assumes -1R loss when stop hits.
+    EV = p*RR - (1-p)
+    """
+    p = max(0.0, min(1.0, float(reach_prob)))
+    return float(p * tp1_rr - (1.0 - p))
+
+
+def turnover_efficiency(tp1_rr: float, exp_days: float) -> float:
+    """R per day proxy: tp1 RR divided by expected days."""
+    d = max(1e-9, float(exp_days))
+    return float(tp1_rr / d)
+
+
+def cagr_contribution(tp1_rr: float, reach_prob: float, exp_days: float) -> float:
+    """Core ranking score: (expectedR * reachProb) / expectedDays."""
+    d = max(1e-9, float(exp_days))
+    p = max(0.0, min(1.0, float(reach_prob)))
+    return float((tp1_rr * p) / d)
+
+
+def adj_ev(raw_ev: float, market_score: int, macro_caution: bool, risk_on: bool) -> float:
+    """Expected value after risk overlays.
+
+    v2.3+ spec: MarketScore is *not* a selection gate. It is used primarily
+    for withdrawal speed control. Here we only apply a light overlay for
+    *macro* caution. The market_score argument is kept for compatibility.
+    """
+    x = float(raw_ev)
+
+    if macro_caution and not risk_on:
+        x *= 0.90
+    elif macro_caution and risk_on:
+        x *= 0.95
+
+    return float(clamp(x, -2.0, 3.0))
