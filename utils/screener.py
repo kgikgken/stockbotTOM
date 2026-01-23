@@ -1,218 +1,278 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
-from utils.util import download_history_bulk, safe_float, is_abnormal_stock
-from utils.setup import build_setup_info, liquidity_filters
-from utils.rr_ev import calc_ev, pass_thresholds
-from utils.diversify import apply_sector_cap, apply_corr_filter
-from utils.screen_logic import no_trade_conditions, max_display
-from utils.state import (
-    in_cooldown,
-    set_cooldown_days,
-    record_paper_trade,
-    update_paper_trades_with_ohlc,
-    kpi_distortion,
+from utils.diversify import apply_diversification
+from utils.market import market_summary
+from utils.position import read_positions
+from utils.report import render_daily_report
+from utils.rr_ev import (
+    rr as rr_calc,
+    expected_days as exp_days_calc,
+    turnover_efficiency,
+    expected_value,
+    cagr_contribution,
+    adj_ev,
 )
+from utils.screen_logic import build_raw_candidates
+from utils.setup import build_setup_info
+from utils.util import atr14
 
-UNIVERSE_PATH = "universe_jpx.csv"
-EARNINGS_EXCLUDE_DAYS = 3  # 暦日近似（±3日）
 
-def _get_ticker_col(df: pd.DataFrame) -> str:
-    if "ticker" in df.columns:
-        return "ticker"
-    if "code" in df.columns:
-        return "code"
-    return ""
+@dataclass
+class Config:
+    max_display: int = 5
+    rr_min: float = 1.8
+    adj_ev_min: float = 0.50
 
-def _filter_earnings(uni: pd.DataFrame, today_date) -> pd.DataFrame:
-    if "earnings_date" not in uni.columns:
-        return uni
-    d = pd.to_datetime(uni["earnings_date"], errors="coerce").dt.date
-    uni = uni.copy()
-    keep = []
-    for x in d:
-        if x is None or pd.isna(x):
-            keep.append(True)
-            continue
-        try:
-            keep.append(abs((x - today_date).days) > EARNINGS_EXCLUDE_DAYS)
-        except Exception:
-            keep.append(True)
-    return uni[keep]
+    # Setup-specific turnover floors (R/day)
+    rday_min_a1: float = 0.45
+    rday_min_a1_strong: float = 0.50
+    rday_min_breakout: float = 0.65
+    rday_min_distortion: float = 0.35
 
-def run_screen(
-    today_str: str,
-    today_date,
-    mkt_score: int,
-    delta3: float,
-    macro_on: bool,
-    state: Dict,
-) -> Tuple[List[Dict], Dict, Dict[str, pd.DataFrame]]:
+    # Time efficiency penalty (days => multiplicative factor)
+    penalty_4d: float = 0.95
+    penalty_5d: float = 0.90
+
+
+def _index_vol_bucket(index_ticker: str = "1306.T") -> str:
+    """Return index volatility bucket: low / mid / high.
+
+    Spec: single index vol source (TOPIX ATR14). We approximate with ATR% of 14.
     """
-    戻り: (final_candidates_for_line, debug_meta, ohlc_map)
-    ※ 歪みEVは内部処理のみ（LINE非表示）
-    """
-    if not os.path.exists(UNIVERSE_PATH):
-        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
-
     try:
-        uni = pd.read_csv(UNIVERSE_PATH)
+        df = yf.download(index_ticker, period="6mo", interval="1d", auto_adjust=False, progress=False)
+        if df is None or df.empty or len(df) < 30:
+            return "mid"
+        a14 = atr14(df)
+        if not np.isfinite(a14):
+            return "mid"
+        close = float(df["Close"].iloc[-1])
+        atr_pct = 100.0 * a14 / max(1e-9, close)
+        # Heuristic buckets: TOPIX ETF daily ATR% is generally small.
+        if atr_pct <= 1.0:
+            return "low"
+        if atr_pct >= 2.0:
+            return "high"
+        return "mid"
     except Exception:
-        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
+        return "mid"
 
-    tcol = _get_ticker_col(uni)
-    if not tcol:
-        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
 
-    uni = _filter_earnings(uni, today_date)
-    tickers = uni[tcol].astype(str).tolist()
-    ohlc_map = download_history_bulk(tickers, period="260d", auto_adjust=True, group_size=200)
-
-    # paper trade update
-    update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
-    update_paper_trades_with_ohlc(state, "distortion", ohlc_map, today_str)
-
-    # distortion KPI -> auto OFF
-    kpi = kpi_distortion(state)
-    if kpi["count"] >= 10:
-        if (kpi["median_r"] < -0.10) or (kpi["exp_gap"] < -0.30) or (kpi["neg_streak"] >= 3):
-            set_cooldown_days(state, "distortion_until", days=4)
-
-    no_trade = no_trade_conditions(int(mkt_score), float(delta3))
-
-    cands: List[Dict] = []
-    gu_cnt = 0
-
-    for _, row in uni.iterrows():
-        ticker = str(row.get(tcol, "")).strip()
-        if not ticker:
-            continue
-        df = ohlc_map.get(ticker)
-        if df is None or df.empty or len(df) < 120:
-            continue
-
-        if is_abnormal_stock(df):
-            continue
-
-        ok_liq, price, adv, atrp = liquidity_filters(df)
-        if not ok_liq:
-            continue
-
-        info = build_setup_info(df, macro_on=macro_on)
-        if info.setup == "NONE":
-            continue
-
-        if info.gu:
-            gu_cnt += 1
-
-        ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
-        ok, _ = pass_thresholds(info, ev)
-        if not ok:
-            continue
-
-        name = str(row.get("name", ticker))
-        sector = str(row.get("sector", row.get("industry_big", "不明")))
-
-        cands.append(
-            {
-                "ticker": ticker,
-                "name": name,
-                "sector": sector,
-                "setup": info.setup,
-                "tier": int(info.tier),
-                "entry_low": float(info.entry_low),
-                "entry_high": float(info.entry_high),
-                "sl": float(info.sl),
-                "tp1": float(info.tp1),
-                "tp2": float(info.tp2),
-                "rr": float(ev.rr),
-                "struct_ev": float(ev.structural_ev),
-                "adj_ev": float(ev.adj_ev),
-                "expected_days": float(ev.expected_days),
-                "rday": float(ev.rday),
-                "gu": bool(info.gu),
-                "adv20": float(adv),
-                "atrp": float(atrp),
-            }
-        )
-
-    cands.sort(key=lambda x: (x["adj_ev"], x["rday"], x["rr"]), reverse=True)
-    raw_n = len(cands)
-
-    # diversify
-    cands = apply_sector_cap(cands, max_per_sector=2)
-    cands = apply_corr_filter(cands, ohlc_map, max_corr=0.75)
-
-    final: List[Dict] = []
-
-    if no_trade:
-        # Tier0 exception: max 1, cooldownあり
-        if not in_cooldown(state, "tier0_exception_until"):
-            tier0 = [c for c in cands if c.get("setup") == "A1-Strong"]
-            if tier0:
-                pick = tier0[0]
-                final = [pick]
-                entry_mid = (pick["entry_low"] + pick["entry_high"]) / 2.0
-                record_paper_trade(
-                    state,
-                    bucket="tier0_exception",
-                    ticker=pick["ticker"],
-                    date_str=today_str,
-                    entry=entry_mid,
-                    sl=pick["sl"],
-                    tp2=pick["tp2"],
-                    expected_r=float(pick["rr"]),
-                )
+def _strategy_slot_limits(market_score: int, macro_caution: bool, index_vol_bucket: str) -> Dict[str, int]:
+    """Daily auto slot limits per strategy (spec v2.3)."""
+    # Pullback = 0..3
+    if market_score >= 60:
+        pb = 3
+    elif market_score >= 45:
+        pb = 2
     else:
-        final = cands[:max_display(macro_on)]
+        pb = 1
+    if macro_caution:
+        pb = max(0, pb - 1)
 
-    # Tier2 liquidity cushion
-    filtered = []
-    for c in final:
-        if c.get("tier") == 2 and c.get("setup") in ("A2", "B"):
-            if float(c.get("adv20", 0.0)) < 300e6:
-                continue
-        filtered.append(c)
-    final = filtered
+    # Breakout = 0..2 (prefer when volatility is rising and market not very strong)
+    if index_vol_bucket == "high" and 35 <= market_score <= 70:
+        br = 2
+    elif 45 <= market_score <= 70:
+        br = 1
+    else:
+        br = 0
+    if macro_caution:
+        br = max(0, br - 1)
 
-    # distortion internal (non-display)
-    if not in_cooldown(state, "distortion_until"):
-        internal = [c for c in cands if c.get("setup") in ("A1-Strong", "A2")][:2]
-        for c in internal:
-            entry_mid = (c["entry_low"] + c["entry_high"]) / 2.0
-            record_paper_trade(
-                state,
-                bucket="distortion",
-                ticker=c["ticker"],
-                date_str=today_str,
-                entry=entry_mid,
-                sl=c["sl"],
-                tp2=c["tp2"],
-                expected_r=float(c["rr"]),
-            )
+    # Distortion = 0..1 (rare / small)
+    ds = 1 if (market_score < 55 or macro_caution) else 0
 
-    # Tier0 exception brake
-    pt = state.get("paper_trades", {}).get("tier0_exception", [])
-    closed = [x for x in pt if x.get("status") == "CLOSED" and x.get("realized_r") is not None]
-    if len(closed) >= 4:
-        lastN = closed[-4:]
-        s = float(np.sum([safe_float(x.get("realized_r"), 0.0) for x in lastN]))
-        if s <= -2.0:
-            set_cooldown_days(state, "tier0_exception_until", days=4)
+    return {"A": pb, "B": br, "D": ds}
 
-    avg_adj = float(np.mean([c["adj_ev"] for c in final])) if final else 0.0
-    gu_ratio = float(gu_cnt / max(1, raw_n)) if raw_n > 0 else 0.0
 
-    meta = {
-        "raw": int(raw_n),
-        "final": int(len(final)),
-        "avgAdjEV": float(avg_adj),
-        "GU": float(gu_ratio),
-    }
+def _reach_prob(setup: str, row: Dict) -> float:
+    """Reach probability proxy (no Pwin)."""
+    if setup == "A1-Strong":
+        base = 0.62
+        q = float(row.get("pullback_score", 0.0)) / 100.0
+        return float(np.clip(base * (0.15 + 0.85 * q), 0.35, 0.80))
+    if setup == "A1":
+        base = 0.55
+        q = float(row.get("pullback_score", 0.0)) / 100.0
+        return float(np.clip(base * (0.15 + 0.85 * q), 0.30, 0.75))
+    if setup == "B":
+        base = 0.45
+        q = float(row.get("breakout_score", 0.0)) / 100.0
+        return float(np.clip(base * (0.20 + 0.80 * q), 0.20, 0.65))
+    if setup == "D":
+        base = 0.35
+        q = float(row.get("distortion_score", 0.0)) / 100.0
+        return float(np.clip(base * (0.30 + 0.70 * q), 0.15, 0.55))
+    return 0.0
 
-    return final, meta, ohlc_map
+
+def _rday_floor(setup: str, cfg: Config) -> float:
+    if setup == "A1-Strong":
+        return cfg.rday_min_a1_strong
+    if setup == "A1":
+        return cfg.rday_min_a1
+    if setup == "B":
+        return cfg.rday_min_breakout
+    if setup == "D":
+        return cfg.rday_min_distortion
+    return 9e9
+
+
+def _time_penalty_factor(exp_days: float, cfg: Config) -> float:
+    if not np.isfinite(exp_days):
+        return 0.0
+    if exp_days >= 6.0:
+        return 0.0  # exclude
+    if exp_days >= 5.0:
+        return cfg.penalty_5d
+    if exp_days >= 4.0:
+        return cfg.penalty_4d
+    return 1.0
+
+
+def _pick_levels(row: Dict, setup: str) -> Dict:
+    if setup in ("A1", "A1-Strong"):
+        return row.get("pb_levels", {})
+    if setup == "B":
+        return row.get("br_levels", {})
+    if setup == "D":
+        return row.get("ds_levels", {})
+    return {}
+
+
+def _enrich_candidate(
+    row: Dict,
+    setup: str,
+    market_score: int,
+    macro_caution: bool,
+    risk_on: bool,
+    cfg: Config,
+) -> Dict | None:
+    levels = _pick_levels(row, setup)
+    if not levels:
+        return None
+
+    entry = float(levels.get("entry", np.nan))
+    sl = float(levels.get("sl", np.nan))
+    tp1 = float(levels.get("tp1", np.nan))
+    tp2 = float(levels.get("tp2", np.nan))
+    atr = float(levels.get("atr", np.nan))
+    if not (np.isfinite(entry) and np.isfinite(sl) and np.isfinite(tp1) and np.isfinite(atr)):
+        return None
+    if entry <= sl:
+        return None
+
+    rr_tp1 = rr_calc(entry, sl, tp1)
+    rr_tp2 = rr_calc(entry, sl, tp2) if np.isfinite(tp2) else float("nan")
+
+    exp_days = exp_days_calc(entry, tp1, atr)
+    # clamp to the system horizon
+    exp_days = float(np.clip(exp_days, 1.0, 7.0))
+
+    # Time efficiency penalty / exclusion
+    time_factor = _time_penalty_factor(exp_days, cfg)
+    if time_factor <= 0:
+        return None
+
+    p = _reach_prob(setup, row)
+    raw_ev = expected_value(rr_tp1, p)
+    adj = adj_ev(raw_ev, market_score=market_score, macro_caution=macro_caution, risk_on=risk_on)
+
+    rday = turnover_efficiency(rr_tp1, exp_days)
+    cagr = cagr_contribution(rr_tp1, p, exp_days) * time_factor
+
+    # Global filters
+    if rr_tp1 < cfg.rr_min:
+        return None
+    if adj < cfg.adj_ev_min:
+        return None
+    if rday < _rday_floor(setup, cfg):
+        return None
+
+    out = dict(row)
+    out.update(
+        {
+            "setup": setup,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "atr": atr,
+            "rr": float(rr_tp1),
+            "rr2": float(rr_tp2),
+            "reach_prob": float(p),
+            "raw_ev": float(raw_ev),
+            "adj_ev": float(adj),
+            "rday": float(rday),
+            "expected_days": float(exp_days),
+            "cagr_score": float(cagr),
+        }
+    )
+    return out
+
+
+def _apply_slot_limits(rows: List[Dict], limits: Dict[str, int]) -> List[Dict]:
+    """Enforce daily max slots per strategy."""
+    picked: List[Dict] = []
+    used = {"A": 0, "B": 0, "D": 0}
+    for r in rows:
+        s = r.get("setup")
+        key = "A" if s in ("A1", "A1-Strong") else s
+        if key not in used:
+            continue
+        if used[key] >= limits.get(key, 0):
+            continue
+        picked.append(r)
+        used[key] += 1
+    return picked
+
+
+def run_screen(universe_csv: str = "data/universe_jpx.csv") -> Tuple[str, Dict]:
+    """Run end-to-end screening and return (report_text, debug_dict)."""
+    cfg = Config()
+
+    mkt = market_summary()
+    market_score = int(mkt["market_score"])
+    macro_caution = bool(mkt.get("macro_caution", False))
+    risk_on = bool(mkt.get("risk_on", False))
+
+    universe_df = pd.read_csv(universe_csv)
+    raw, dbg = build_raw_candidates(universe_df)
+
+    enriched: List[Dict] = []
+    for row in raw:
+        setup = build_setup_info(row)
+        if setup is None:
+            continue
+        r = _enrich_candidate(row, setup, market_score, macro_caution, risk_on, cfg)
+        if r is not None:
+            enriched.append(r)
+
+    # Sort by CAGR contribution
+    enriched.sort(key=lambda x: float(x.get("cagr_score", -1e9)), reverse=True)
+
+    # Diversification & correlations
+    diversified = apply_diversification(enriched)
+
+    # Strategy slot limits
+    vol_bucket = _index_vol_bucket(os.getenv("INDEX_TICKER", "1306.T"))
+    limits = _strategy_slot_limits(market_score, macro_caution, vol_bucket)
+    diversified = _apply_slot_limits(diversified, limits)
+
+    # Cap display
+    candidates = diversified[: cfg.max_display]
+
+    positions = read_positions("data/positions.csv")
+
+    report = render_daily_report(mkt, candidates, positions, cfg=cfg, slot_limits=limits)
+    dbg.update({"n_raw": len(raw), "n_enriched": len(enriched), "n_final": len(candidates), "slot_limits": limits})
+    return report, dbg
