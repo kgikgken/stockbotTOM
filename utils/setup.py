@@ -11,6 +11,7 @@ from utils.util import sma, rsi14, atr14, adv20, atr_pct_last, safe_float, clamp
 @dataclass
 class SetupInfo:
     setup: str
+    setup_jp: str
     tier: int
     entry_low: float
     entry_high: float
@@ -18,7 +19,6 @@ class SetupInfo:
     tp2: float
     tp1: float
     rr: float
-    rr_tp1: float
     expected_days: float
     rday: float
     trend_strength: float
@@ -75,27 +75,6 @@ def detect_setup(df: pd.DataFrame) -> Tuple[str, int]:
     ma20 = sma(c, 20)
     ma50 = sma(c, 50)
     rsi = rsi14(c)
-
-    # D（需給歪み）: 急落→反転の需給修復（例外枠）
-    # 前日: -3%以下の下落 / 当日: 陽線 + 下ヒゲ長 + 出来高増
-    try:
-        prev_ret = safe_float(c.iloc[-2] / c.iloc[-3] - 1.0, 0.0) if len(c) >= 3 else 0.0
-    except Exception:
-        prev_ret = 0.0
-    try:
-        o_last = safe_float(df["Open"].astype(float).iloc[-1], np.nan)
-        l_last = safe_float(df["Low"].astype(float).iloc[-1], np.nan)
-        v = df["Volume"].astype(float)
-        v_last = safe_float(v.iloc[-1], np.nan)
-        v_ma = safe_float(v.rolling(20).mean().iloc[-1], v_last)
-        body = abs(c_last - o_last) if np.isfinite(c_last) and np.isfinite(o_last) else 0.0
-        lower_wick = (min(o_last, c_last) - l_last) if np.isfinite(l_last) and np.isfinite(o_last) and np.isfinite(c_last) else 0.0
-        vol_boost = (np.isfinite(v_last) and np.isfinite(v_ma) and v_ma > 0 and v_last > 1.5 * v_ma)
-    except Exception:
-        body, lower_wick, vol_boost = 0.0, 0.0, False
-
-    if prev_ret <= -0.03 and np.isfinite(c_last) and np.isfinite(o_last) and c_last > o_last and lower_wick > max(1e-6, 1.5 * body) and vol_boost:
-        return "D", 0
 
     c_last = safe_float(c.iloc[-1], np.nan)
     m20 = safe_float(ma20.iloc[-1], np.nan)
@@ -226,8 +205,18 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
     ts = _trend_strength(c, ma20, ma50)
     pq = _pullback_quality(c, ma20, ma50, atr, setup)
 
+    setup_jp_map = {
+        'A1': 'A1（標準押し目）',
+        'A1-Strong': 'A1-Strong（強押し目）',
+        'A2': 'A2（浅押し/準押し）',
+        'B': 'B（初動ブレイク）',
+        'D': 'D（需給歪み）',
+    }
+    setup_jp = setup_jp_map.get(setup, setup)
+
     return SetupInfo(
         setup=setup,
+        setup_jp=setup_jp,
         tier=int(tier),
         entry_low=float(lo),
         entry_high=float(hi),
