@@ -1,278 +1,179 @@
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
-import pandas as pd
-import yfinance as yf
 
-from utils.diversify import apply_diversification
-from utils.market import market_summary
-from utils.position import read_positions
-from utils.report import render_daily_report
-from utils.rr_ev import (
-    rr as rr_calc,
-    expected_days as exp_days_calc,
-    turnover_efficiency,
-    expected_value,
-    cagr_contribution,
-    adj_ev,
-)
-from utils.screen_logic import build_raw_candidates
-from utils.setup import build_setup_info
-from utils.util import atr14
+from utils.util import jst_now, jst_today_str
+from utils.market import compute_market_score
+from utils.events import load_events, upcoming_important
+from utils.position import load_positions
+from utils.screen_logic import load_universe, build_raw_candidates
+from utils.setup import build_setup_info, liquidity_filters, rday_min_by_setup
+from utils.rr_ev import adj_ev
+from utils.diversify import apply_basic_diversify
+from utils.report import build_report
 
 
-@dataclass
-class Config:
-    max_display: int = 5
-    rr_min: float = 1.8
-    adj_ev_min: float = 0.50
-
-    # Setup-specific turnover floors (R/day)
-    rday_min_a1: float = 0.45
-    rday_min_a1_strong: float = 0.50
-    rday_min_breakout: float = 0.65
-    rday_min_distortion: float = 0.35
-
-    # Time efficiency penalty (days => multiplicative factor)
-    penalty_4d: float = 0.95
-    penalty_5d: float = 0.90
+def _macro_caution(events: List[Dict]) -> bool:
+    return len(events) > 0
 
 
-def _index_vol_bucket(index_ticker: str = "1306.T") -> str:
-    """Return index volatility bucket: low / mid / high.
-
-    Spec: single index vol source (TOPIX ATR14). We approximate with ATR% of 14.
-    """
-    try:
-        df = yf.download(index_ticker, period="6mo", interval="1d", auto_adjust=False, progress=False)
-        if df is None or df.empty or len(df) < 30:
-            return "mid"
-        a14 = atr14(df)
-        if not np.isfinite(a14):
-            return "mid"
-        close = float(df["Close"].iloc[-1])
-        atr_pct = 100.0 * a14 / max(1e-9, close)
-        # Heuristic buckets: TOPIX ETF daily ATR% is generally small.
-        if atr_pct <= 1.0:
-            return "low"
-        if atr_pct >= 2.0:
-            return "high"
-        return "mid"
-    except Exception:
-        return "mid"
+def _rr_min(market_score: int) -> float:
+    if market_score >= 75:
+        return 1.8
+    if market_score >= 55:
+        return 1.9
+    if market_score >= 45:
+        return 2.1
+    return 2.2
 
 
-def _strategy_slot_limits(market_score: int, macro_caution: bool, index_vol_bucket: str) -> Dict[str, int]:
-    """Daily auto slot limits per strategy (spec v2.3)."""
-    # Pullback = 0..3
-    if market_score >= 60:
-        pb = 3
-    elif market_score >= 45:
-        pb = 2
-    else:
-        pb = 1
+def _leverage(market_score: int, macro_caution: bool, risk_on: bool) -> str:
+    lev = 1.1 if market_score >= 55 else 1.0
+    if macro_caution and not risk_on:
+        lev = min(lev, 1.0)
+    return f"{lev:.1f}x"
+
+
+def _new_trade_flag(_: bool) -> str:
+    return "✅ OK（指値のみ / 現値IN禁止）"
+
+
+def run_screen() -> str:
+    now = jst_now()
+
+    mk = compute_market_score()
+    events_df = load_events("events.csv")
+    upcoming = upcoming_important(events_df, now, horizon_days=2)
+    macro_caution = _macro_caution(upcoming)
+
+    rr_min = _rr_min(mk.score)
+    adjev_min = 0.50
+
+    uni = load_universe("universe_jpx.csv")
+    raw, _debug = build_raw_candidates(uni)
+
+    cands: List[Dict] = []
+    for r in raw:
+        setup = build_setup_info(r)
+        if not setup:
+            continue
+        if not liquidity_filters(r):
+            continue
+
+        rday_min = rday_min_by_setup(setup)
+        if not np.isfinite(r.get("rday", float("nan"))) or float(r["rday"]) < rday_min:
+            continue
+
+        if not np.isfinite(r.get("rr", float("nan"))) or float(r["rr"]) < rr_min:
+            continue
+
+        tp2 = float(r["tp2"])
+        if macro_caution:
+            # イベント警戒日はTP2を控えめに（伸ばしすぎない）
+            tp2 = r["tp1"] + 0.40 * (r["tp1"] - r["entry"])
+
+        # --- スコアの中核：CAGR寄与度 = (期待R × 到達確率) ÷ 想定日数
+        # 期待RはTP1基準（固定）。分割利確・粘りはスコア外。
+        expected_r = float(r.get("rr", float("nan")))  # TP1到達時のR
+        expd = float(r.get("expected_days", float("nan")))
+        if macro_caution and expd == expd:
+            expd = expd * 1.10
+
+        # 到達確率（簡易・再現性重視）。Setupの基礎確率 + 形の強さで微調整。
+        base_p = {"A1-Strong": 0.55, "A1": 0.50, "B": 0.42, "D": 0.35}.get(setup, 0.45)
+        pb = float(r.get("pullback_score", 0.0))
+        if setup in ("A1", "A1-Strong"):
+            base_p += (pb - 75.0) * 0.002
+        p_reach = max(0.25, min(0.65, base_p))
+
+        # 期待値（補正）: EV(R) = 期待R×p - 1×(1-p)
+        aev = expected_r * p_reach - (1.0 - p_reach)
+        # 最低限の環境補正（ゲートではなく、期待値の摩耗を見積もる）
+        if macro_caution:
+            aev *= 0.85
+        if mk.risk_on:
+            aev *= 1.05
+
+        if not (aev == aev) or aev < adjev_min:
+            continue
+
+        # 回転効率（R/日）: 期待R×p ÷ 想定日数
+        rday = (expected_r * p_reach) / expd if (expd == expd and expd > 0) else float("nan")
+
+        # 想定日数ペナルティ（完全機械化）
+        if expd == expd and expd >= 6.0:
+            continue
+        penalty = 0.0
+        if expd == expd and expd >= 5.0:
+            penalty = 10.0
+        elif expd == expd and expd >= 4.0:
+            penalty = 5.0
+
+        label = "A1-Strong（強押し目）" if setup == "A1-Strong" else ("A1（標準押し目）" if setup == "A1" else ("B（初動ブレイク）" if setup == "B" else "D（需給歪み）"))
+
+        cagr_score = (rotation_eff * 100.0) - penalty
+        rank = cagr_score
+        cands.append(
+            {
+                **r,
+                "setup": setup,
+                "setup_label": label,
+                "tp2": float(tp2),
+                "rr": float(rr_tp1),
+                "expected_days": float(expd),
+                "rday": float(rotation_eff),
+                "adj_ev": float(adj_ev),
+                "rank": float(rank),
+            }
+        )
+
+    cands.sort(key=lambda x: x.get("rank", -1e9), reverse=True)
+    cands = apply_basic_diversify(cands, max_per_sector=2)
+    cands = cands[:5]
+
+    posdf = load_positions("positions.csv")
+    pos_lines: List[str] = []
+    if not posdf.empty:
+        for _, p in posdf.head(3).iterrows():
+            t = p.get("ticker", "-")
+            rr = p.get("rr", "")
+            aev = p.get("adj_ev", "")
+            pos_lines.append(f"■ {t}")
+            if rr != "":
+                pos_lines.append(f"・RR：{rr}")
+            if aev != "":
+                pos_lines.append(f"・期待値（補正）：{aev}")
+
+    policy_lines = ["新規は指値のみ（現値IN禁止）"]
     if macro_caution:
-        pb = max(0, pb - 1)
+        policy_lines += ["ロットは通常の50%以下", "TP2は控えめ", "GUは寄り後再判定"]
 
-    # Breakout = 0..2 (prefer when volatility is rising and market not very strong)
-    if index_vol_bucket == "high" and 35 <= market_score <= 70:
-        br = 2
-    elif 45 <= market_score <= 70:
-        br = 1
-    else:
-        br = 0
-    if macro_caution:
-        br = max(0, br - 1)
+    futures = "-"
+    if np.isfinite(mk.futures_pct):
+        sign = "+" if mk.futures_pct >= 0 else ""
+        futures = f"{sign}{mk.futures_pct:.2f}%({mk.futures_ticker})"
+        if mk.risk_on:
+            futures += " Risk-ON"
 
-    # Distortion = 0..1 (rare / small)
-    ds = 1 if (market_score < 55 or macro_caution) else 0
+    risk_on_note = None
+    if macro_caution and mk.risk_on:
+        risk_on_note = "※ 先物Risk-ONにつき、警戒しつつ最大5まで表示"
 
-    return {"A": pb, "B": br, "D": ds}
+    meta = {
+        "date": jst_today_str(),
+        "new_trade_flag": _new_trade_flag(macro_caution),
+        "market_score": mk.score,
+        "market_label": mk.score_label,
+        "delta_3d": mk.delta_3d,
+        "futures": futures,
+        "macro_caution": "ON" if macro_caution else "OFF",
+        "weekly_new": "0 / 3",
+        "leverage": _leverage(mk.score, macro_caution, mk.risk_on),
+        "rr_min": f"{rr_min:.1f}",
+        "adjev_min": f"{adjev_min:.2f}",
+        "risk_on_note": risk_on_note,
+    }
 
-
-def _reach_prob(setup: str, row: Dict) -> float:
-    """Reach probability proxy (no Pwin)."""
-    if setup == "A1-Strong":
-        base = 0.62
-        q = float(row.get("pullback_score", 0.0)) / 100.0
-        return float(np.clip(base * (0.15 + 0.85 * q), 0.35, 0.80))
-    if setup == "A1":
-        base = 0.55
-        q = float(row.get("pullback_score", 0.0)) / 100.0
-        return float(np.clip(base * (0.15 + 0.85 * q), 0.30, 0.75))
-    if setup == "B":
-        base = 0.45
-        q = float(row.get("breakout_score", 0.0)) / 100.0
-        return float(np.clip(base * (0.20 + 0.80 * q), 0.20, 0.65))
-    if setup == "D":
-        base = 0.35
-        q = float(row.get("distortion_score", 0.0)) / 100.0
-        return float(np.clip(base * (0.30 + 0.70 * q), 0.15, 0.55))
-    return 0.0
-
-
-def _rday_floor(setup: str, cfg: Config) -> float:
-    if setup == "A1-Strong":
-        return cfg.rday_min_a1_strong
-    if setup == "A1":
-        return cfg.rday_min_a1
-    if setup == "B":
-        return cfg.rday_min_breakout
-    if setup == "D":
-        return cfg.rday_min_distortion
-    return 9e9
-
-
-def _time_penalty_factor(exp_days: float, cfg: Config) -> float:
-    if not np.isfinite(exp_days):
-        return 0.0
-    if exp_days >= 6.0:
-        return 0.0  # exclude
-    if exp_days >= 5.0:
-        return cfg.penalty_5d
-    if exp_days >= 4.0:
-        return cfg.penalty_4d
-    return 1.0
-
-
-def _pick_levels(row: Dict, setup: str) -> Dict:
-    if setup in ("A1", "A1-Strong"):
-        return row.get("pb_levels", {})
-    if setup == "B":
-        return row.get("br_levels", {})
-    if setup == "D":
-        return row.get("ds_levels", {})
-    return {}
-
-
-def _enrich_candidate(
-    row: Dict,
-    setup: str,
-    market_score: int,
-    macro_caution: bool,
-    risk_on: bool,
-    cfg: Config,
-) -> Dict | None:
-    levels = _pick_levels(row, setup)
-    if not levels:
-        return None
-
-    entry = float(levels.get("entry", np.nan))
-    sl = float(levels.get("sl", np.nan))
-    tp1 = float(levels.get("tp1", np.nan))
-    tp2 = float(levels.get("tp2", np.nan))
-    atr = float(levels.get("atr", np.nan))
-    if not (np.isfinite(entry) and np.isfinite(sl) and np.isfinite(tp1) and np.isfinite(atr)):
-        return None
-    if entry <= sl:
-        return None
-
-    rr_tp1 = rr_calc(entry, sl, tp1)
-    rr_tp2 = rr_calc(entry, sl, tp2) if np.isfinite(tp2) else float("nan")
-
-    exp_days = exp_days_calc(entry, tp1, atr)
-    # clamp to the system horizon
-    exp_days = float(np.clip(exp_days, 1.0, 7.0))
-
-    # Time efficiency penalty / exclusion
-    time_factor = _time_penalty_factor(exp_days, cfg)
-    if time_factor <= 0:
-        return None
-
-    p = _reach_prob(setup, row)
-    raw_ev = expected_value(rr_tp1, p)
-    adj = adj_ev(raw_ev, market_score=market_score, macro_caution=macro_caution, risk_on=risk_on)
-
-    rday = turnover_efficiency(rr_tp1, exp_days)
-    cagr = cagr_contribution(rr_tp1, p, exp_days) * time_factor
-
-    # Global filters
-    if rr_tp1 < cfg.rr_min:
-        return None
-    if adj < cfg.adj_ev_min:
-        return None
-    if rday < _rday_floor(setup, cfg):
-        return None
-
-    out = dict(row)
-    out.update(
-        {
-            "setup": setup,
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "atr": atr,
-            "rr": float(rr_tp1),
-            "rr2": float(rr_tp2),
-            "reach_prob": float(p),
-            "raw_ev": float(raw_ev),
-            "adj_ev": float(adj),
-            "rday": float(rday),
-            "expected_days": float(exp_days),
-            "cagr_score": float(cagr),
-        }
-    )
-    return out
-
-
-def _apply_slot_limits(rows: List[Dict], limits: Dict[str, int]) -> List[Dict]:
-    """Enforce daily max slots per strategy."""
-    picked: List[Dict] = []
-    used = {"A": 0, "B": 0, "D": 0}
-    for r in rows:
-        s = r.get("setup")
-        key = "A" if s in ("A1", "A1-Strong") else s
-        if key not in used:
-            continue
-        if used[key] >= limits.get(key, 0):
-            continue
-        picked.append(r)
-        used[key] += 1
-    return picked
-
-
-def run_screen(universe_csv: str = "data/universe_jpx.csv") -> Tuple[str, Dict]:
-    """Run end-to-end screening and return (report_text, debug_dict)."""
-    cfg = Config()
-
-    mkt = market_summary()
-    market_score = int(mkt["market_score"])
-    macro_caution = bool(mkt.get("macro_caution", False))
-    risk_on = bool(mkt.get("risk_on", False))
-
-    universe_df = pd.read_csv(universe_csv)
-    raw, dbg = build_raw_candidates(universe_df)
-
-    enriched: List[Dict] = []
-    for row in raw:
-        setup = build_setup_info(row)
-        if setup is None:
-            continue
-        r = _enrich_candidate(row, setup, market_score, macro_caution, risk_on, cfg)
-        if r is not None:
-            enriched.append(r)
-
-    # Sort by CAGR contribution
-    enriched.sort(key=lambda x: float(x.get("cagr_score", -1e9)), reverse=True)
-
-    # Diversification & correlations
-    diversified = apply_diversification(enriched)
-
-    # Strategy slot limits
-    vol_bucket = _index_vol_bucket(os.getenv("INDEX_TICKER", "1306.T"))
-    limits = _strategy_slot_limits(market_score, macro_caution, vol_bucket)
-    diversified = _apply_slot_limits(diversified, limits)
-
-    # Cap display
-    candidates = diversified[: cfg.max_display]
-
-    positions = read_positions("data/positions.csv")
-
-    report = render_daily_report(mkt, candidates, positions, cfg=cfg, slot_limits=limits)
-    dbg.update({"n_raw": len(raw), "n_enriched": len(enriched), "n_final": len(candidates), "slot_limits": limits})
-    return report, dbg
+    return build_report(meta, upcoming, policy_lines, cands, pos_lines)
