@@ -8,7 +8,7 @@ import pandas as pd
 
 from utils.util import download_history_bulk, safe_float, is_abnormal_stock
 from utils.setup import build_setup_info, liquidity_filters
-from utils.rr_ev import calc_ev, pass_thresholds
+from utils.rr_ev import calc_ev
 from utils.diversify import apply_sector_cap, apply_corr_filter
 from utils.screen_logic import no_trade_conditions, max_display
 from utils.state import (
@@ -124,6 +124,8 @@ def run_screen(
                 "name": name,
                 "sector": sector,
                 "setup": info.setup,
+                "setup_jp": getattr(info, "setup_jp", info.setup),
+                "strategy": strategy_of_setup(info.setup),
                 "tier": int(info.tier),
                 "entry_low": float(info.entry_low),
                 "entry_high": float(info.entry_high),
@@ -141,7 +143,7 @@ def run_screen(
             }
         )
 
-    cands.sort(key=lambda x: (x["adj_ev"], x["rday"], x["rr"]), reverse=True)
+    cands.sort(key=lambda x: (x.get("cagr_pt", -1e9), x.get("rotation_eff", 0.0), x.get("exp_value", 0.0)), reverse=True)
     raw_n = len(cands)
 
     # diversify
@@ -215,35 +217,19 @@ def run_screen(
         "GU": float(gu_ratio),
     }
 
-    return final, meta, ohlc_map    # --- selection: 戦略別最大枠（日次自動制御） ---
-    def _bucket(setup_name: str) -> str:
-        if setup_name in ("A1", "A1-Strong", "A2"):
-            return "pullback"
-        if setup_name == "B":
-            return "breakout"
-        if setup_name == "D":
-            return "distortion"
-        return "other"
 
-    # 仕様：押し目0〜3 / 初動0〜2 / 歪み0〜1（簡易の自動調整あり）
-    ms = float(mk.get("score", 50.0))
-    caps = {"pullback": 3, "breakout": 2, "distortion": 1}
+    # --- 戦略別 最大枠（日次自動制御） ---
+    caps = strategy_caps(float(meta.get("market_score", 50.0)), str(meta.get("index_vol_regime", "MID")))
+    bucket = {"PULLBACK": [], "BREAKOUT": [], "DISTORT": []}
+    for c in final:
+        bucket.setdefault(c.get("strategy", "PULLBACK"), []).append(c)
 
-    if ms < 50:
-        caps["pullback"] = max(0, caps["pullback"] - 1)
-        caps["breakout"] = max(0, caps["breakout"] - 1)
+    capped: List[Dict] = []
+    for k in ["PULLBACK", "BREAKOUT", "DISTORT"]:
+        capped.extend(bucket.get(k, [])[: int(caps.get(k, 0))])
 
-    selected = []
-    used = {k: 0 for k in caps.keys()}
+    # 余り枠はCAGR寄与度順で埋める（最大5表示を前提）
+    capped.sort(key=lambda x: x.get("cagr_pt", -1e9), reverse=True)
+    final = capped[: max_display()]
 
-    for x in candidates:
-        b = _bucket(x["setup"].setup)
-        if b in used and used[b] >= caps[b]:
-            continue
-        selected.append(x)
-        if b in used:
-            used[b] += 1
-        if len(selected) >= max_display:
-            break
-
-
+    return final, meta, ohlc_map
