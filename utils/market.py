@@ -8,6 +8,14 @@ import yfinance as yf
 
 from utils.util import ema, rsi14, pct_change
 
+def _to_series(x: pd.Series | pd.DataFrame) -> pd.Series:
+    """Normalize yfinance outputs that may return a DataFrame for single fields."""
+    if isinstance(x, pd.DataFrame):
+        # pick first column deterministically
+        return x.iloc[:, 0].astype(float)
+    return x.astype(float)
+
+
 
 @dataclass
 class MarketSnapshot:
@@ -61,10 +69,12 @@ def compute_market_score() -> MarketSnapshot:
             risk_on=(np.isfinite(futures_pct) and futures_pct >= 1.5),
         )
 
-    close = df["Close"]
-    e25 = ema(close, 25)
-    e50 = ema(close, 50)
-    rsi = float(rsi14(close).iloc[-1])
+    close = _to_series(df["Close"])
+    e25 = _to_series(ema(close, 25))
+    e50 = _to_series(ema(close, 50))
+    rsi_s = rsi14(close)
+    rsi_s = _to_series(rsi_s) if isinstance(rsi_s, pd.DataFrame) else rsi_s.astype(float)
+    rsi = float(rsi_s.iloc[-1])
 
     above25 = close.iloc[-1] > e25.iloc[-1]
     above50 = close.iloc[-1] > e50.iloc[-1]
