@@ -1,45 +1,120 @@
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import dataclass
+from typing import Tuple
 
+from utils.screen_logic import rr_min_by_market, rday_min_by_setup
 from utils.util import clamp
+from utils.setup import SetupInfo
 
 
-def rr(entry: float, sl: float, tp: float) -> float:
-    risk = entry - sl
-    reward = tp - entry
-    if risk <= 0:
-        return float("nan")
-    return float(reward / risk)
+@dataclass
+class EVInfo:
+    rr: float
+    structural_ev: float
+    adj_ev: float
+    expected_days: float
+    rday: float
+    rr_min: float
+    rday_min: float
+
+    # 追加（最新仕様）
+    cagr_score: float
+    expected_r: float
+    p_reach: float
+    time_penalty_pts: float
 
 
-def expected_days(entry: float, tp2: float, atr: float) -> float:
-    if atr <= 0:
-        return float("nan")
-    return float((tp2 - entry) / atr)
+def _reach_prob(setup: SetupInfo) -> float:
+    base = 0.35
+    base += 0.20 * float(setup.trend_strength)
+    base += 0.20 * float(setup.pullback_quality)
+
+    if setup.setup == "A1-Strong":
+        base += 0.06
+    elif setup.setup == "A1":
+        base += 0.03
+    elif setup.setup == "B":
+        base -= 0.05
+    elif setup.setup == "D":
+        base -= 0.10
+
+    return float(clamp(base, 0.20, 0.75))
 
 
-def turnover_efficiency(rr_value: float, exp_days: float) -> float:
-    if exp_days is None or not np.isfinite(exp_days) or exp_days <= 0:
-        return float("nan")
-    return float(rr_value / exp_days)
+def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
+    """CAGR寄与度一本化（TP1基準）。
+
+    - 期待RはTP1基準で固定
+    - CAGR寄与度 = (期待R × 到達確率) ÷ 想定日数
+    - 時間効率ペナルティ（完全機械）を減点として反映
+    - MarketScoreは撤退速度制御専用（選別ゲートにしない）
+      → 本関数ではスコアに直接掛けない
+    """
+    rr_min = float(rr_min_by_market(mkt_score))
+    rday_min = float(rday_min_by_setup(setup.setup))
+
+    rr = float(setup.rr)  # 表示・RR下限はTP2基準
+    expected_r = float(getattr(setup, "rr_tp1", rr))  # TP1基準（無い場合フォールバック）
+    expected_days = float(max(setup.expected_days, 0.5))  # TP1基準に揃えている
+
+    p = _reach_prob(setup)
+
+    # 時間効率ペナルティ（機械）
+    penalty = 0.0
+    if expected_days >= 6.0:
+        # 原則除外
+        return EVInfo(
+            rr=rr,
+            structural_ev=-999.0,
+            adj_ev=-999.0,
+            expected_days=expected_days,
+            rday=-999.0,
+            rr_min=rr_min,
+            rday_min=rday_min,
+            cagr_score=-999.0,
+            expected_r=expected_r,
+            p_reach=p,
+            time_penalty_pts=99.0,
+        )
+    if expected_days >= 5.0:
+        penalty = 10.0
+    elif expected_days >= 4.0:
+        penalty = 5.0
+
+    adj_ev = float(expected_r * p)  # 期待値（補正）
+    if setup.gu:
+        adj_ev -= 0.10
+    if macro_on:
+        adj_ev -= 0.08
+
+    adj_ev = float(clamp(adj_ev, -0.50, 2.50))
+    rday = float(adj_ev / max(expected_days, 1e-6))
+    cagr_score = float(rday - (penalty / 100.0))
+
+    # structural_ev は監視/ログ用（TP1基準に寄せる）
+    structural_ev = float(expected_r)
+
+    return EVInfo(
+        rr=rr,
+        structural_ev=structural_ev,
+        adj_ev=adj_ev,
+        expected_days=expected_days,
+        rday=rday,
+        rr_min=rr_min,
+        rday_min=rday_min,
+        cagr_score=cagr_score,
+        expected_r=expected_r,
+        p_reach=p,
+        time_penalty_pts=penalty,
+    )
 
 
-def adj_ev(struct_ev: float, market_score: int, macro_caution: bool, risk_on: bool) -> float:
-    x = float(struct_ev)
-
-    if market_score >= 75:
-        x *= 1.10
-    elif market_score >= 55:
-        x *= 1.00
-    elif market_score >= 45:
-        x *= 0.95
-    else:
-        x *= 0.90
-
-    if macro_caution and not risk_on:
-        x *= 0.90
-    elif macro_caution and risk_on:
-        x *= 0.95
-
-    return float(clamp(x, -2.0, 3.0))
+def pass_thresholds(setup: SetupInfo, ev: EVInfo) -> Tuple[bool, str]:
+    if ev.rr < ev.rr_min:
+        return False, "RR"
+    if ev.rday < ev.rday_min:
+        return False, "RDAY"
+    if ev.adj_ev < 0.50:
+        return False, "ADJEV"
+    return True, "OK"
