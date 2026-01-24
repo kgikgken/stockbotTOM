@@ -1,65 +1,60 @@
 from __future__ import annotations
 
 import os
-import datetime as dt
-from zoneinfo import ZoneInfo
-from typing import List, Dict, Optional
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
-JST = ZoneInfo("Asia/Tokyo")
+from utils.util import parse_event_datetime_jst
 
+EVENTS_PATH = "events.csv"
 
-def _parse_dt_jst(x: str) -> Optional[dt.datetime]:
-    if not isinstance(x, str) or not x.strip():
-        return None
-    x = x.strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
-        try:
-            d = dt.datetime.strptime(x, fmt)
-            if fmt in ("%Y-%m-%d", "%Y/%m/%d"):
-                d = d.replace(hour=0, minute=0)
-            return d.replace(tzinfo=JST)
-        except Exception:
-            pass
+def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
+    if not os.path.exists(path):
+        return []
     try:
-        d = dt.datetime.fromisoformat(x)
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=JST)
-        return d.astimezone(JST)
+        df = pd.read_csv(path)
     except Exception:
-        return None
-
-
-def load_events(csv_path: str = "events.csv") -> pd.DataFrame:
-    if not os.path.exists(csv_path):
-        return pd.DataFrame(columns=["name", "datetime_jst", "importance"])
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception:
-        return pd.DataFrame(columns=["name", "datetime_jst", "importance"])
-
-    cols = {c.lower(): c for c in df.columns}
-    name_col = cols.get("name") or cols.get("event") or df.columns[0]
-    dt_col = cols.get("datetime_jst") or cols.get("datetime") or cols.get("date") or df.columns[1]
-    imp_col = cols.get("importance") or cols.get("level")
-
-    out = pd.DataFrame()
-    out["name"] = df[name_col].astype(str)
-    out["datetime_jst"] = df[dt_col].astype(str)
-    out["importance"] = df[imp_col].astype(str) if imp_col in df.columns else "HIGH"
-
-    out["dt"] = out["datetime_jst"].apply(_parse_dt_jst)
-    out = out.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
+        return []
+    out: List[Dict[str, str]] = []
+    for _, row in df.iterrows():
+        label = str(row.get("label", "")).strip()
+        if not label:
+            continue
+        out.append(
+            {
+                "label": label,
+                "kind": str(row.get("kind", "")).strip(),
+                "date": str(row.get("date", "")).strip(),
+                "time": str(row.get("time", "")).strip(),
+                "datetime": str(row.get("datetime", "")).strip(),
+            }
+        )
     return out
 
+def build_event_section(today_date) -> Tuple[List[str], bool]:
+    """
+    直近（-1〜+2日）のイベントを警告に出す。
+    Macro警戒: kind == 'macro' のイベントが存在する場合 True
+    """
+    events = load_events()
+    warns: List[str] = []
+    macro_on = False
 
-def upcoming_important(events_df: pd.DataFrame, now_jst: dt.datetime, horizon_days: int = 2) -> List[Dict]:
-    if events_df is None or events_df.empty:
-        return []
-    end = now_jst + dt.timedelta(days=horizon_days)
-    sub = events_df[(events_df["dt"] >= now_jst) & (events_df["dt"] <= end)]
-    items: List[Dict] = []
-    for _, r in sub.iterrows():
-        items.append({"name": str(r["name"]), "dt": r["dt"]})
-    return items
+    for ev in events:
+        dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
+        if dt is None:
+            continue
+        d = dt.date()
+        delta = (d - today_date).days
+        if -1 <= delta <= 2:
+            when = "本日" if delta == 0 else ("直近" if delta < 0 else f"{delta}日後")
+            dt_disp = dt.strftime("%Y-%m-%d %H:%M JST")
+            warns.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
+            if str(ev.get("kind", "")).lower() == "macro":
+                macro_on = True
+
+    if not warns:
+        warns.append("- 特になし")
+
+    return warns, macro_on
