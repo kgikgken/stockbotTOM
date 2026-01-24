@@ -65,7 +65,7 @@ def build_candidates_block(cands: List[Dict]) -> str:
         lines.append("")
         lines.append("【形・行動】")
         lines.append(f"・形：{c['setup_label']}")
-        lines.append(f"・行動：{c.get('action', '指値で待つ（現値IN禁止）')}")
+        lines.append("・行動：指値で待つ（現値IN禁止）")
         lines.append("")
         lines.append("【エントリー】")
         lines.append(f"・指値目安（中央）：{fmt_yen(c['entry'])}")
@@ -76,18 +76,13 @@ def build_candidates_block(cands: List[Dict]) -> str:
         lines.append(f"・利確②：{fmt_yen(c['tp2'])}")
         lines.append("")
         lines.append("【指標（参考）】")
-        # RRは参考値としてTP2基準を表示し、スコアはTP1（期待R）を基準に計算
-        lines.append(f"・RR（参考）：{fmt_ratio(c['rr'], 2)}")
-        if 'expected_r' in c:
-            lines.append(f"・期待R（TP1基準）：{fmt_ratio(c['expected_r'], 2)}")
+        lines.append(f"・RR：{fmt_ratio(c['rr'], 2)}")
         lines.append(f"・期待値（補正）：{fmt_ratio(c['adj_ev'], 2)}")
         lines.append(f"・回転効率（目安）：{fmt_ratio(c['rday'], 2)}")
         lines.append(f"・想定日数（中央値）：{fmt_ratio(c['expected_days'], 1)}日")
-        if 'cagr_score' in c:
-            lines.append(f"・CAGR寄与度：{fmt_ratio(c['cagr_score'], 3)}")
         lines.append("")
 
-    lines.append("※ 用語：期待値（補正）=想定期待R（補正後）／回転効率=1日あたり想定R／CAGR寄与度=(期待R×到達確率)÷想定日数")
+    lines.append("※ 用語：期待値（補正）=想定期待R（補正後）／回転効率=1日あたり想定R")
     return "\n".join(lines).rstrip()
 
 
