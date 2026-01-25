@@ -8,7 +8,7 @@ import pandas as pd
 
 from utils.util import download_history_bulk, safe_float, is_abnormal_stock
 from utils.setup import build_setup_info, liquidity_filters
-from utils.rr_ev import calc_ev, pass_thresholds, apply_ev_to_setup, apply_ev_to_setup, pass_thresholds
+from utils.rr_ev import calc_ev, pass_thresholds
 from utils.diversify import apply_sector_cap, apply_corr_filter
 from utils.screen_logic import no_trade_conditions, max_display
 from utils.state import (
@@ -72,7 +72,6 @@ def run_screen(
     uni = _filter_earnings(uni, today_date)
     tickers = uni[tcol].astype(str).tolist()
     ohlc_map = download_history_bulk(tickers, period="260d", auto_adjust=True, group_size=200)
-    topix_df = download_history_bulk(["^TOPX"], period="260d", auto_adjust=True, group_size=1).get("^TOPX")
 
     # paper trade update
     update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
@@ -112,7 +111,6 @@ def run_screen(
             gu_cnt += 1
 
         ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
-        info = apply_ev_to_setup(info, ev)
         ok, _ = pass_thresholds(info, ev)
         if not ok:
             continue
@@ -129,14 +127,12 @@ def run_screen(
                 "tier": int(info.tier),
                 "entry_low": float(info.entry_low),
                 "entry_high": float(info.entry_high),
-                "entry_price": float(getattr(info, "entry_price", (info.entry_low + info.entry_high) / 2.0)),
                 "sl": float(info.sl),
                 "tp1": float(info.tp1),
                 "tp2": float(info.tp2),
                 "rr": float(ev.rr),
                 "struct_ev": float(ev.structural_ev),
                 "adj_ev": float(ev.adj_ev),
-                "cagr_contrib": float(getattr(ev, "cagr_contrib", -999.0)),
                 "expected_days": float(ev.expected_days),
                 "rday": float(ev.rday),
                 "gu": bool(info.gu),
@@ -145,7 +141,7 @@ def run_screen(
             }
         )
 
-    cands.sort(key=lambda x: (x.get("cagr_contrib", -999.0), x.get("adj_ev", -999.0)), reverse=True)
+    cands.sort(key=lambda x: (x["adj_ev"], x["rday"], x["rr"]), reverse=True)
     raw_n = len(cands)
 
     # diversify
@@ -161,7 +157,7 @@ def run_screen(
             if tier0:
                 pick = tier0[0]
                 final = [pick]
-                entry_price = (pick["entry_low"] + pick["entry_high"]) / 2.0
+                entry_price = float(pick.get("entry_price", (pick["entry_low"] + pick["entry_high"]) / 2.0))
                 record_paper_trade(
                     state,
                     bucket="tier0_exception",
@@ -188,7 +184,7 @@ def run_screen(
     if not in_cooldown(state, "distortion_until"):
         internal = [c for c in cands if c.get("setup") in ("A1-Strong", "A2")][:2]
         for c in internal:
-            entry_price = (c["entry_low"] + c["entry_high"]) / 2.0
+            entry_price = float(c.get("entry_price", (c["entry_low"] + c["entry_high"]) / 2.0))
             record_paper_trade(
                 state,
                 bucket="distortion",
