@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, Tuple, List
 import pandas as pd
 
 from .util import rsi14, atr14, safe_float
-from .features import fetch_history
+from utils.features import fetch_history
 
 
 @dataclass
