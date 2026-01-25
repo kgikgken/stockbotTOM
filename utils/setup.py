@@ -12,8 +12,6 @@ from utils.util import sma, rsi14, atr14, adv20, atr_pct_last, safe_float, clamp
 class SetupInfo:
     setup: str
     tier: int
-    ticker: Optional[str] = None
-    sector: Optional[str] = None
     entry_low: float
     entry_high: float
     sl: float
@@ -26,24 +24,10 @@ class SetupInfo:
     pullback_quality: float
     gu: bool
     breakout_line: Optional[float] = None
-
-    @property
-    def entry_price(self) -> float:
-        """Central limit price used for execution (中央指値)."""
-        return float((self.entry_low + self.entry_high) / 2.0)
-
-    @property
-    def rr_tp1(self) -> float:
-        """RR to TP1 in R units (TP1到達時R)."""
-        denom = (self.entry_price - float(self.sl))
-        if denom <= 0:
-            return 0.0
-        return float((float(self.tp1) - self.entry_price) / denom)
-
-    @property
-    def expected_r(self) -> float:
-        """Expected R (固定): TP1基準のRR (分割利確はスコア外)."""
-        return float(self.rr_tp1)
+    # Central limit price used for execution (midpoint of entry band).
+    entry_price: Optional[float] = None
+    # RR at TP1 (used as expected R basis for CAGR contribution score).
+    rr_tp1: Optional[float] = None
 
 def _trend_strength(c: pd.Series, ma20: pd.Series, ma50: pd.Series) -> float:
     c_last = safe_float(c.iloc[-1], np.nan)
@@ -176,47 +160,50 @@ def liquidity_filters(df: pd.DataFrame, price_min=200.0, price_max=15000.0, adv_
         ok = False
     return ok, float(price), float(adv), float(atrp)
 
-def structure_sl_tp(df: pd.DataFrame, entry_mid: float, atr: float, macro_on: bool):
+def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: bool):
     lookback = 12
     low = float(df["Low"].astype(float).tail(lookback).min())
-    sl1 = entry_mid - 1.2 * atr
+    sl1 = entry_price - 1.2 * atr
     sl = min(sl1, low - 0.1 * atr)
 
-    sl = min(sl, entry_mid * (1.0 - 0.02))
-    sl = max(sl, entry_mid * (1.0 - 0.10))
+    sl = min(sl, entry_price * (1.0 - 0.02))
+    sl = max(sl, entry_price * (1.0 - 0.10))
 
-    risk = max(entry_mid - sl, 0.01)
+    risk = max(entry_price - sl, 0.01)
 
     rr_target = 2.6
     hi_window = 60 if len(df) >= 60 else len(df)
     high_60 = float(df["Close"].astype(float).tail(hi_window).max())
-    tp2_raw = entry_mid + rr_target * risk
-    tp2 = min(tp2_raw, high_60 * 0.995, entry_mid * (1.0 + 0.35))
+    tp2_raw = entry_price + rr_target * risk
+    tp2 = min(tp2_raw, high_60 * 0.995, entry_price * (1.0 + 0.35))
 
-    tp2_min = entry_mid + 2.0 * risk
+    tp2_min = entry_price + 2.0 * risk
     if tp2 < tp2_min:
         tp2 = tp2_min
 
-    tp2_max = entry_mid + 3.5 * risk
+    tp2_max = entry_price + 3.5 * risk
     tp2 = min(tp2, tp2_max)
 
     if macro_on:
-        tp2 = entry_mid + (tp2 - entry_mid) * 0.85
+        tp2 = entry_price + (tp2 - entry_price) * 0.85
 
-    tp1 = entry_mid + 1.5 * risk
-    rr = (tp2 - entry_mid) / risk
-    exp_days = (tp2 - entry_mid) / max(atr, 1e-6)
+    tp1 = entry_price + 1.5 * risk
+    rr = (tp2 - entry_price) / risk
+    exp_days = (tp2 - entry_price) / max(atr, 1e-6)
 
     return float(sl), float(tp1), float(tp2), float(rr), float(exp_days)
 
 def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
     setup, tier = detect_setup(df)
     lo, hi, atr, breakout_line = entry_band(df, setup)
-    entry_mid = (lo + hi) / 2.0
+    entry_price = (lo + hi) / 2.0
 
     gu = gu_flag(df, atr)
-    sl, tp1, tp2, rr, exp_days = structure_sl_tp(df, entry_mid, atr, macro_on=macro_on)
-    rday = rr / max(exp_days, 1e-6)
+    sl, tp1, tp2, rr, exp_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on)
+    # RR at TP1 defines expected R basis (TP1 fixed).
+    denom = max(entry_price - sl, 1e-9)
+    rr_tp1 = max((tp1 - entry_price) / denom, 0.0)
+    rday = rr_tp1 / max(exp_days, 1e-6)
 
     c = df["Close"].astype(float)
     ma20 = sma(c, 20)
@@ -225,6 +212,8 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
     pq = _pullback_quality(c, ma20, ma50, atr, setup)
 
     return SetupInfo(
+        entry_price=entry_price,
+        rr_tp1=rr_tp1,
         setup=setup,
         tier=int(tier),
         entry_low=float(lo),
