@@ -83,7 +83,7 @@ def run_screen(
         if (kpi["median_r"] < -0.10) or (kpi["exp_gap"] < -0.30) or (kpi["neg_streak"] >= 3):
             set_cooldown_days(state, "distortion_until", days=4)
 
-    no_trade = no_trade_conditions(int(mkt_score), float(delta3))
+    no_trade = no_trade_conditions(int(mkt_score), float(delta3), bool(macro_on))
 
     cands: List[Dict] = []
     gu_cnt = 0
