@@ -94,7 +94,7 @@ def build_report(
             if c.get("gu"):
                 action = "寄り後に再判定（GU）"
 
-            entry_mid = float(c.get("entry_mid", (float(c["entry_low"]) + float(c["entry_high"])) / 2.0))
+            entry_price = float(c.get("entry_price", (float(c["entry_low"]) + float(c["entry_high"])) / 2.0))
 
             # 4ブロック
             lines.append("【形・行動】")
@@ -103,7 +103,7 @@ def build_report(
             lines.append("")
 
             lines.append("【エントリー】")
-            lines.append(f"・指値目安（中央）：{_fmt_yen(entry_mid)} 円")
+            lines.append(f"・指値目安（中央）：{_fmt_yen(entry_price)} 円")
             lines.append(f"・損切り：{_fmt_yen(c['sl'])} 円")
             lines.append("")
 
