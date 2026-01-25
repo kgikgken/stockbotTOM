@@ -8,7 +8,7 @@ import pandas as pd
 
 from utils.util import download_history_bulk, safe_float, is_abnormal_stock
 from utils.setup import build_setup_info, liquidity_filters
-from utils.rr_ev import calc_ev, pass_thresholds
+from utils.rr_ev import calc_ev
 from utils.diversify import apply_sector_cap, apply_corr_filter
 from utils.screen_logic import no_trade_conditions, max_display
 from utils.state import (
@@ -110,7 +110,7 @@ def run_screen(
         if info.gu:
             gu_cnt += 1
 
-        ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
+        ev, passes, debug = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
         ok, _ = pass_thresholds(info, ev)
         if not ok:
             continue
@@ -157,13 +157,13 @@ def run_screen(
             if tier0:
                 pick = tier0[0]
                 final = [pick]
-                entry_price = pick.get("entry_price", (pick["entry_low"] + pick["entry_high"]) / 2.0)
+                entry_mid = (pick["entry_low"] + pick["entry_high"]) / 2.0
                 record_paper_trade(
                     state,
                     bucket="tier0_exception",
                     ticker=pick["ticker"],
                     date_str=today_str,
-                    entry=float(entry_price),
+                    entry=entry_mid,
                     sl=pick["sl"],
                     tp2=pick["tp2"],
                     expected_r=float(pick["rr"]),
@@ -184,13 +184,13 @@ def run_screen(
     if not in_cooldown(state, "distortion_until"):
         internal = [c for c in cands if c.get("setup") in ("A1-Strong", "A2")][:2]
         for c in internal:
-            entry_price = c.get("entry_price", (c["entry_low"] + c["entry_high"]) / 2.0)
+            entry_mid = (c["entry_low"] + c["entry_high"]) / 2.0
             record_paper_trade(
                 state,
                 bucket="distortion",
                 ticker=c["ticker"],
                 date_str=today_str,
-                entry=float(entry_price),
+                entry=entry_mid,
                 sl=c["sl"],
                 tp2=c["tp2"],
                 expected_r=float(c["rr"]),
