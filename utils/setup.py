@@ -12,6 +12,8 @@ from utils.util import sma, rsi14, atr14, adv20, atr_pct_last, safe_float, clamp
 class SetupInfo:
     setup: str
     tier: int
+    ticker: Optional[str] = None
+    sector: Optional[str] = None
     entry_low: float
     entry_high: float
     sl: float
@@ -24,6 +26,24 @@ class SetupInfo:
     pullback_quality: float
     gu: bool
     breakout_line: Optional[float] = None
+
+    @property
+    def entry_price(self) -> float:
+        """Central limit price used for execution (中央指値)."""
+        return float((self.entry_low + self.entry_high) / 2.0)
+
+    @property
+    def rr_tp1(self) -> float:
+        """RR to TP1 in R units (TP1到達時R)."""
+        denom = (self.entry_price - float(self.sl))
+        if denom <= 0:
+            return 0.0
+        return float((float(self.tp1) - self.entry_price) / denom)
+
+    @property
+    def expected_r(self) -> float:
+        """Expected R (固定): TP1基準のRR (分割利確はスコア外)."""
+        return float(self.rr_tp1)
 
 def _trend_strength(c: pd.Series, ma20: pd.Series, ma50: pd.Series) -> float:
     c_last = safe_float(c.iloc[-1], np.nan)
