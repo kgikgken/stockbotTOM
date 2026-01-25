@@ -8,7 +8,7 @@ import pandas as pd
 
 from utils.util import download_history_bulk, safe_float, is_abnormal_stock
 from utils.setup import build_setup_info, liquidity_filters
-from utils.rr_ev import calc_ev
+from utils.rr_ev import calc_ev, pass_thresholds
 from utils.diversify import apply_sector_cap, apply_corr_filter
 from utils.screen_logic import no_trade_conditions, max_display
 from utils.state import (
@@ -124,8 +124,6 @@ def run_screen(
                 "name": name,
                 "sector": sector,
                 "setup": info.setup,
-                "setup_jp": getattr(info, "setup_jp", info.setup),
-                "strategy": strategy_of_setup(info.setup),
                 "tier": int(info.tier),
                 "entry_low": float(info.entry_low),
                 "entry_high": float(info.entry_high),
@@ -143,7 +141,7 @@ def run_screen(
             }
         )
 
-    cands.sort(key=lambda x: (x.get("cagr_pt", -1e9), x.get("rotation_eff", 0.0), x.get("exp_value", 0.0)), reverse=True)
+    cands.sort(key=lambda x: (x["adj_ev"], x["rday"], x["rr"]), reverse=True)
     raw_n = len(cands)
 
     # diversify
@@ -159,13 +157,13 @@ def run_screen(
             if tier0:
                 pick = tier0[0]
                 final = [pick]
-                entry_mid = (pick["entry_low"] + pick["entry_high"]) / 2.0
+                entry_price = pick.get("entry_price", (pick["entry_low"] + pick["entry_high"]) / 2.0)
                 record_paper_trade(
                     state,
                     bucket="tier0_exception",
                     ticker=pick["ticker"],
                     date_str=today_str,
-                    entry=entry_mid,
+                    entry=float(entry_price),
                     sl=pick["sl"],
                     tp2=pick["tp2"],
                     expected_r=float(pick["rr"]),
@@ -186,13 +184,13 @@ def run_screen(
     if not in_cooldown(state, "distortion_until"):
         internal = [c for c in cands if c.get("setup") in ("A1-Strong", "A2")][:2]
         for c in internal:
-            entry_mid = (c["entry_low"] + c["entry_high"]) / 2.0
+            entry_price = c.get("entry_price", (c["entry_low"] + c["entry_high"]) / 2.0)
             record_paper_trade(
                 state,
                 bucket="distortion",
                 ticker=c["ticker"],
                 date_str=today_str,
-                entry=entry_mid,
+                entry=float(entry_price),
                 sl=c["sl"],
                 tp2=c["tp2"],
                 expected_r=float(c["rr"]),
@@ -216,20 +214,5 @@ def run_screen(
         "avgAdjEV": float(avg_adj),
         "GU": float(gu_ratio),
     }
-
-
-    # --- 戦略別 最大枠（日次自動制御） ---
-    caps = strategy_caps(float(meta.get("market_score", 50.0)), str(meta.get("index_vol_regime", "MID")))
-    bucket = {"PULLBACK": [], "BREAKOUT": [], "DISTORT": []}
-    for c in final:
-        bucket.setdefault(c.get("strategy", "PULLBACK"), []).append(c)
-
-    capped: List[Dict] = []
-    for k in ["PULLBACK", "BREAKOUT", "DISTORT"]:
-        capped.extend(bucket.get(k, [])[: int(caps.get(k, 0))])
-
-    # 余り枠はCAGR寄与度順で埋める（最大5表示を前提）
-    capped.sort(key=lambda x: x.get("cagr_pt", -1e9), reverse=True)
-    final = capped[: max_display()]
 
     return final, meta, ohlc_map
