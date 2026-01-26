@@ -26,23 +26,9 @@ def max_display(macro_on: bool) -> int:
 def weekly_max_new() -> int:
     return 3
 
-def no_trade_conditions(market_score: float, delta3: float, macro_warn: bool) -> Tuple[bool, Optional[str]]:
-    """NO-TRADE is an *emergency brake* only.
-
-    MarketScore is primarily for exit-speed control (not a gate). Therefore,
-    this function triggers NO-TRADE only in extreme regimes.
-    """
-    if macro_warn and market_score < 40:
-        return True, "重要イベント×低地合いのため新規停止"
-
-    # Extreme risk-off
-    if market_score < 30:
-        return True, "地合いが極端に悪いため新規停止"
-
-    if market_score < 40 and delta3 <= -10:
-        return True, "地合い悪化が急なため新規停止"
-
-    return False, None
-
-
-
+def no_trade_conditions(mkt_score: int, delta3: float) -> bool:
+    if mkt_score < 45:
+        return True
+    if delta3 <= -5.0 and mkt_score < 55:
+        return True
+    return False
