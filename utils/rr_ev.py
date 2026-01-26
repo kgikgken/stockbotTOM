@@ -42,80 +42,56 @@ def _reach_prob(setup: SetupInfo) -> float:
     return float(clamp(base, 0.20, 0.75))
 
 
-def calc_ev(setup: SetupInfo, rr_min: float, macro_warn: bool, market_score: float) -> EVInfo:
-    """Compute expected value metrics used for filtering and ranking.
+def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
+    """CAGR寄与度一本化（TP1基準）。
 
-    Latest spec alignment:
-      - RR uses TP1 basis (expectedR).
-      - 期待値（補正） = 期待R(TP1) × 到達確率 × 各種補正（Macro/GU/環境）
-      - 回転効率（R/日） = 期待R(TP1) ÷ 想定日数（確率は掛けない）
-      - CAGR寄与度 = (期待R(TP1) × 到達確率) ÷ 想定日数 に時間効率ペナルティを適用
+    - 期待RはTP1基準で固定
+    - CAGR寄与度 = (期待R × 到達確率) ÷ 想定日数
+    - 時間効率ペナルティ（完全機械）を減点として反映
+    - MarketScoreは撤退速度制御専用（選別ゲートにしない）
+      → 本関数ではスコアに直接掛けない
     """
-    expected_r = safe_float(setup.rr_tp1, np.nan)
-    if not np.isfinite(expected_r) or expected_r <= 0:
-        expected_r = safe_float(setup.rr, 0.0)
+    rr_min = float(rr_min_by_market(mkt_score))
+    rday_min = float(rday_min_by_setup(setup.setup))
 
-    days = max(0.5, safe_float(setup.expected_days, 3.0))
+    # Latest spec: RRはTP1基準（=期待Rの基準）。TP2は参考表示のみ。
+    expected_r = float(setup.rr)
+    rr = expected_r
+    expected_days = float(max(setup.expected_days, 0.5))
 
-    # Reach probability proxy (bounded). Keep it simple and stable.
-    base = 0.35
-    p_reach = base + 0.30 * clamp(setup.trend_strength, 0.0, 1.0) + 0.25 * clamp(setup.pullback_quality, 0.0, 1.0)
-    if setup.setup.endswith("Strong"):
-        p_reach += 0.05
-    if setup.setup.startswith("B"):
-        p_reach -= 0.05  # breakouts are faster but lower hit-rate
+    p = _reach_prob(setup)
+
+    # 時間効率ペナルティ（機械）
+    penalty = 0.0
+    if expected_days >= 6.0:
+        # 原則除外
+        return EVInfo(
+            rr=rr,
+            structural_ev=-999.0,
+            adj_ev=-999.0,
+            expected_days=expected_days,
+            rday=-999.0,
+            rr_min=rr_min,
+            rday_min=rday_min,
+            cagr_score=-999.0,
+            expected_r=expected_r,
+            p_reach=p,
+            time_penalty_pts=99.0,
+        )
+    if expected_days >= 5.0:
+        penalty = 10.0
+    elif expected_days >= 4.0:
+        penalty = 5.0
+
+    adj_ev = float(expected_r * p)  # 期待値（補正）
     if setup.gu:
-        p_reach -= 0.05
-    p_reach = float(clamp(p_reach, 0.20, 0.85))
+        adj_ev -= 0.10
+    if macro_on:
+        adj_ev -= 0.08
 
-    # MarketScore is NOT a gate: only a mild multiplier for "補正" (risk-off reduces).
-    m_mult = 1.0
-    if market_score < 45:
-        m_mult = 0.85
-    elif market_score < 55:
-        m_mult = 0.93
-    elif market_score > 70:
-        m_mult = 1.03
-
-    # Macro / GU penalty (display-side only)
-    macro_mult = 0.92 if macro_warn else 1.0
-    gu_mult = 0.95 if setup.gu else 1.0
-
-    # Raw EV components
-    adj_ev = float(expected_r * p_reach * m_mult * macro_mult * gu_mult)
-    rday = float(expected_r / days)
-
-    # Time-efficiency penalty (mechanical)
-    penalty_pct = 0.0
-    if days >= 6.0:
-        penalty_pct = 1.0  # exclude upstream; keep score 0
-    elif days >= 5.0:
-        penalty_pct = 0.10
-    elif days >= 4.0:
-        penalty_pct = 0.05
-
-    cagr_contrib = float((expected_r * p_reach) / days) if penalty_pct < 1.0 else 0.0
-    cagr_score = float(cagr_contrib * (1.0 - penalty_pct))
-
-    rr = float(expected_r)
-
-    no_trade = False
-    no_trade_reason = None
-    # Basic "minimum RR" filter (environment-adjusted upstream)
-    if rr < rr_min:
-        no_trade = True
-        no_trade_reason = "RR下限未満"
-
-    return EVInfo(
-        rr=rr,
-        adj_ev=adj_ev,
-        rday=rday,
-        expected_days=float(days),
-        p_reach=p_reach,
-        cagr_score=cagr_score,
-        no_trade=no_trade,
-        no_trade_reason=no_trade_reason,
-    )
+    adj_ev = float(clamp(adj_ev, -0.50, 2.50))
+    rday = float(adj_ev / max(expected_days, 1e-6))
+    cagr_score = float(rday - (penalty / 100.0))
 
     # structural_ev は監視/ログ用（TP1基準に寄せる）
     structural_ev = float(expected_r)
