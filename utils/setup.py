@@ -197,9 +197,11 @@ def structure_sl_tp(
     near_breakout = entry_price >= (0.97 * float(high_60))
     tp1_raw = float(high_60) if near_breakout else float(high_20)
 
-    # Clamp TP1 to avoid unrealistic targets.
-    tp1_min = entry_price + 0.8 * risk
-    tp1_max = min(entry_price + 2.5 * risk, entry_price + 4.0 * atr)
+    # Clamp TP1 to avoid unrealistic targets, but keep dispersion.
+    # NOTE: Older builds used tp1_max=2.5*risk which often saturated RR at 2.5.
+    tp1_min = entry_price + 0.9 * risk
+    rr_cap = 3.2 if near_breakout else 3.0
+    tp1_max = min(entry_price + rr_cap * risk, entry_price + 6.0 * atr)
     tp1 = float(np.clip(tp1_raw, tp1_min, tp1_max))
 
     # TP2: reference only (small extension), also clamped.
@@ -208,8 +210,9 @@ def structure_sl_tp(
     tp2 = float(np.clip(tp2_raw, tp1 + 0.2 * risk, tp2_max))
 
     # Conservative expected days based on TP1 distance.
+    # Conservative expected days based on TP1 distance (ATR units).
     base_days = (tp1 - entry_price) / max(1e-6, atr)
-    expected_days = float(clamp(base_days * 1.15, 1.0, 7.0))
+    expected_days = float(clamp(base_days * 1.20, 1.0, 7.0))
 
     return float(sl), float(tp1), float(tp2), float(expected_days)
 
