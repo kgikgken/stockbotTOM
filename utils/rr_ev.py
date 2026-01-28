@@ -26,20 +26,34 @@ class EVInfo:
 
 
 def _reach_prob(setup: SetupInfo) -> float:
-    base = 0.35
-    base += 0.20 * float(setup.trend_strength)
-    base += 0.20 * float(setup.pullback_quality)
+    """TP1到達確率のラフ推定。
+
+    目的：スコアを横並びにしないための“分散”を確保しつつ、
+    過度な自由度（ブラックボックス化）を増やさない。
+
+    - trend_strength / pullback_quality は [0.8..1.2] 近傍のため、
+      そのまま足すと上限に張り付きやすい。
+    - ここでは 0.8 を基準に正規化し、セットアップ別に小さなバイアスのみ付与。
+    """
+
+    # Normalize 0.8..1.2 -> 0..1
+    t = float(clamp((float(setup.trend_strength) - 0.8) / 0.4, 0.0, 1.0))
+    q = float(clamp((float(setup.pullback_quality) - 0.8) / 0.4, 0.0, 1.0))
+
+    base = 0.28 + 0.25 * t + 0.20 * q
 
     if setup.setup == "A1-Strong":
-        base += 0.06
+        base += 0.08
     elif setup.setup == "A1":
-        base += 0.03
+        base += 0.05
+    elif setup.setup == "A2":
+        base += 0.02
     elif setup.setup == "B":
-        base -= 0.05
+        base -= 0.03
     elif setup.setup == "D":
-        base -= 0.10
+        base -= 0.08
 
-    return float(clamp(base, 0.20, 0.75))
+    return float(clamp(base, 0.15, 0.80))
 
 
 def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
