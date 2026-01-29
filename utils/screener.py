@@ -127,6 +127,7 @@ def run_screen(
                 "tier": int(info.tier),
                 "entry_low": float(info.entry_low),
                 "entry_high": float(info.entry_high),
+                "entry_price": float(info.entry_price) if info.entry_price is not None else float((info.entry_low+info.entry_high)/2.0),
                 "sl": float(info.sl),
                 "tp1": float(info.tp1),
                 "tp2": float(info.tp2),
@@ -141,7 +142,17 @@ def run_screen(
             }
         )
 
-    cands.sort(key=lambda x: (x["adj_ev"], x["rday"], x["rr"]), reverse=True)
+    cands.sort(
+        key=lambda x: (
+            -x.get("adj_ev", 0.0),                # CAGR寄与度（高い順）
+            x.get("tier", 9),                     # Tier（小さい順）
+            -x.get("rday", 0.0),                  # 回転効率（高い順）
+            -x.get("rr", 0.0),                    # 期待R（高い順）
+            x.get("expected_days", 9.0),          # 想定日数（短い順）
+            -x.get("adv", 0.0),                   # 流動性（高い順）
+            x.get("code", ""),                    # 安定ソート
+        )
+    )
     raw_n = len(cands)
 
     # diversify
