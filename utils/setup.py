@@ -160,80 +160,62 @@ def liquidity_filters(df: pd.DataFrame, price_min=200.0, price_max=15000.0, adv_
         ok = False
     return ok, float(price), float(adv), float(atrp)
 
-def structure_sl_tp(
-    df: pd.DataFrame,
-    entry_price: float,
-    atr: float,
-    macro_on: bool,
-) -> Tuple[float, float, float, float]:
-    """Compute SL / TP targets and expected holding days (median-like estimate).
+def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: bool):
+    """Compute SL/TP targets.
 
     Latest spec alignment:
-      - Expected R is defined at TP1 (TP1基準). RR shown uses TP1.
-      - TP2 is reference only (not used for scoring).
-      - expected_days is conservative, derived from TP1 distance vs ATR.
-      - Keep behavior deterministic and execution-oriented.
+      - TP1 is the expected-R basis for scoring (RR at TP1 varies by structure).
+      - TP2 is reference only (not used for score), and is kept conservative.
+      - expected_days is conservative and tied to TP1 distance and ATR.
     """
     atr = float(atr) if np.isfinite(atr) and atr > 0 else 1.0
 
-    # SL: prefer recent local swing low; fallback to ATR-based.
-    low_10 = safe_float(df["Low"].tail(10).min(), np.nan)
+    # SL: prefer recent swing low, otherwise ATR-based.
+    low_10 = safe_float(df["Low"].astype(float).tail(10).min(), np.nan)
     sl = entry_price - 1.0 * atr
     if np.isfinite(low_10):
-        # do not set SL too tight: at least 0.8ATR below entry
         sl = min(float(low_10), entry_price - 0.8 * atr)
 
+    sl = float(sl)
     risk = max(1e-6, entry_price - sl)
 
-    # TP1: structural target (recent swing high / range high).
-    high_20 = safe_float(df["High"].tail(20).max(), np.nan)
-    high_60 = safe_float(df["High"].tail(60).max(), np.nan) if len(df) >= 60 else high_20
-    if not np.isfinite(high_20):
-        high_20 = entry_price + 1.5 * risk
-    if not np.isfinite(high_60):
-        high_60 = high_20
+    high_20 = float(df["High"].astype(float).tail(20).max())
+    high_60 = float(df["High"].astype(float).tail(60).max()) if len(df) >= 60 else high_20
 
-    # If near 60d high, treat as breakout-like and use 60d high as reference.
-    near_breakout = entry_price >= (0.97 * float(high_60))
-    tp1_raw = float(high_60) if near_breakout else float(high_20)
+    # Breakout-like if entry is close to 60d high.
+    near_breakout = bool(entry_price >= 0.97 * high_60)
+    tp1_raw = high_60 if near_breakout else high_20
 
-    # Clamp TP1 to avoid unrealistic targets, but keep dispersion.
-    # NOTE: Older builds used tp1_max=2.5*risk which often saturated RR at 2.5.
-    tp1_min = entry_price + 0.9 * risk
-    rr_cap = 3.2 if near_breakout else 3.0
-    tp1_max = min(entry_price + rr_cap * risk, entry_price + 6.0 * atr)
+    # Clamp TP1 to avoid unrealistic targets (structure first, sanity second).
+    tp1_min = entry_price + 0.8 * risk
+    tp1_max = min(entry_price + 2.5 * risk, entry_price + 4.0 * atr)
     tp1 = float(np.clip(tp1_raw, tp1_min, tp1_max))
 
-    # TP2: reference only (small extension), also clamped.
+    # TP2: reference only.
     tp2_raw = tp1 + 0.7 * risk
     tp2_max = entry_price + 5.5 * atr
     tp2 = float(np.clip(tp2_raw, tp1 + 0.2 * risk, tp2_max))
 
-    # Conservative expected days based on TP1 distance.
-    # Conservative expected days based on TP1 distance (ATR units).
-    base_days = (tp1 - entry_price) / max(1e-6, atr)
-    expected_days = float(clamp(base_days * 1.20, 1.0, 7.0))
+    rr_tp2 = float((tp2 - entry_price) / risk)
 
-    return float(sl), float(tp1), float(tp2), float(expected_days)
+    # Conservative expected days based on TP1 distance.
+    base_days = (tp1 - entry_price) / max(1e-6, atr)
+    expected_days = float(clamp(base_days * 1.15, 1.0, 7.0))
+
+    return float(sl), float(tp1), float(tp2), float(rr_tp2), float(expected_days)
+
 
 def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
     setup, tier = detect_setup(df)
     lo, hi, atr, breakout_line = entry_band(df, setup)
-    entry_price = float((lo + hi) / 2.0)
+    entry_price = (lo + hi) / 2.0
 
     gu = gu_flag(df, atr)
-
-    sl, tp1, tp2, exp_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on)
-
-    # RR at TP1 defines expected R basis (TP1基準).
+    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on)
+    # RR at TP1 defines expected R basis (TP1 fixed).
     denom = max(entry_price - sl, 1e-9)
     rr_tp1 = max((tp1 - entry_price) / denom, 0.0)
-
-    # Display RR is TP1 basis (期待Rの基準).
-    rr_display = float(rr_tp1)
-
-    # R/day is a rough speed proxy; use a small floor to avoid explosion.
-    rday = float(rr_display / max(0.5, exp_days))
+    rday = rr_tp1 / max(exp_days, 1e-6)
 
     c = df["Close"].astype(float)
     ma20 = sma(c, 20)
@@ -242,8 +224,8 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
     pq = _pullback_quality(c, ma20, ma50, atr, setup)
 
     return SetupInfo(
-        entry_price=float(entry_price),
-        rr_tp1=float(rr_tp1),
+        entry_price=entry_price,
+        rr_tp1=rr_tp1,
         setup=setup,
         tier=int(tier),
         entry_low=float(lo),
@@ -251,7 +233,7 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
         sl=float(sl),
         tp2=float(tp2),
         tp1=float(tp1),
-        rr=float(rr_display),
+        rr=float(rr),
         expected_days=float(exp_days),
         rday=float(rday),
         trend_strength=float(ts),
