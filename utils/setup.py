@@ -160,84 +160,128 @@ def liquidity_filters(df: pd.DataFrame, price_min=200.0, price_max=15000.0, adv_
         ok = False
     return ok, float(price), float(adv), float(atrp)
 
-def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: bool):
-    """Compute SL/TP targets.
+def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: bool) -> Tuple[float, float, float, float, float]:
+    """Compute SL/TP targets and a conservative expected holding days.
 
-    Latest spec alignment:
-      - TP1 is the expected-R basis for scoring (RR at TP1 varies by structure).
-      - TP2 is reference only (not used for score), and is kept conservative.
-      - expected_days is conservative and tied to TP1 distance and ATR.
+    Spec alignment:
+      - 期待RはTP1基準（RR(TP1)）で固定する。
+      - TP1は「構造目標」（直近の重要高値/ブレイク基準）を優先し、無理に同一RRへクリップしない。
+      - 想定日数はTP1までの距離(ATR換算)から保守的に算出し、1〜7日にクランプする。
+      - TP2は参考表示のみ（スコアには使わない）。
     """
     atr = float(atr) if np.isfinite(atr) and atr > 0 else 1.0
 
-    # SL: prefer recent swing low, otherwise ATR-based.
-    low_10 = safe_float(df["Low"].astype(float).tail(10).min(), np.nan)
-    sl = entry_price - 1.0 * atr
+    # --- SL: 直近の押し安値を優先（なければATR基準） ---
+    low_10 = safe_float(df["Low"].tail(10).min(), np.nan)
+    sl = entry_price - 1.1 * atr
     if np.isfinite(low_10):
-        sl = min(float(low_10), entry_price - 0.8 * atr)
+        sl = min(float(low_10), entry_price - 0.9 * atr)
 
-    sl = float(sl)
     risk = max(1e-6, entry_price - sl)
 
-    high_20 = float(df["High"].astype(float).tail(20).max())
-    high_60 = float(df["High"].astype(float).tail(60).max()) if len(df) >= 60 else high_20
+    # --- TP1: 構造目標（20日高値 / 60日高値 / ブレイクライン） ---
+    high_20 = safe_float(df["High"].tail(20).max(), np.nan)
+    high_60 = safe_float(df["High"].tail(60).max(), np.nan) if len(df) >= 60 else high_20
+    if not np.isfinite(high_20):
+        high_20 = entry_price + 2.0 * atr
+    if not np.isfinite(high_60):
+        high_60 = high_20
 
-    # Breakout-like if entry is close to 60d high.
-    near_breakout = bool(entry_price >= 0.97 * high_60)
-    tp1_raw = high_60 if near_breakout else high_20
+    # ブレイク寄りかどうか（60d高値に近い）
+    near_breakout = bool(entry_price >= 0.975 * float(high_60))
 
-    # Clamp TP1 to avoid unrealistic targets (structure first, sanity second).
-    tp1_min = entry_price + 0.8 * risk
-    tp1_max = min(entry_price + 2.5 * risk, entry_price + 4.0 * atr)
-    tp1 = float(np.clip(tp1_raw, tp1_min, tp1_max))
+    tp1_raw = float(high_60 if near_breakout else high_20)
 
-    # TP2: reference only.
-    tp2_raw = tp1 + 0.7 * risk
-    tp2_max = entry_price + 5.5 * atr
-    tp2 = float(np.clip(tp2_raw, tp1 + 0.2 * risk, tp2_max))
+    # 最低限の到達可能性（小さすぎるTPは捨てる）
+    tp1_floor = entry_price + max(0.8 * atr, 0.9 * risk)
+    tp1 = float(max(tp1_raw, tp1_floor))
 
-    rr_tp2 = float((tp2 - entry_price) / risk)
+    # 上限（極端な目標は抑制）
+    tp1_cap = entry_price + 6.0 * atr
+    tp1 = float(min(tp1, tp1_cap))
 
-    # Conservative expected days based on TP1 distance.
-    base_days = (tp1 - entry_price) / max(1e-6, atr)
-    expected_days = float(clamp(base_days * 1.15, 1.0, 7.0))
+    # --- TP2: 参考表示のみ ---
+    tp2 = float(min(tp1 + 0.8 * risk, entry_price + 8.0 * atr))
+    if tp2 <= tp1:
+        tp2 = float(tp1 + 0.3 * risk)
+
+    rr_tp2 = (tp2 - entry_price) / risk
+
+    # --- 想定日数: TP1距離(ATR)→日数へ（保守的） ---
+    # 目標距離が大きいほど日数が伸びる。係数は保守寄り。
+    dist_atr = (tp1 - entry_price) / max(1e-6, atr)
+    base_days = 0.9 + 0.85 * dist_atr
+    # macro_on でもゲートしないが、地合い警戒なら少し保守化
+    if macro_on:
+        base_days *= 1.10
+    expected_days = float(clamp(base_days, 1.0, 7.0))
 
     return float(sl), float(tp1), float(tp2), float(rr_tp2), float(expected_days)
 
-
-def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
-    setup, tier = detect_setup(df)
-    lo, hi, atr, breakout_line = entry_band(df, setup)
-    entry_price = (lo + hi) / 2.0
-
-    gu = gu_flag(df, atr)
-    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on)
-    # RR at TP1 defines expected R basis (TP1 fixed).
-    denom = max(entry_price - sl, 1e-9)
-    rr_tp1 = max((tp1 - entry_price) / denom, 0.0)
-    rday = rr_tp1 / max(exp_days, 1e-6)
+def build_setup_info(df: pd.DataFrame, macro_on: bool) -> Optional[SetupInfo]:
+    det = detect_setup(df)
+    if det is None:
+        return None
+    setup, tier_hint = det
+    if setup == "NONE":
+        return None
 
     c = df["Close"].astype(float)
     ma20 = sma(c, 20)
     ma50 = sma(c, 50)
-    ts = _trend_strength(c, ma20, ma50)
-    pq = _pullback_quality(c, ma20, ma50, atr, setup)
+
+    atr_s = atr14(df)
+    atr_last = safe_float(atr_s.iloc[-1], np.nan)
+    if not np.isfinite(atr_last) or atr_last <= 0:
+        return None
+
+    entry_low, entry_high, atr_used, breakout_line = entry_band(df, setup)
+    if not (np.isfinite(entry_low) and np.isfinite(entry_high) and entry_high > entry_low):
+        return None
+
+    entry_price = float((entry_low + entry_high) / 2.0)
+
+    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(df, entry_price, atr_last, macro_on)
+
+    risk = max(1e-6, entry_price - sl)
+    rr_tp1 = float((tp1 - entry_price) / risk)
+
+    # 表示RRはTP1基準（期待R）
+    rr_display = rr_tp1
+
+    # 回転効率の素朴な初期値（最終はrr_ev側でCAGR寄与度として扱う）
+    rday = float(rr_display / max(0.5, expected_days))
+
+    # tier（仕様：A1-Strong=0, A1=1, A2/B=2）
+    if setup == "A1-Strong":
+        tier = 0
+    elif setup == "A1":
+        tier = 1
+    else:
+        tier = 2
+
+    # 簡易トレンド・押し目品質（確率推定に使う）
+    trend_strength = _trend_strength(c, ma20, ma50)
+    pullback_quality = _pullback_quality(c, ma20, ma50, atr_last, setup)
+
+    gu = gu_flag(df, atr_last)
 
     return SetupInfo(
-        entry_price=entry_price,
-        rr_tp1=rr_tp1,
-        setup=setup,
+        setup=str(setup),
         tier=int(tier),
-        entry_low=float(lo),
-        entry_high=float(hi),
+        entry_low=float(entry_low),
+        entry_high=float(entry_high),
         sl=float(sl),
         tp2=float(tp2),
         tp1=float(tp1),
-        rr=float(rr),
-        expected_days=float(exp_days),
+        rr=float(rr_display),
+        expected_days=float(expected_days),
         rday=float(rday),
-        trend_strength=float(ts),
-        pullback_quality=float(pq),
+        trend_strength=float(trend_strength),
+        pullback_quality=float(pullback_quality),
         gu=bool(gu),
-        breakout_line=breakout_line,
+        breakout_line=(float(breakout_line) if breakout_line is not None else None),
+        entry_price=float(entry_price),
+        rr_tp1=float(rr_tp1),
     )
+
