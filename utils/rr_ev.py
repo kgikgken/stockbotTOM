@@ -26,28 +26,50 @@ class EVInfo:
 
 
 def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
-    base = 0.35
-    base += 0.20 * float(setup.trend_strength)
-    base += 0.20 * float(setup.pullback_quality)
+    """TP1到達確率の簡易モデル。
+
+    目的：CAGR寄与度の分子（期待R×到達確率）に分散を作り、
+    "良い形"の中で優劣が付くようにする。
+
+    - 形の質（trend_strength / pullback_quality）
+    - RRの難易度（高RRほど到達しにくい）
+    - 想定日数（長いほど不確実性↑）
+    - 地合い（MarketScore）は弱めに補正
+    """
+
+    ts = float(setup.trend_strength)
+    pq = float(setup.pullback_quality)
+    rr = float(setup.rr)
+    days = float(max(setup.expected_days, 0.5))
+
+    base = 0.55
+    base += 0.12 * (ts - 1.0)
+    base += 0.10 * (pq - 1.0)
 
     if setup.setup == "A1-Strong":
-        base += 0.06
+        base += 0.04
     elif setup.setup == "A1":
-        base += 0.03
+        base += 0.02
+    elif setup.setup == "A2":
+        base -= 0.02
     elif setup.setup == "B":
-        base -= 0.05
-    elif setup.setup == "D":
-        base -= 0.10
+        base -= 0.06
 
-    p = float(clamp(base, 0.20, 0.75))
+    # RRが高いほど到達確率は下がる（難易度ペナルティ）
+    base -= 0.06 * max(0.0, rr - 2.0)
 
-    # 地合い補正（到達確率は地合いに依存するが、過剰反応は避ける）
+    # 日数が長いほど不確実性が増える
+    base -= 0.03 * max(0.0, days - 3.0)
+
+    p = float(clamp(base, 0.18, 0.85))
+
+    # 地合い補正（過剰反応は避ける）
     if mkt_score is not None:
         try:
             ms = float(mkt_score)
-            # 50を中立として±0.06の範囲で線形補正
-            adj = clamp((ms - 50.0) / 100.0, -0.06, 0.06)
-            p = float(clamp(p + adj, 0.18, 0.78))
+            # 50を中立として±0.08の範囲で線形補正
+            adj = clamp((ms - 50.0) / 100.0, -0.08, 0.08)
+            p = float(clamp(p + adj, 0.15, 0.88))
         except Exception:
             pass
 
