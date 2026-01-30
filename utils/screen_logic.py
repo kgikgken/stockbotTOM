@@ -26,7 +26,10 @@ def max_display(macro_on: bool) -> int:
 def weekly_max_new() -> int:
     return 3
 
-def no_trade_conditions(mkt_score: int, delta3: float) -> bool:
+def no_trade_conditions(mkt_score: int, delta3: float, macro_warn: bool = False) -> bool:
+    if macro_warn:
+        return True
+
     if mkt_score < 45:
         return True
     if delta3 <= -5.0 and mkt_score < 55:
