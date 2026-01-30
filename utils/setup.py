@@ -160,38 +160,68 @@ def liquidity_filters(df: pd.DataFrame, price_min=200.0, price_max=15000.0, adv_
         ok = False
     return ok, float(price), float(adv), float(atrp)
 
-def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: bool):
-    lookback = 12
-    low = float(df["Low"].astype(float).tail(lookback).min())
-    sl1 = entry_price - 1.2 * atr
-    sl = min(sl1, low - 0.1 * atr)
+def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: bool, setup: str):
+    """Compute structural SL/TP targets.
 
-    sl = min(sl, entry_price * (1.0 - 0.02))
-    sl = max(sl, entry_price * (1.0 - 0.10))
+    Latest spec alignment:
+      - Expected R uses RR(TP1) (TP1 is structural).
+      - TP2 is reference-only (not used for scoring).
+      - expected_days is conservative and tied to TP1 distance and ATR.
 
-    risk = max(entry_price - sl, 0.01)
+    Returns (sl, tp1, tp2, rr_tp2, expected_days)
+    """
+    atr = float(atr) if np.isfinite(atr) and atr > 0 else max(1.0, float(entry_price) * 0.015)
 
-    rr_target = 2.6
-    hi_window = 60 if len(df) >= 60 else len(df)
-    high_60 = float(df["Close"].astype(float).tail(hi_window).max())
-    tp2_raw = entry_price + rr_target * risk
-    tp2 = min(tp2_raw, high_60 * 0.995, entry_price * (1.0 + 0.35))
+    # SL: prefer recent swing low, otherwise ATR-based.
+    low_10 = safe_float(df["Low"].astype(float).tail(10).min(), np.nan)
+    sl = float(entry_price - 1.0 * atr)
+    if np.isfinite(low_10):
+        sl = float(min(low_10, entry_price - 0.8 * atr))
 
-    tp2_min = entry_price + 2.0 * risk
-    if tp2 < tp2_min:
-        tp2 = tp2_min
+    # Safety clamps: avoid too-tight / too-wide SL.
+    sl = float(min(sl, entry_price * (1.0 - 0.01)))
+    sl = float(max(sl, entry_price * (1.0 - 0.12)))
 
-    tp2_max = entry_price + 3.5 * risk
-    tp2 = min(tp2, tp2_max)
+    risk = max(1e-6, entry_price - sl)
+
+    high_20 = float(df["High"].astype(float).tail(20).max())
+    high_60 = float(df["High"].astype(float).tail(60).max()) if len(df) >= 60 else high_20
+
+    # Heuristic breakout context: near 60d high.
+    near_breakout = entry_price >= (0.97 * high_60)
+    tp1_raw = high_60 if near_breakout else high_20
+
+    # Clamp TP1 to realistic zone.
+    tp1_min = entry_price + 0.8 * risk
+    tp1_max = min(entry_price + 2.5 * risk, entry_price + 4.0 * atr)
+    tp1 = float(np.clip(tp1_raw, tp1_min, tp1_max))
+
+    # TP2: reference only.
+    tp2_raw = tp1 + 0.7 * risk
+    tp2_max = entry_price + 5.5 * atr
+    tp2 = float(np.clip(tp2_raw, tp1 + 0.2 * risk, tp2_max))
 
     if macro_on:
-        tp2 = entry_price + (tp2 - entry_price) * 0.85
+        # During macro caution, keep TP2 modest (display-only) to avoid overreach.
+        tp2 = float(entry_price + (tp2 - entry_price) * 0.90)
 
-    tp1 = entry_price + 1.5 * risk
-    rr = (tp2 - entry_price) / risk
-    exp_days = (tp2 - entry_price) / max(atr, 1e-6)
+    rr_tp2 = float((tp2 - entry_price) / risk)
 
-    return float(sl), float(tp1), float(tp2), float(rr), float(exp_days)
+    # Conservative expected days based on TP1 distance + setup floor (to prevent unrealistic 1.0d).
+    base_days = float((tp1 - entry_price) / max(1e-6, atr))
+    expected_days = float(base_days * 1.15)
+    floor_map = {
+        "A1-Strong": 2.2,
+        "A1": 2.4,
+        "A2": 2.8,
+        "B": 1.8,
+    }
+    expected_days = max(expected_days, float(floor_map.get(setup, 2.5)))
+    if macro_on:
+        expected_days += 0.2
+    expected_days = float(clamp(expected_days, 1.0, 7.0))
+
+    return float(sl), float(tp1), float(tp2), float(rr_tp2), float(expected_days)
 
 def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
     setup, tier = detect_setup(df)
@@ -199,7 +229,7 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
     entry_price = (lo + hi) / 2.0
 
     gu = gu_flag(df, atr)
-    sl, tp1, tp2, rr, exp_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on)
+    sl, tp1, tp2, rr_tp2, exp_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on, setup=setup)
     # RR at TP1 defines expected R basis (TP1 fixed).
     denom = max(entry_price - sl, 1e-9)
     rr_tp1 = max((tp1 - entry_price) / denom, 0.0)
@@ -221,7 +251,7 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
         sl=float(sl),
         tp2=float(tp2),
         tp1=float(tp1),
-        rr=float(rr),
+        rr=float(rr_tp1),
         expected_days=float(exp_days),
         rday=float(rday),
         trend_strength=float(ts),
