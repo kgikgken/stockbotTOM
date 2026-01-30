@@ -25,49 +25,34 @@ class EVInfo:
     time_penalty_pts: float
 
 
-def _reach_prob(setup: SetupInfo, mkt_score: int) -> float:
-    """TP1到達確率（機械推定）。
+def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
+    base = 0.35
+    base += 0.20 * float(setup.trend_strength)
+    base += 0.20 * float(setup.pullback_quality)
 
-    仕様思想：
-      - ここは「精度改善フェーズ」の余地だが、裁量を入れないため固定関数で推定する。
-      - 入力は SetupInfo に含まれる“再現性因子”と、日次環境（MarketScore）だけ。
-      - MarketScoreはゲートにしないが、確率（=期待値補正）には弱く効かせてよい。
-    """
-    # 係数は過度に鋭くしない（個人運用での頑健性優先）
-    ts = float(setup.trend_strength)
-    pq = float(setup.pullback_quality)
-    ed = float(max(setup.expected_days, 0.5))
-
-    # ベース（A1系が主力なので基準はやや高めに置く）
-    x = -0.10
-    x += 0.85 * (ts - 1.0)
-    x += 0.75 * (pq - 1.0)
-
-    # 想定日数が長いほど成功率を下げる（時間=敵）
-    x += -0.18 * (ed - 2.5)
-
-    # セットアップ補正（需給例外は低頻度・低上限）
     if setup.setup == "A1-Strong":
-        x += 0.18
+        base += 0.06
     elif setup.setup == "A1":
-        x += 0.10
-    elif setup.setup == "A2":
-        x += 0.02
+        base += 0.03
     elif setup.setup == "B":
-        x += -0.06
+        base -= 0.05
     elif setup.setup == "D":
-        x += -0.18
+        base -= 0.10
 
-    # GUは追いかけ禁止なので、到達確率を下げて表示優先度を落とす
-    if bool(setup.gu):
-        x += -0.12
+    p = float(clamp(base, 0.20, 0.75))
 
-    # MarketScore（撤退制御専用だが“補正期待値”には弱く反映）
-    x += 0.06 * ((float(mkt_score) - 60.0) / 10.0)
+    # 地合い補正（到達確率は地合いに依存するが、過剰反応は避ける）
+    if mkt_score is not None:
+        try:
+            ms = float(mkt_score)
+            # 50を中立として±0.06の範囲で線形補正
+            adj = clamp((ms - 50.0) / 100.0, -0.06, 0.06)
+            p = float(clamp(p + adj, 0.18, 0.78))
+        except Exception:
+            pass
 
-    # logistic
-    p = 1.0 / (1.0 + pow(2.718281828, -x))
-    return float(clamp(p, 0.18, 0.82))
+    return p
+
 
 def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
     """CAGR寄与度一本化（TP1基準）。
@@ -86,7 +71,7 @@ def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
     rr = expected_r
     expected_days = float(max(setup.expected_days, 0.5))
 
-    p = _reach_prob(setup)
+    p = _reach_prob(setup, mkt_score=mkt_score)
 
     # 時間効率ペナルティ（機械）
     penalty = 0.0
