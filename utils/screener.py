@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -21,8 +20,7 @@ from utils.state import (
 )
 
 UNIVERSE_PATH = "universe_jpx.csv"
-EARNINGS_EXCLUDE_DAYS = 3  # ±3 calendar days
-
+EARNINGS_EXCLUDE_DAYS = 3  # 暦日近似（±3日）
 
 def _get_ticker_col(df: pd.DataFrame) -> str:
     if "ticker" in df.columns:
@@ -30,7 +28,6 @@ def _get_ticker_col(df: pd.DataFrame) -> str:
     if "code" in df.columns:
         return "code"
     return ""
-
 
 def _filter_earnings(uni: pd.DataFrame, today_date) -> pd.DataFrame:
     if "earnings_date" not in uni.columns:
@@ -48,7 +45,6 @@ def _filter_earnings(uni: pd.DataFrame, today_date) -> pd.DataFrame:
             keep.append(True)
     return uni[keep]
 
-
 def run_screen(
     today_str: str,
     today_date,
@@ -59,10 +55,7 @@ def run_screen(
 ) -> Tuple[List[Dict], Dict, Dict[str, pd.DataFrame]]:
     """
     戻り: (final_candidates_for_line, debug_meta, ohlc_map)
-    仕様書準拠:
-    - SetupInfo が None の銘柄は完全除外
-    - setup == "NONE" は完全除外
-    - 指値のみ / 現値IN禁止
+    ※ 歪みEVは内部処理のみ（LINE非表示）
     """
     if not os.path.exists(UNIVERSE_PATH):
         return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
@@ -78,10 +71,7 @@ def run_screen(
 
     uni = _filter_earnings(uni, today_date)
     tickers = uni[tcol].astype(str).tolist()
-
-    ohlc_map = download_history_bulk(
-        tickers, period="260d", auto_adjust=True, group_size=200
-    )
+    ohlc_map = download_history_bulk(tickers, period="260d", auto_adjust=True, group_size=200)
 
     # paper trade update
     update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
@@ -102,7 +92,6 @@ def run_screen(
         ticker = str(row.get(tcol, "")).strip()
         if not ticker:
             continue
-
         df = ohlc_map.get(ticker)
         if df is None or df.empty or len(df) < 120:
             continue
@@ -115,9 +104,9 @@ def run_screen(
             continue
 
         info = build_setup_info(df, macro_on=macro_on)
-
-        # ★ 重要: None 防御（仕様書どおり）
-        if info is None or info.setup == "NONE":
+        if info is None:
+            continue
+        if info.setup == "NONE":
             continue
 
         if info.gu:
@@ -131,12 +120,6 @@ def run_screen(
         name = str(row.get("name", ticker))
         sector = str(row.get("sector", row.get("industry_big", "不明")))
 
-        entry_price = float(
-            info.entry_price
-            if info.entry_price is not None
-            else (info.entry_low + info.entry_high) / 2.0
-        )
-
         cands.append(
             {
                 "ticker": ticker,
@@ -146,13 +129,15 @@ def run_screen(
                 "tier": int(info.tier),
                 "entry_low": float(info.entry_low),
                 "entry_high": float(info.entry_high),
-                "entry_price": entry_price,
+                "entry_price": float(info.entry_price if info.entry_price is not None else (info.entry_low + info.entry_high) / 2.0),
                 "sl": float(info.sl),
                 "tp1": float(info.tp1),
                 "tp2": float(info.tp2),
                 "rr": float(ev.rr),
                 "struct_ev": float(ev.structural_ev),
                 "adj_ev": float(ev.adj_ev),
+                "p_hit": float(ev.p_reach),
+                "cagr": float(ev.cagr_score),
                 "expected_days": float(ev.expected_days),
                 "rday": float(ev.rday),
                 "gu": bool(info.gu),
@@ -161,11 +146,12 @@ def run_screen(
             }
         )
 
-    # 並び替え：仕様書準拠（CAGR寄与度≒adj_ev → rday → rr）
+    # Latest spec: primary sort is CAGR寄与度（期待R×到達確率）÷想定日数
     cands.sort(
         key=lambda x: (
+            x.get("cagr", 0.0),
             x.get("adj_ev", 0.0),
-            x.get("rday", 0.0),
+            x.get("p_hit", 0.0),
             x.get("rr", 0.0),
             -float(x.get("expected_days", 9.9)),
             -int(x.get("tier", 9)),
@@ -174,7 +160,6 @@ def run_screen(
         ),
         reverse=True,
     )
-
     raw_n = len(cands)
 
     # diversify
@@ -190,12 +175,13 @@ def run_screen(
             if tier0:
                 pick = tier0[0]
                 final = [pick]
+                entry_price = float(pick.get("entry_price", (pick["entry_low"] + pick["entry_high"]) / 2.0))
                 record_paper_trade(
                     state,
                     bucket="tier0_exception",
                     ticker=pick["ticker"],
                     date_str=today_str,
-                    entry=pick["entry_price"],
+                    entry=entry_price,
                     sl=pick["sl"],
                     tp2=pick["tp2"],
                     expected_r=float(pick["rr"]),
@@ -204,10 +190,38 @@ def run_screen(
         final = cands[:max_display(macro_on)]
 
     # Tier2 liquidity cushion
-    final = [
-        c for c in final
-        if not (c.get("tier") == 2 and c.get("setup") in ("A2", "B") and c.get("adv20", 0.0) < 300e6)
-    ]
+    filtered = []
+    for c in final:
+        if c.get("tier") == 2 and c.get("setup") in ("A2", "B"):
+            if float(c.get("adv20", 0.0)) < 300e6:
+                continue
+        filtered.append(c)
+    final = filtered
+
+    # distortion internal (non-display)
+    if not in_cooldown(state, "distortion_until"):
+        internal = [c for c in cands if c.get("setup") in ("A1-Strong", "A2")][:2]
+        for c in internal:
+            entry_price = float(c.get("entry_price", (c["entry_low"] + c["entry_high"]) / 2.0))
+            record_paper_trade(
+                state,
+                bucket="distortion",
+                ticker=c["ticker"],
+                date_str=today_str,
+                entry=entry_price,
+                sl=c["sl"],
+                tp2=c["tp2"],
+                expected_r=float(c["rr"]),
+            )
+
+    # Tier0 exception brake
+    pt = state.get("paper_trades", {}).get("tier0_exception", [])
+    closed = [x for x in pt if x.get("status") == "CLOSED" and x.get("realized_r") is not None]
+    if len(closed) >= 4:
+        lastN = closed[-4:]
+        s = float(np.sum([safe_float(x.get("realized_r"), 0.0) for x in lastN]))
+        if s <= -2.0:
+            set_cooldown_days(state, "tier0_exception_until", days=4)
 
     avg_adj = float(np.mean([c["adj_ev"] for c in final])) if final else 0.0
     gu_ratio = float(gu_cnt / max(1, raw_n)) if raw_n > 0 else 0.0
