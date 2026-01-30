@@ -132,3 +132,22 @@ def calc_ev(setup_info, market_score: float, atr_pct: float) -> EVResult:
         rday=float(rday),
         expected_days=float(expected_days),
     )
+def pass_thresholds(
+    rr: float,
+    ev_adj: float,
+    rday: float,
+    rr_min: float,
+    ev_min: float,
+    rday_min: float,
+) -> bool:
+    """
+    Final screening gate.
+    Spec-compliant hard filters.
+    """
+    if rr < rr_min:
+        return False
+    if ev_adj < ev_min:
+        return False
+    if rday < rday_min:
+        return False
+    return True
