@@ -1,153 +1,148 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Tuple
 
+from utils.screen_logic import rr_min_by_market, rday_min_by_setup
 from utils.util import clamp
+from utils.setup import SetupInfo
+
 
 @dataclass
-class EVResult:
-    expected_r: float         # RR at TP1 (expected-R basis)
-    p_reach: float            # probability of reaching TP1 before SL within horizon
-    cagr_score: float         # (expected_r * p_reach) / expected_days (after penalties)
-    structural_ev: float      # keep for compatibility (same as cagr_score)
-    adj_ev: float             # keep for compatibility (same as cagr_score)
-    rday: float               # expected_r / expected_days
+class EVInfo:
+    rr: float
+    structural_ev: float
+    adj_ev: float
     expected_days: float
+    rday: float
+    rr_min: float
+    rday_min: float
 
-def _time_efficiency_penalty(expected_days: float) -> float:
-    """Multiplicative penalty from the latest spec.
+    # 追加（最新仕様）
+    cagr_score: float
+    expected_r: float
+    p_reach: float
+    time_penalty_pts: float
 
-    1-3 days: no penalty
-    4 days:   -5%
-    5 days:   -10%
-    6+ days:  exclude upstream (score->0)
+
+def _reach_prob(setup: SetupInfo, mkt_score: int) -> float:
+    """TP1到達確率（機械推定）。
+
+    仕様思想：
+      - ここは「精度改善フェーズ」の余地だが、裁量を入れないため固定関数で推定する。
+      - 入力は SetupInfo に含まれる“再現性因子”と、日次環境（MarketScore）だけ。
+      - MarketScoreはゲートにしないが、確率（=期待値補正）には弱く効かせてよい。
     """
-    d = float(expected_days)
-    if d < 3.5:
-        return 1.0
-    if d < 4.5:
-        return 0.95
-    if d < 5.5:
-        return 0.90
-    return 0.0
+    # 係数は過度に鋭くしない（個人運用での頑健性優先）
+    ts = float(setup.trend_strength)
+    pq = float(setup.pullback_quality)
+    ed = float(max(setup.expected_days, 0.5))
 
-def _p_reach_tp1(setup: str, rr_tp1: float, expected_days: float, trend_strength: float, pullback_quality: float,
-                market_score: float, atr_pct: float, gu: bool) -> float:
-    """Calibrated, bounded probability proxy.
+    # ベース（A1系が主力なので基準はやや高めに置く）
+    x = -0.10
+    x += 0.85 * (ts - 1.0)
+    x += 0.75 * (pq - 1.0)
 
-    - Baseline by setup (A1-Strong > A1 > A2 > B)
-    - Penalize high RR demand and long horizon
-    - Mild market regime factor (MarketScore is NOT a gate; it shifts hit-rate)
-    - Penalize GU (execution slippage / chase risk)
+    # 想定日数が長いほど成功率を下げる（時間=敵）
+    x += -0.18 * (ed - 2.5)
+
+    # セットアップ補正（需給例外は低頻度・低上限）
+    if setup.setup == "A1-Strong":
+        x += 0.18
+    elif setup.setup == "A1":
+        x += 0.10
+    elif setup.setup == "A2":
+        x += 0.02
+    elif setup.setup == "B":
+        x += -0.06
+    elif setup.setup == "D":
+        x += -0.18
+
+    # GUは追いかけ禁止なので、到達確率を下げて表示優先度を落とす
+    if bool(setup.gu):
+        x += -0.12
+
+    # MarketScore（撤退制御専用だが“補正期待値”には弱く反映）
+    x += 0.06 * ((float(mkt_score) - 60.0) / 10.0)
+
+    # logistic
+    p = 1.0 / (1.0 + pow(2.718281828, -x))
+    return float(clamp(p, 0.18, 0.82))
+
+def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
+    """CAGR寄与度一本化（TP1基準）。
+
+    - 期待RはTP1基準で固定
+    - CAGR寄与度 = (期待R × 到達確率) ÷ 想定日数
+    - 時間効率ペナルティ（完全機械）を減点として反映
+    - MarketScoreは撤退速度制御専用（選別ゲートにしない）
+      → 本関数ではスコアに直接掛けない
     """
-    base = {
-        "A1-Strong": 0.58,
-        "A1": 0.53,
-        "A2": 0.48,
-        "B": 0.44,
-    }.get(setup, 0.45)
+    rr_min = float(rr_min_by_market(mkt_score))
+    rday_min = float(rday_min_by_setup(setup.setup))
 
-    # RR demand penalty: harder to hit larger RR in limited time.
-    rr_pen = clamp(1.0 - 0.10 * max(0.0, float(rr_tp1) - 2.0), 0.65, 1.05)
+    # Latest spec: RRはTP1基準（=期待Rの基準）。TP2は参考表示のみ。
+    expected_r = float(setup.rr)
+    rr = expected_r
+    expected_days = float(max(setup.expected_days, 0.5))
 
-    # Horizon penalty: longer days -> lower hit probability.
-    d = float(expected_days)
-    day_pen = clamp(1.0 - 0.06 * max(0.0, d - 2.5), 0.60, 1.05)
+    p = _reach_prob(setup)
 
-    # Trend/Pullback factors are already bounded ~[0.8,1.2]
-    qual = clamp(0.50 * float(trend_strength) + 0.50 * float(pullback_quality), 0.80, 1.20)
-
-    # Market regime: small, symmetric.
-    ms = float(market_score)
-    if ms >= 75:
-        regime = 1.05
-    elif ms >= 60:
-        regime = 1.02
-    elif ms >= 50:
-        regime = 1.00
-    else:
-        regime = 0.94
-
-    # ATR%: too low -> slow; too high -> noisy. Keep mild.
-    ap = float(atr_pct)
-    if ap < 2.0:
-        vol = 0.93
-    elif ap < 4.0:
-        vol = 1.00
-    else:
-        vol = 0.97
-
-    gu_pen = 0.92 if gu else 1.00
-
-    p = base * rr_pen * day_pen * qual * regime * vol * gu_pen
-    return float(clamp(p, 0.18, 0.78))
-
-def calc_ev(setup_info, market_score: float, atr_pct: float) -> EVResult:
-    """Return CAGR contribution score inputs.
-
-    Latest spec:
-      - expected_r is RR at TP1 (rr_tp1) and is the ONLY expected-R basis.
-      - score = (expected_r * p_reach) / expected_days (time-penalized).
-      - time efficiency penalty and 6+ day exclusion.
-    """
-    expected_days = float(setup_info.expected_days)
-
-    # Exclude slow setups (6+ days) by forcing score to 0 (filtered upstream or by score).
-    time_mult = _time_efficiency_penalty(expected_days)
-    if time_mult <= 0:
-        return EVResult(
-            expected_r=float(getattr(setup_info, "rr_tp1", setup_info.rr)),
-            p_reach=0.0,
-            cagr_score=0.0,
-            structural_ev=0.0,
-            adj_ev=0.0,
-            rday=0.0,
+    # 時間効率ペナルティ（機械）
+    penalty = 0.0
+    if expected_days >= 6.0:
+        # 原則除外
+        return EVInfo(
+            rr=rr,
+            structural_ev=-999.0,
+            adj_ev=-999.0,
             expected_days=expected_days,
+            rday=-999.0,
+            rr_min=rr_min,
+            rday_min=rday_min,
+            cagr_score=-999.0,
+            expected_r=expected_r,
+            p_reach=p,
+            time_penalty_pts=99.0,
         )
+    if expected_days >= 5.0:
+        penalty = 10.0
+    elif expected_days >= 4.0:
+        penalty = 5.0
 
-    expected_r = float(getattr(setup_info, "rr_tp1", None) or setup_info.rr)
+    adj_ev = float(expected_r * p)  # 期待値（補正）
+    if setup.gu:
+        adj_ev -= 0.10
+    if macro_on:
+        adj_ev -= 0.08
 
-    p_reach = _p_reach_tp1(
-        setup=getattr(setup_info, "setup", "A1"),
-        rr_tp1=expected_r,
+    adj_ev = float(clamp(adj_ev, -0.50, 2.50))
+    rday = float(adj_ev / max(expected_days, 1e-6))
+    cagr_score = float(rday - (penalty / 100.0))
+
+    # structural_ev は監視/ログ用（TP1基準に寄せる）
+    structural_ev = float(expected_r)
+
+    return EVInfo(
+        rr=rr,
+        structural_ev=structural_ev,
+        adj_ev=adj_ev,
         expected_days=expected_days,
-        trend_strength=float(getattr(setup_info, "trend_strength", 1.0)),
-        pullback_quality=float(getattr(setup_info, "pullback_quality", 1.0)),
-        market_score=float(market_score),
-        atr_pct=float(atr_pct),
-        gu=bool(getattr(setup_info, "gu", False)),
-    )
-
-    cagr_score = (expected_r * p_reach) / max(1.0, expected_days)
-    cagr_score *= time_mult
-
-    rday = expected_r / max(1.0, expected_days)
-
-    return EVResult(
+        rday=rday,
+        rr_min=rr_min,
+        rday_min=rday_min,
+        cagr_score=cagr_score,
         expected_r=expected_r,
-        p_reach=float(p_reach),
-        cagr_score=float(cagr_score),
-        structural_ev=float(cagr_score),
-        adj_ev=float(cagr_score),
-        rday=float(rday),
-        expected_days=float(expected_days),
+        p_reach=p,
+        time_penalty_pts=penalty,
     )
-def pass_thresholds(
-    rr: float,
-    ev_adj: float,
-    rday: float,
-    rr_min: float,
-    ev_min: float,
-    rday_min: float,
-) -> bool:
-    """
-    Final screening gate.
-    Spec-compliant hard filters.
-    """
-    if rr < rr_min:
-        return False
-    if ev_adj < ev_min:
-        return False
-    if rday < rday_min:
-        return False
-    return True
+
+
+def pass_thresholds(setup: SetupInfo, ev: EVInfo) -> Tuple[bool, str]:
+    if ev.rr < ev.rr_min:
+        return False, "RR"
+    if ev.rday < ev.rday_min:
+        return False, "RDAY"
+    if ev.adj_ev < 0.50:
+        return False, "ADJEV"
+    return True, "OK"
