@@ -114,7 +114,7 @@ def build_report(
 
             lines.append("【指標（参考）】")
             lines.append(f"・CAGR寄与度（/日）：{c.get('cagr', 0.0):.2f}")
-            lines.append(f"・到達確率（目安）：{c.get('p_hit', 0.0):.2f}")
+            lines.append(f"・到達確率（目安）：{c.get('p_hit', 0.0):.3f}")
             lines.append(f"・期待R×到達確率：{c.get('adj_ev', 0.0):.2f}")
             lines.append(f"・RR（TP1基準）：{c.get('rr', 0.0):.2f}")
             lines.append(f"・想定日数（中央値）：{c.get('expected_days', 0.0):.1f}日")
