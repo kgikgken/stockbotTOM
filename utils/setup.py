@@ -259,3 +259,61 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
         gu=bool(gu),
         breakout_line=breakout_line,
     )
+
+
+def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) -> Optional[SetupInfo]:
+    """Build SetupInfo for an *existing position*.
+
+    Key point:
+      - Use the position's entry_price as the execution price (no entry band midpoint).
+      - SL/TP1/TP2 and expected_days must be computed with the same logic as new entries.
+    """
+    if df is None or df.empty or len(df) < 120:
+        return None
+    entry_price = float(entry_price) if np.isfinite(entry_price) and entry_price > 0 else 0.0
+    if entry_price <= 0:
+        return None
+
+    setup, tier = detect_setup(df)
+    if setup == "NONE":
+        return None
+
+    c = df["Close"]
+    ma20 = sma(c, 20)
+    ma50 = sma(c, 50)
+    atr = atr14(df, 14)
+    atr_last = safe_float(atr.iloc[-1], np.nan)
+    if not np.isfinite(atr_last) or atr_last <= 0:
+        return None
+
+    # Keep entry band available for display/debug only.
+    entry_low, entry_high, _, breakout_line = entry_band(df, setup)
+
+    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(df, entry_price, atr_last, macro_on)
+
+    risk = max(1e-6, entry_price - sl)
+    rr_tp1 = float((tp1 - entry_price) / risk)
+    rr_display = rr_tp1
+    rday = float(rr_display / max(0.5, expected_days))
+
+    trend_strength = _trend_strength(c, ma20, ma50)
+    pullback_quality = _pullback_quality(c, ma20, ma50, atr_last, setup)
+
+    return SetupInfo(
+        setup=setup,
+        tier=int(tier),
+        entry_low=float(entry_low),
+        entry_high=float(entry_high),
+        sl=float(sl),
+        tp2=float(tp2),
+        tp1=float(tp1),
+        rr=float(rr_display),
+        expected_days=float(expected_days),
+        rday=float(rday),
+        trend_strength=float(trend_strength),
+        pullback_quality=float(pullback_quality),
+        gu=False,
+        breakout_line=(float(breakout_line) if breakout_line is not None else None),
+        entry_price=float(entry_price),
+        rr_tp1=float(rr_tp1),
+    )
