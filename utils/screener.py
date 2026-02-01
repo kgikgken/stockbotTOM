@@ -22,6 +22,37 @@ from utils.state import (
 UNIVERSE_PATH = "universe_jpx.csv"
 EARNINGS_EXCLUDE_DAYS = 3  # 暦日近似（±3日）
 
+def _apply_setup_mix(cands: List[Dict], max_n: int) -> List[Dict]:
+    """Enforce strategy mix per spec (when alternatives exist).
+
+    - Pullback bucket: A1-Strong / A1 / A2
+    - Breakout bucket: B
+    Rule:
+      - If breakout candidates exist, cap pullback to 3 and include up to 2 breakouts.
+      - If no breakout candidates, allow pullbacks to fill all slots.
+    """
+    if max_n <= 0:
+        return []
+    pullbacks = [c for c in cands if c.get("setup") in ("A1-Strong", "A1", "A2")]
+    breakouts = [c for c in cands if c.get("setup") == "B"]
+    if not breakouts:
+        return cands[:max_n]
+    out: List[Dict] = []
+    out.extend(pullbacks[: min(3, max_n)])
+    if len(out) < max_n:
+        out.extend(breakouts[: min(2, max_n - len(out))])
+    # fill remaining with best remaining
+    if len(out) < max_n:
+        used = set([x.get("ticker") for x in out])
+        for c in cands:
+            if c.get("ticker") in used:
+                continue
+            out.append(c)
+            if len(out) >= max_n:
+                break
+    return out
+
+
 def _get_ticker_col(df: pd.DataFrame) -> str:
     if "ticker" in df.columns:
         return "ticker"
@@ -112,6 +143,9 @@ def run_screen(
         if info.gu:
             gu_cnt += 1
 
+        info.adv20 = float(adv)
+        info.atrp = float(atrp)
+
         ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
         ok, _ = pass_thresholds(info, ev)
         if not ok:
@@ -149,14 +183,12 @@ def run_screen(
     # Latest spec: primary sort is CAGR寄与度（期待R×到達確率）÷想定日数
     cands.sort(
         key=lambda x: (
-            x.get("cagr", 0.0),
-            x.get("adj_ev", 0.0),
-            x.get("p_hit", 0.0),
-            x.get("rr", 0.0),
-            -float(x.get("expected_days", 9.9)),
-            -int(x.get("tier", 9)),
-            float(x.get("adv20", 0.0)),
-            str(x.get("ticker", "")),
+            float(x.get("cagr", 0.0)),          # 1) CAGR寄与度(/日)
+            float(x.get("p_hit", 0.0)),         # 2) 到達確率
+            float(x.get("rr", 0.0)),            # 3) RR(TP1)
+            -float(x.get("expected_days", 9.9)),# 4) 想定日数(短いほど)
+            float(x.get("adv20", 0.0)),         # 5) 流動性
+            str(x.get("ticker", "")),           # 6) 安定化
         ),
         reverse=True,
     )
@@ -187,7 +219,7 @@ def run_screen(
                     expected_r=float(pick["rr"]),
                 )
     else:
-        final = cands[:max_display(macro_on)]
+        final = _apply_setup_mix(cands, max_display(macro_on))
 
     # Tier2 liquidity cushion
     filtered = []
