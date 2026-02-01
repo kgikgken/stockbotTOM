@@ -262,44 +262,45 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
 
 
 def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) -> Optional[SetupInfo]:
-    """Build SetupInfo for an *existing position*.
+    """Build SetupInfo for an existing position.
 
-    Key point:
-      - Use the position's entry_price as the execution price (no entry band midpoint).
-      - SL/TP1/TP2 and expected_days must be computed with the same logic as new entries.
+    最新仕様（監査OS）方針：
+      - ポジション欄も新規と同じ「RR(TP1)・到達確率・期待R×到達確率・CAGR寄与度(/日)・想定日数」で監査する。
+      - 現在の形（setup）が検出できない日でも、監査のための指標は必ず算出する。
+        → setup='POS' として扱い、SL/TP1/TP2 は entry_price を基準に構造的に再計算する。
     """
-    if df is None or df.empty or len(df) < 120:
-        return None
-    entry_price = float(entry_price) if np.isfinite(entry_price) and entry_price > 0 else 0.0
-    if entry_price <= 0:
+    if df is None or df.empty or len(df) < 60 or not np.isfinite(entry_price) or entry_price <= 0:
         return None
 
     setup, tier = detect_setup(df)
     if setup == "NONE":
-        return None
+        setup = "POS"
+        tier = 9
 
-    c = df["Close"]
+    c = df["Close"].astype(float)
     ma20 = sma(c, 20)
     ma50 = sma(c, 50)
+
     atr = atr14(df, 14)
     atr_last = safe_float(atr.iloc[-1], np.nan)
     if not np.isfinite(atr_last) or atr_last <= 0:
         return None
 
-    # Keep entry band available for display/debug only.
-    entry_low, entry_high, _, breakout_line = entry_band(df, setup)
+    # positions: entry band is not used (execution already happened)
+    entry_low = entry_high = float(entry_price)
 
-    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(df, entry_price, atr_last, macro_on)
+    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(df, float(entry_price), float(atr_last), macro_on)
 
-    risk = max(1e-6, entry_price - sl)
-    rr_tp1 = float((tp1 - entry_price) / risk)
+    risk = max(1e-6, float(entry_price) - float(sl))
+    rr_tp1 = float((float(tp1) - float(entry_price)) / risk)
     rr_display = rr_tp1
-    rday = float(rr_display / max(0.5, expected_days))
+
+    rday = float(rr_display / max(0.5, float(expected_days)))
 
     trend_strength = _trend_strength(c, ma20, ma50)
-    pullback_quality = _pullback_quality(c, ma20, ma50, atr_last, setup)
+    pullback_quality = _pullback_quality(c, ma20, ma50, float(atr_last), setup)
 
-    return SetupInfo(
+    info = SetupInfo(
         setup=setup,
         tier=int(tier),
         entry_low=float(entry_low),
@@ -313,7 +314,9 @@ def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) ->
         trend_strength=float(trend_strength),
         pullback_quality=float(pullback_quality),
         gu=False,
-        breakout_line=(float(breakout_line) if breakout_line is not None else None),
+        breakout_line=None,
         entry_price=float(entry_price),
         rr_tp1=float(rr_tp1),
     )
+    return info
+
