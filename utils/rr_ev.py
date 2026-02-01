@@ -6,6 +6,7 @@ from typing import Tuple
 from utils.screen_logic import rr_min_by_market, rday_min_by_setup
 from utils.util import clamp
 from utils.setup import SetupInfo
+import numpy as np
 
 
 @dataclass
