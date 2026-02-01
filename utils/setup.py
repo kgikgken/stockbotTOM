@@ -223,10 +223,10 @@ def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: 
 
     return float(sl), float(tp1), float(tp2), float(rr_tp2), float(expected_days)
 
-def build_setup_info(df: pd.DataFrame, macro_on: bool) -> SetupInfo:
+def build_setup_info(df: pd.DataFrame, macro_on: bool, entry_override: float | None = None) -> SetupInfo:
     setup, tier = detect_setup(df)
     lo, hi, atr, breakout_line = entry_band(df, setup)
-    entry_price = (lo + hi) / 2.0
+    entry_price = float(entry_override) if entry_override is not None and np.isfinite(entry_override) and entry_override > 0 else (lo + hi) / 2.0
 
     gu = gu_flag(df, atr)
     sl, tp1, tp2, rr_tp2, exp_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on, setup=setup)
