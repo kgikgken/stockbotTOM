@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.setup import build_setup_info
+from utils.setup import build_setup_info, build_position_info
 from utils.rr_ev import calc_ev
 from utils.util import safe_float
 
@@ -46,19 +46,32 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int, macro_on: bool) -> Tuple
             total_value += value
 
         rr = np.nan
+        cagr = np.nan
+        p_hit = np.nan
         adj = np.nan
-        if hist is not None and hist is not None and len(hist) >= 120:
-            info = build_setup_info(hist, macro_on=macro_on)
-            ev = calc_ev(info, mkt_score=mkt_score, macro_on=macro_on)
-            rr = ev.rr
-            adj = ev.adj_ev
+        exp_days = np.nan
+        if hist is not None and len(hist) >= 120 and entry_price > 0:
+            info = build_position_info(hist, entry_price=float(entry_price), macro_on=macro_on)
+            if info is not None and info.setup != "NONE":
+                ev = calc_ev(info, mkt_score=mkt_score, macro_on=macro_on)
+                rr = ev.rr
+                adj = ev.adj_ev
+                p_hit = ev.p_reach
+                exp_days = ev.expected_days
+                cagr = ev.cagr_score
 
-        if np.isfinite(rr) and np.isfinite(adj):
-            warn = "（要注意）" if adj < 0.5 else ""
+        if np.isfinite(rr) and np.isfinite(cagr):
+            warn = "（要注意）" if cagr < 0.5 else ""
             lines.append(f"■ {ticker}")
             lines.append("・状態：保有中（新規追加なし）")
-            lines.append(f"・RR：{rr:.2f}")
-            lines.append(f"・期待値（補正）：{adj:.2f}{warn}")
+            lines.append(f"・RR（TP1基準）：{rr:.2f}")
+            lines.append(f"・CAGR寄与度（/日）：{cagr:.2f}{warn}")
+            if np.isfinite(p_hit):
+                lines.append(f"・到達確率（目安）：{p_hit:.2f}")
+            if np.isfinite(adj):
+                lines.append(f"・期待R×到達確率：{adj:.2f}")
+            if np.isfinite(exp_days):
+                lines.append(f"・想定日数（中央値）：{exp_days:.1f}日")
         else:
             lines.append(f"■ {ticker}")
             lines.append("・状態：保有中（新規追加なし）")
