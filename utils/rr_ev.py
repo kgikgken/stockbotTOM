@@ -26,55 +26,45 @@ class EVInfo:
 
 
 def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
-    """TP1到達確率の簡易モデル。
+    """TP1到達確率（目安）
 
-    目的：CAGR寄与度の分子（期待R×到達確率）に分散を作り、
-    "良い形"の中で優劣が付くようにする。
-
-    - 形の質（trend_strength / pullback_quality）
-    - RRの難易度（高RRほど到達しにくい）
-    - 想定日数（長いほど不確実性↑）
-    - 地合い（MarketScore）は弱めに補正
+    仕様（監査OS）：
+      - setup別ベース率で初期分散を確保
+      - trend_strength / pullback_quality を弱く反映
+      - RR(TP1) / 想定日数 を反映
+      - ATR%（ボラ）/ ADV20（流動性）で微調整
+      - MarketScore は環境補正として弱くのみ反映（撤退速度専用思想を尊重）
     """
+    rr_tp1 = float(setup.rr_tp1) if setup.rr_tp1 is not None else float(setup.rr)
+    days = max(0.5, float(setup.expected_days))
 
-    ts = float(setup.trend_strength)
-    pq = float(setup.pullback_quality)
-    rr = float(setup.rr)
-    days = float(max(setup.expected_days, 0.5))
+    base_map = {
+        "A1-Strong": 0.62,
+        "A1": 0.58,
+        "A2": 0.55,
+        "B": 0.50,
+    }
+    p = base_map.get(setup.setup, 0.52)
 
-    base = 0.55
-    base += 0.12 * (ts - 1.0)
-    base += 0.10 * (pq - 1.0)
+    q = clamp(float(setup.trend_strength) * float(setup.pullback_quality), 0.80, 1.20)
+    p += 0.12 * (q - 1.0)
 
-    if setup.setup == "A1-Strong":
-        base += 0.04
-    elif setup.setup == "A1":
-        base += 0.02
-    elif setup.setup == "A2":
-        base -= 0.02
-    elif setup.setup == "B":
-        base -= 0.06
+    p += 0.10 * clamp((rr_tp1 - 1.8) / 1.6, -0.3, 0.9)
+    p -= 0.10 * clamp((days - 3.0) / 3.5, 0.0, 0.7)
 
-    # RRが高いほど到達確率は下がる（難易度ペナルティ）
-    base -= 0.06 * max(0.0, rr - 2.0)
+    atrp = float(setup.atrp) if setup.atrp is not None and np.isfinite(setup.atrp) else np.nan
+    if np.isfinite(atrp):
+        p -= 0.05 * clamp((atrp - 3.5) / 4.0, -1.0, 1.0)
 
-    # 日数が長いほど不確実性が増える
-    base -= 0.03 * max(0.0, days - 3.0)
+    adv20 = float(setup.adv20) if setup.adv20 is not None and np.isfinite(setup.adv20) else np.nan
+    if np.isfinite(adv20):
+        p += 0.04 * clamp((np.log10(max(adv20, 1.0)) - 8.6) / 0.9, -1.0, 1.0)
 
-    p = float(clamp(base, 0.18, 0.85))
-
-    # 地合い補正（過剰反応は避ける）
     if mkt_score is not None:
-        try:
-            ms = float(mkt_score)
-            # 50を中立として±0.08の範囲で線形補正
-            adj = clamp((ms - 50.0) / 100.0, -0.08, 0.08)
-            p = float(clamp(p + adj, 0.15, 0.88))
-        except Exception:
-            pass
+        env = clamp((int(mkt_score) - 55) / 25.0, -1.0, 1.0)
+        p += 0.03 * env
 
-    return p
-
+    return float(clamp(p, 0.30, 0.85))
 
 def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
     """CAGR寄与度一本化（TP1基準）。
