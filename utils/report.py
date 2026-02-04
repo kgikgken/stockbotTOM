@@ -61,10 +61,6 @@ def build_report(
     lines.append(f"Macro警戒：{'ON' if macro_on else 'OFF'}")
     lines.append(f"週次新規：{weekly_used} / {weekly_max}")
     lines.append(f"推奨レバ：{leverage:.1f}x")
-    lines.append("▶ フィルター条件")
-    lines.append(f"・RR 下限：{rr_min_by_market(mkt_score):.1f}")
-    lines.append("・CAGR寄与度下限：0.50")
-    lines.append("・回転効率 下限：Setup別")
     lines.append("")
 
     if policy_lines:
@@ -97,10 +93,6 @@ def build_report(
             entry_price = float(c.get("entry_price", (float(c["entry_low"]) + float(c["entry_high"])) / 2.0))
 
             # 4ブロック
-            lines.append("【形・行動】")
-            lines.append(f"・形：{setup_label}")
-            lines.append(f"・行動：{action}")
-            lines.append("")
 
             lines.append("【エントリー】")
             lines.append(f"・指値目安（中央）：{_fmt_yen(entry_price)} 円")
@@ -108,8 +100,7 @@ def build_report(
             lines.append("")
 
             lines.append("【利確目標】")
-            lines.append(f"・利確①：{_fmt_yen(c['tp1'])} 円")
-            lines.append(f"・利確②：{_fmt_yen(c['tp2'])} 円")
+            lines.append(f"・利確①：{_fmt_yen(c['tp1'])} 円、②：{_fmt_yen(c['tp2'])} 円")
             lines.append("")
 
             lines.append("【指標（参考）】")
@@ -125,5 +116,29 @@ def build_report(
 
     lines.append("📊 ポジション")
     lines.append(pos_text.strip() if pos_text else "ノーポジション")
+
+    # Summary: bottom 2 candidates' central limit prices (quick exec list)
+    if cands:
+        tail = cands[-2:] if len(cands) >= 2 else cands[-1:]
+        lines.append("")
+        lines.append("まとめ")
+        for c in tail[::-1]:  # last then second last
+            ticker = str(c.get("ticker", "")).strip()
+            name = str(c.get("name", "")).strip()
+            sector = str(c.get("sector", "")).strip()
+            entry = c.get("entry_price", c.get("entry", None))
+            try:
+                entry = float(entry) if entry is not None else None
+            except Exception:
+                entry = None
+            if entry is None:
+                lo = c.get("entry_low", None)
+                hi = c.get("entry_high", None)
+                if lo is not None and hi is not None:
+                    entry = (float(lo) + float(hi)) / 2.0
+            title = f"■ {ticker} {name}（{sector}）" if (name and sector) else f"■ {ticker}"
+            lines.append(title)
+            if entry is not None:
+                lines.append(f"・指値目安：{_fmt_yen(entry)} 円")
 
     return "\n".join(lines)
