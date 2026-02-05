@@ -117,12 +117,12 @@ def build_report(
     lines.append("📊 ポジション")
     lines.append(pos_text.strip() if pos_text else "ノーポジション")
 
-    # Summary: bottom 2 candidates' central limit prices (quick exec list)
+    # Summary: execution list (central limit prices) for ALL displayed candidates.
+    # Keep the same order as the main list (top -> bottom) for operational consistency.
     if cands:
-        tail = cands[-2:] if len(cands) >= 2 else cands[-1:]
         lines.append("")
         lines.append("まとめ")
-        for c in tail[::-1]:  # last then second last
+        for c in cands:
             ticker = str(c.get("ticker", "")).strip()
             name = str(c.get("name", "")).strip()
             sector = str(c.get("sector", "")).strip()
