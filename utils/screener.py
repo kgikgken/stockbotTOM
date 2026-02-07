@@ -155,6 +155,12 @@ def run_screen(
         name = str(row.get("name", ticker))
         sector = str(row.get("sector", row.get("industry_big", "不明")))
 
+        # 現値IN判定（計算ロジックは変えず、実行モードだけ付与）
+        close_last = float(df["Close"].iloc[-1])
+        in_band = (close_last >= float(info.entry_low)) and (close_last <= float(info.entry_high))
+        market_ok = bool(in_band and (not bool(info.gu)) and (float(ev.p_reach) >= 0.750) and (int(mkt_score) >= 60) and (not bool(macro_on)))
+        entry_mode = "MARKET_OK" if market_ok else "LIMIT_ONLY"
+
         cands.append(
             {
                 "ticker": ticker,
