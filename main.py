@@ -70,6 +70,7 @@ def main() -> None:
         policy_lines=policy_lines,
         cands=cands,
         pos_text=pos_text,
+        saucers=meta.get("saucers"),
     )
 
     send_line(report)
