@@ -11,6 +11,7 @@ from utils.setup import build_setup_info, liquidity_filters
 from utils.rr_ev import calc_ev, pass_thresholds
 from utils.diversify import apply_sector_cap, apply_corr_filter
 from utils.screen_logic import no_trade_conditions, max_display
+from utils.saucer import scan_saucers
 from utils.state import (
     in_cooldown,
     set_cooldown_days,
@@ -102,7 +103,7 @@ def run_screen(
 
     uni = _filter_earnings(uni, today_date)
     tickers = uni[tcol].astype(str).tolist()
-    ohlc_map = download_history_bulk(tickers, period="260d", auto_adjust=True, group_size=200)
+    ohlc_map = download_history_bulk(tickers, period="780d", auto_adjust=True, group_size=200)
 
     # paper trade update
     update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
@@ -263,6 +264,7 @@ def run_screen(
         "final": int(len(final)),
         "avgAdjEV": float(avg_adj),
         "GU": float(gu_ratio),
+        "saucers": scan_saucers(ohlc_map, uni, tcol, max_n=5),
     }
 
     return final, meta, ohlc_map
