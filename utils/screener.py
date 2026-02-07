@@ -178,6 +178,7 @@ def run_screen(
                 "struct_ev": float(ev.structural_ev),
                 "adj_ev": float(ev.adj_ev),
                 "p_hit": float(ev.p_reach),
+                "exp_r_hit": float(ev.expected_r * ev.p_reach),
                 "cagr": float(ev.cagr_score),
                 "expected_days": float(ev.expected_days),
                 "rday": float(ev.rday),
