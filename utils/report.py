@@ -5,7 +5,7 @@ from typing import Dict, List
 from utils.screen_logic import rr_min_by_market
 from utils.util import safe_float
 
-def _fmt_fmt_yen(x: float) -> str:
+def _fmt_yen(x: float) -> str:
     try:
         return f"{int(round(float(x))):,}"
     except Exception:
@@ -47,13 +47,6 @@ def build_report(
                 if ev.startswith("⚠ "):
                     lines.append("・" + ev.replace("⚠ ", "").split("（")[0])
             lines.append("")
-        lines.append("🛑 本日の方針（イベント警戒）")
-        lines.append("・新規は指値のみ（現値IN禁止）")
-        lines.append("・ロットは通常の50%以下を推奨")
-        lines.append("・TP2は控えめ（伸ばし過ぎない）")
-        lines.append("・GU銘柄は寄り後再判定のみ")
-        lines.append("")
-
     # Header
     if no_trade and not cands:
         lines.append("新規：🛑 NO（新規ゼロ）")
@@ -69,15 +62,6 @@ def build_report(
     lines.append("")
 
     # Policy
-    lines.append("🛑 本日の方針")
-    if policy_lines:
-        for p in policy_lines:
-            if p.strip():
-                lines.append("・" + p.strip().lstrip("・"))
-    else:
-        lines.append("・新規は指値のみ（現値IN禁止）")
-    lines.append("")
-
     # Candidates
     if cands:
         lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
@@ -92,6 +76,7 @@ def build_report(
             # Entry
             lines.append("【エントリー】")
             lines.append(f"・指値目安（中央）：{_fmt_yen(c.get('entry_price', (c.get('entry_low',0)+c.get('entry_high',0))/2.0))} 円")
+            lines.append(f"・現値IN：{'OK' if (entry_mode == 'MARKET_OK' and not macro_on) else 'NG'}")
             lines.append(f"・損切り：{_fmt_yen(c.get('sl', 0.0))} 円")
             lines.append("")
             # Targets (single line)
@@ -119,14 +104,12 @@ def build_report(
 
     # Summary (all displayed cands, in order)
     if cands:
-        lines.append("まとめ")
-        for c in cands:
+        lines.append("まとめ（指値一覧）")
+        for i, c in enumerate(cands, 1):
             ticker = str(c.get("ticker", ""))
             name = str(c.get("name", ticker))
-            sector = str(c.get("sector", ""))
             entry = _fmt_yen(c.get("entry_price", (c.get("entry_low",0)+c.get("entry_high",0))/2.0))
-            lines.append(f"■ {ticker}.T {name}（{sector}）")
-            lines.append(f"・指値目安：{entry} 円")
+            lines.append(f"{i}. {ticker} {name}：{entry} 円")
         lines.append("")
 
     # Saucer bucket (separate; requested to be at the very end)
