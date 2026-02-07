@@ -1,168 +1,276 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+import os
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
-from utils.util import safe_float
+from utils.util import download_history_bulk, safe_float, is_abnormal_stock
+from utils.setup import build_setup_info, liquidity_filters
+from utils.rr_ev import calc_ev, pass_thresholds
+from utils.diversify import apply_sector_cap, apply_corr_filter
+from utils.screen_logic import no_trade_conditions, max_display
+from utils.saucer import scan_saucers
+from utils.state import (
+    in_cooldown,
+    set_cooldown_days,
+    record_paper_trade,
+    update_paper_trades_with_ohlc,
+    kpi_distortion,
+)
 
+UNIVERSE_PATH = "universe_jpx.csv"
+EARNINGS_EXCLUDE_DAYS = 3  # 暦日近似（±3日）
 
-@dataclass
-class SaucerCandidate:
-    ticker: str
-    name: str
-    sector: str
-    timeframe: str  # 'W' or 'M'
-    score: float
-    rim: float
-    last: float
-    entry_price: float
+def _apply_setup_mix(cands: List[Dict], max_n: int) -> List[Dict]:
+    """Enforce strategy mix per spec (when alternatives exist).
 
-
-def _resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample daily OHLCV to weekly/monthly bars."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    d = df.copy()
-    if not isinstance(d.index, pd.DatetimeIndex):
-        d.index = pd.to_datetime(d.index, errors="coerce")
-    d = d.sort_index()
-    o = d["Open"].resample(rule).first()
-    h = d["High"].resample(rule).max()
-    l = d["Low"].resample(rule).min()
-    c = d["Close"].resample(rule).last()
-    v = d["Volume"].resample(rule).sum() if "Volume" in d.columns else None
-    out = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c})
-    if v is not None:
-        out["Volume"] = v
-    return out.dropna()
-
-
-def _saucer_score(close: pd.Series) -> Optional[Dict[str, float]]:
-    """Heuristic saucer scoring on a close series (weekly/monthly).
-
-    Requirements (pragmatic, spec-aligned):
-      - window length >= 40
-      - U-shape (convex quadratic fit)
-      - bottom occurs in the middle band (avoid monotonic trends)
-      - last close is near rim (completed / close to completion)
-
-    Returns dict with {score, rim, last} or None.
+    - Pullback bucket: A1-Strong / A1 / A2
+    - Breakout bucket: B
+    Rule:
+      - If breakout candidates exist, cap pullback to 3 and include up to 2 breakouts.
+      - If no breakout candidates, allow pullbacks to fill all slots.
     """
-    if close is None:
-        return None
-    close = close.dropna().astype(float)
-    if len(close) < 40:
-        return None
-
-    # Use a rolling window ending at last
-    w = close.tail(78) if len(close) >= 78 else close.copy()
-    n = len(w)
-    if n < 40:
-        return None
-
-    y = w.values
-    t = np.linspace(-1.0, 1.0, n)
-    # normalize y for stability
-    y0 = float(np.median(y))
-    if not np.isfinite(y0) or y0 <= 0:
-        return None
-    yn = y / y0
-
-    # quadratic fit: yn = a t^2 + b t + c
-    a, b, c = np.polyfit(t, yn, 2)
-
-    if not np.isfinite(a) or a <= 0:
-        return None
-
-    # vertex location: t* = -b/(2a)
-    t_vertex = -b / (2 * a)
-    # require bottom in the middle band
-    if not (-0.4 <= t_vertex <= 0.4):
-        return None
-
-    rim = float(np.max(y))
-    last = float(y[-1])
-    if not (np.isfinite(rim) and np.isfinite(last) and rim > 0):
-        return None
-
-    progress = last / rim  # close to 1 => near rim
-    if progress < 0.90:
-        return None
-
-    depth = (rim - float(np.min(y))) / rim
-    if depth < 0.10:
-        return None  # too shallow, not a meaningful base
-
-    # convexity strength + progress + depth
-    score = 0.0
-    score += float(np.clip(a, 0.0, 0.5)) * 2.0
-    score += (progress - 0.90) / 0.10  # 0..1
-    score += float(np.clip(depth, 0.10, 0.40) - 0.10) / 0.30  # 0..1
-
-    score = float(np.clip(score, 0.0, 5.0))
-    return {"score": score, "rim": rim, "last": last}
-
-
-def scan_saucers(
-    ohlc_map: Dict[str, pd.DataFrame],
-    universe_df: pd.DataFrame,
-    ticker_col: str,
-    max_n: int = 5,
-) -> List[dict]:
-    """Return top saucer candidates (weekly/monthly) as list of dicts for reporting."""
-    out: List[SaucerCandidate] = []
-    if universe_df is None or universe_df.empty:
+    if max_n <= 0:
         return []
+    pullbacks = [c for c in cands if c.get("setup") in ("A1-Strong", "A1", "A2")]
+    breakouts = [c for c in cands if c.get("setup") == "B"]
+    if not breakouts:
+        return cands[:max_n]
+    out: List[Dict] = []
+    out.extend(pullbacks[: min(3, max_n)])
+    if len(out) < max_n:
+        out.extend(breakouts[: min(2, max_n - len(out))])
+    # fill remaining with best remaining
+    if len(out) < max_n:
+        used = set([x.get("ticker") for x in out])
+        for c in cands:
+            if c.get("ticker") in used:
+                continue
+            out.append(c)
+            if len(out) >= max_n:
+                break
+    return out
 
-    for _, row in universe_df.iterrows():
-        ticker = str(row.get(ticker_col, "")).strip()
+
+def _get_ticker_col(df: pd.DataFrame) -> str:
+    if "ticker" in df.columns:
+        return "ticker"
+    if "code" in df.columns:
+        return "code"
+    return ""
+
+def _filter_earnings(uni: pd.DataFrame, today_date) -> pd.DataFrame:
+    if "earnings_date" not in uni.columns:
+        return uni
+    d = pd.to_datetime(uni["earnings_date"], errors="coerce").dt.date
+    uni = uni.copy()
+    keep = []
+    for x in d:
+        if x is None or pd.isna(x):
+            keep.append(True)
+            continue
+        try:
+            keep.append(abs((x - today_date).days) > EARNINGS_EXCLUDE_DAYS)
+        except Exception:
+            keep.append(True)
+    return uni[keep]
+
+def run_screen(
+    today_str: str,
+    today_date,
+    mkt_score: int,
+    delta3: float,
+    macro_on: bool,
+    state: Dict,
+) -> Tuple[List[Dict], Dict, Dict[str, pd.DataFrame]]:
+    """
+    戻り: (final_candidates_for_line, debug_meta, ohlc_map)
+    ※ 歪みEVは内部処理のみ（LINE非表示）
+    """
+    if not os.path.exists(UNIVERSE_PATH):
+        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
+
+    try:
+        uni = pd.read_csv(UNIVERSE_PATH)
+    except Exception:
+        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
+
+    tcol = _get_ticker_col(uni)
+    if not tcol:
+        return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
+
+    uni = _filter_earnings(uni, today_date)
+    tickers = uni[tcol].astype(str).tolist()
+    ohlc_map = download_history_bulk(tickers, period="780d", auto_adjust=True, group_size=200)
+
+    # paper trade update
+    update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
+    update_paper_trades_with_ohlc(state, "distortion", ohlc_map, today_str)
+
+    # distortion KPI -> auto OFF
+    kpi = kpi_distortion(state)
+    if kpi["count"] >= 10:
+        if (kpi["median_r"] < -0.10) or (kpi["exp_gap"] < -0.30) or (kpi["neg_streak"] >= 3):
+            set_cooldown_days(state, "distortion_until", days=4)
+
+    no_trade = no_trade_conditions(int(mkt_score), float(delta3))
+
+    cands: List[Dict] = []
+    gu_cnt = 0
+
+    for _, row in uni.iterrows():
+        ticker = str(row.get(tcol, "")).strip()
         if not ticker:
             continue
         df = ohlc_map.get(ticker)
-        if df is None or df.empty or len(df) < 260:
+        if df is None or df.empty or len(df) < 120:
+            continue
+
+        if is_abnormal_stock(df):
+            continue
+
+        ok_liq, price, adv, atrp = liquidity_filters(df)
+        if not ok_liq:
+            continue
+
+        info = build_setup_info(df, macro_on=macro_on)
+        if info is None:
+            continue
+        if info.setup == "NONE":
+            continue
+
+        if info.gu:
+            gu_cnt += 1
+
+        info.adv20 = float(adv)
+        info.atrp = float(atrp)
+
+        ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
+        ok, _ = pass_thresholds(info, ev)
+        if not ok:
             continue
 
         name = str(row.get("name", ticker))
         sector = str(row.get("sector", row.get("industry_big", "不明")))
 
-        # Weekly
-        w = _resample_ohlc(df, "W-FRI")
-        sw = _saucer_score(w["Close"]) if not w.empty else None
-        if sw:
-            rim = float(sw["rim"])
-            last = float(sw["last"])
-            entry_price = rim  # rim breakout / touch
-            out.append(SaucerCandidate(ticker, name, sector, "W", float(sw["score"]), rim, last, entry_price))
+        # 現値IN判定（計算ロジックは変えず、実行モードだけ付与）
+        close_last = float(df["Close"].iloc[-1])
+        in_band = (close_last >= float(info.entry_low)) and (close_last <= float(info.entry_high))
+        market_ok = bool(in_band and (not bool(info.gu)) and (float(ev.p_reach) >= 0.750) and (int(mkt_score) >= 60) and (not bool(macro_on)))
+        entry_mode = "MARKET_OK" if market_ok else "LIMIT_ONLY"
 
-        # Monthly
-        m = _resample_ohlc(df, "M")
-        sm = _saucer_score(m["Close"]) if not m.empty else None
-        if sm:
-            rim = float(sm["rim"])
-            last = float(sm["last"])
-            entry_price = rim
-            out.append(SaucerCandidate(ticker, name, sector, "M", float(sm["score"]) + 0.5, rim, last, entry_price))
+        cands.append(
+            {
+                "ticker": ticker,
+                "name": name,
+                "sector": sector,
+                "setup": info.setup,
+                "tier": int(info.tier),
+                "entry_low": float(info.entry_low),
+                "entry_high": float(info.entry_high),
+                "entry_price": float(info.entry_price if info.entry_price is not None else (info.entry_low + info.entry_high) / 2.0),
+                "sl": float(info.sl),
+                "tp1": float(info.tp1),
+                "tp2": float(info.tp2),
+                "rr": float(ev.rr),
+                "struct_ev": float(ev.structural_ev),
+                "adj_ev": float(ev.adj_ev),
+                "p_hit": float(ev.p_reach),
+                "cagr": float(ev.cagr_score),
+                "expected_days": float(ev.expected_days),
+                "rday": float(ev.rday),
+                "gu": bool(info.gu),
+                "adv20": float(adv),
+                "atrp": float(atrp),
+            }
+        )
 
-    if not out:
-        return []
+    # Latest spec: primary sort is CAGR寄与度（期待R×到達確率）÷想定日数
+    cands.sort(
+        key=lambda x: (
+            float(x.get("cagr", 0.0)),          # 1) CAGR寄与度(/日)
+            float(x.get("p_hit", 0.0)),         # 2) 到達確率
+            float(x.get("rr", 0.0)),            # 3) RR(TP1)
+            -float(x.get("expected_days", 9.9)),# 4) 想定日数(短いほど)
+            float(x.get("adv20", 0.0)),         # 5) 流動性
+            str(x.get("ticker", "")),           # 6) 安定化
+        ),
+        reverse=True,
+    )
+    raw_n = len(cands)
 
-    out.sort(key=lambda x: (x.score, x.timeframe, x.ticker), reverse=True)
-    out = out[: max_n]
+    # diversify
+    cands = apply_sector_cap(cands, max_per_sector=2)
+    cands = apply_corr_filter(cands, ohlc_map, max_corr=0.75)
 
-    # serialize
-    return [
-        {
-            "ticker": c.ticker,
-            "name": c.name,
-            "sector": c.sector,
-            "timeframe": c.timeframe,
-            "score": float(c.score),
-            "rim": float(c.rim),
-            "last": float(c.last),
-            "entry_price": float(c.entry_price),
-        }
-        for c in out
-    ]
+    final: List[Dict] = []
+
+    if no_trade:
+        # Tier0 exception: max 1, cooldownあり
+        if not in_cooldown(state, "tier0_exception_until"):
+            tier0 = [c for c in cands if c.get("setup") == "A1-Strong"]
+            if tier0:
+                pick = tier0[0]
+                final = [pick]
+                entry_price = float(pick.get("entry_price", (pick["entry_low"] + pick["entry_high"]) / 2.0))
+                record_paper_trade(
+                    state,
+                    bucket="tier0_exception",
+                    ticker=pick["ticker"],
+                    date_str=today_str,
+                    entry=entry_price,
+                    sl=pick["sl"],
+                    tp2=pick["tp2"],
+                    expected_r=float(pick["rr"]),
+                )
+    else:
+        final = _apply_setup_mix(cands, max_display(macro_on))
+
+    # Tier2 liquidity cushion
+    filtered = []
+    for c in final:
+        if c.get("tier") == 2 and c.get("setup") in ("A2", "B"):
+            if float(c.get("adv20", 0.0)) < 300e6:
+                continue
+        filtered.append(c)
+    final = filtered
+
+    # distortion internal (non-display)
+    if not in_cooldown(state, "distortion_until"):
+        internal = [c for c in cands if c.get("setup") in ("A1-Strong", "A2")][:2]
+        for c in internal:
+            entry_price = float(c.get("entry_price", (c["entry_low"] + c["entry_high"]) / 2.0))
+            record_paper_trade(
+                state,
+                bucket="distortion",
+                ticker=c["ticker"],
+                date_str=today_str,
+                entry=entry_price,
+                sl=c["sl"],
+                tp2=c["tp2"],
+                expected_r=float(c["rr"]),
+            )
+
+    # Tier0 exception brake
+    pt = state.get("paper_trades", {}).get("tier0_exception", [])
+    closed = [x for x in pt if x.get("status") == "CLOSED" and x.get("realized_r") is not None]
+    if len(closed) >= 4:
+        lastN = closed[-4:]
+        s = float(np.sum([safe_float(x.get("realized_r"), 0.0) for x in lastN]))
+        if s <= -2.0:
+            set_cooldown_days(state, "tier0_exception_until", days=4)
+
+    avg_adj = float(np.mean([c["adj_ev"] for c in final])) if final else 0.0
+    gu_ratio = float(gu_cnt / max(1, raw_n)) if raw_n > 0 else 0.0
+
+    meta = {
+        "raw": int(raw_n),
+        "final": int(len(final)),
+        "avgAdjEV": float(avg_adj),
+        "GU": float(gu_ratio),
+        "saucers": scan_saucers(ohlc_map, uni, tcol, max_n=5),
+    }
+
+    return final, meta, ohlc_map
