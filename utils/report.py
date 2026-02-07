@@ -119,12 +119,14 @@ def build_report(
 
     # Summary (all displayed cands, in order)
     if cands:
-        lines.append("まとめ（指値一覧）")
-        for i, c in enumerate(cands, 1):
+        lines.append("まとめ")
+        for c in cands:
             ticker = str(c.get("ticker", ""))
             name = str(c.get("name", ticker))
+            sector = str(c.get("sector", ""))
             entry = _fmt_yen(c.get("entry_price", (c.get("entry_low",0)+c.get("entry_high",0))/2.0))
-            lines.append(f"{i}. {ticker} {name}：{entry} 円")
+            lines.append(f"■ {ticker}.T {name}（{sector}）")
+            lines.append(f"・指値目安：{entry} 円")
         lines.append("")
 
     # Saucer bucket (separate; requested to be at the very end)
