@@ -25,6 +25,11 @@ def _resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Resample daily OHLCV to weekly/monthly bars."""
     if df is None or df.empty:
         return pd.DataFrame()
+
+    # pandas 3.0+ tightened/removed some legacy offset aliases (e.g. 'M').
+    # We use 'M' to mean month-end, so map to the supported equivalent.
+    if rule == "M":
+        rule = "ME"
     d = df.copy()
     if not isinstance(d.index, pd.DatetimeIndex):
         d.index = pd.to_datetime(d.index, errors="coerce")
