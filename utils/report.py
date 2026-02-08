@@ -134,9 +134,10 @@ def build_report(
 
         for key in ("D", "W", "M"):
             items = _iter_tf(key)[:5]
-            if not items:
-                continue
             lines.append(f"🥣 ソーサー枠（{_tf_title(key)}）最大5")
+            if not items:
+                lines.append("・該当なし")
+                continue
             for s in items:
                 ticker = str(s.get("ticker", ""))
                 name = str(s.get("name", ticker))
