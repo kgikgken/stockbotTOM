@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from utils.util import safe_float
+from utils.util import safe_float, adv20, atr_pct_last
 
 
 @dataclass
@@ -130,6 +130,20 @@ def scan_saucers(
         if df is None or df.empty or len(df) < 180:
             continue
 
+        # Sanity / liquidity guardrails (avoid broken series causing absurd rim prices)
+        last_close = safe_float(df["Close"].iloc[-1], np.nan)
+        if not np.isfinite(last_close):
+            continue
+        # JP equities price sanity (very loose). Reject obvious scale bugs (e.g. billions).
+        if last_close < 50.0 or last_close > 200000.0:
+            continue
+        adv = adv20(df)
+        atrp = atr_pct_last(df)
+        if (not np.isfinite(adv)) or adv < 100e6:
+            continue
+        if (not np.isfinite(atrp)) or atrp < 0.6:
+            continue
+
         name = str(row.get("name", ticker))
         sector = str(row.get("sector", row.get("industry_big", "不明")))
 
@@ -138,8 +152,8 @@ def scan_saucers(
             df["Close"],
             min_len=160,
             lookback=260,
-            min_progress=0.94,
-            min_depth=0.12,
+            min_progress=0.95,
+            min_depth=0.35,
             vertex_band=0.55,
         )
         if met:
@@ -166,8 +180,8 @@ def scan_saucers(
                 w["Close"],
                 min_len=50,
                 lookback=104,  # ~2y
-                min_progress=0.92,
-                min_depth=0.15,
+                min_progress=0.95,
+                min_depth=0.45,
                 vertex_band=0.60,
             )
             if met:
@@ -194,8 +208,8 @@ def scan_saucers(
                 m["Close"],
                 min_len=30,
                 lookback=120,  # up to 10y
-                min_progress=0.90,
-                min_depth=0.18,
+                min_progress=0.92,
+                min_depth=0.55,
                 vertex_band=0.70,
             )
             if met:
