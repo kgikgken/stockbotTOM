@@ -271,7 +271,7 @@ def run_screen(
         "final": int(len(final)),
         "avgAdjEV": float(avg_adj),
         "GU": float(gu_ratio),
-        "saucers": scan_saucers(ohlc_map, uni, tcol, max_n=5),
+        "saucers": scan_saucers(ohlc_map, uni, tcol, max_each=5),
     }
 
     return final, meta, ohlc_map
