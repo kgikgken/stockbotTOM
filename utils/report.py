@@ -26,7 +26,7 @@ def build_report(
     policy_lines: List[str],
     cands: List[Dict],
     pos_text: str,
-    saucers: List[Dict] | None = None,
+    saucers: Dict[str, List[Dict]] | List[Dict] | None = None,
 ) -> str:
     mkt_score = int(market.get("score", 50))
     mkt_comment = str(market.get("comment", "中立"))
@@ -115,19 +115,43 @@ def build_report(
         lines.append("")
 
     # Saucer bucket (separate; requested to be at the very end)
+    # Expected format: dict {"D":[...], "W":[...], "M":[...]}
     if saucers:
-        lines.append("🥣 ソーサー枠（週足/月足）最大5")
-        for s in saucers[:5]:
-            ticker = str(s.get("ticker", ""))
-            name = str(s.get("name", ticker))
-            sector = str(s.get("sector", ""))
-            tf = "週足" if str(s.get("timeframe", "W")) == "W" else "月足"
-            rim = _fmt_yen(s.get("entry_price", s.get("rim", 0.0)))
-            last = safe_float(s.get("last", 0.0), 0.0)
-            rim_f = safe_float(s.get("rim", 0.0), 0.0)
-            prog = (last / rim_f) if rim_f > 0 else 0.0
-            lines.append(f"■ {ticker} {name}（{sector}）[{tf}]")
-            lines.append(f"・指値目安（リム）：{rim} 円（進捗 {prog*100:.0f}%）")
-        lines.append("")
+        def _iter_tf(key: str):
+            if isinstance(saucers, dict):
+                return list(saucers.get(key, []) or [])
+            # backward-compat: legacy list with 'timeframe' = 'W'/'M'
+            if isinstance(saucers, list):
+                if key == "W":
+                    return [x for x in saucers if str(x.get("timeframe", "W")) == "W"]
+                if key == "M":
+                    return [x for x in saucers if str(x.get("timeframe", "W")) == "M"]
+                return []
+            return []
+
+        def _tf_title(key: str) -> str:
+            return {"D": "日足", "W": "週足", "M": "月足"}.get(key, key)
+
+        for key in ("D", "W", "M"):
+            items = _iter_tf(key)[:5]
+            if not items:
+                continue
+            lines.append(f"🥣 ソーサー枠（{_tf_title(key)}）最大5")
+            for s in items:
+                ticker = str(s.get("ticker", ""))
+                name = str(s.get("name", ticker))
+                sector = str(s.get("sector", ""))
+                rim = _fmt_yen(s.get("rim"))
+                progress = float(s.get("progress", 0.0))
+                prog_pct = int(round(progress * 100))
+                depth = float(s.get("depth", 0.0))
+                # Display:
+                #  - TF tag in [] for quick scan
+                #  - Rim price as execution anchor (limit at rim)
+                #  - Progress as % to rim (audit)
+                #  - Depth as % (cup depth)
+                lines.append(f"■ {ticker} {name}（{sector}）[{_tf_title(key)}]")
+                lines.append(f"・指値目安（リム）：{rim}（進捗 {prog_pct}% / 深さ {depth:.0%}）")
+
 
     return "\n".join(lines).rstrip() + "\n"
