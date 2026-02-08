@@ -157,6 +157,7 @@ def scan_saucers(
             min_progress=0.95,
             min_depth=0.35,
             vertex_band=0.55,
+                max_depth=0.75,
         )
         if met:
             out["D"].append(
@@ -185,6 +186,7 @@ def scan_saucers(
                 min_progress=0.95,
                 min_depth=0.45,
                 vertex_band=0.60,
+                max_depth=0.75,
             )
             if met:
                 out["W"].append(
@@ -202,7 +204,7 @@ def scan_saucers(
 
         # Monthly
         try:
-            m = _resample(df, "M")
+            m = _resample(df, "ME")  # pandas>=2 uses month-end "ME"
         except Exception:
             m = None
         if m is not None and not m.empty and len(m) >= 36:
@@ -213,6 +215,7 @@ def scan_saucers(
                 min_progress=0.92,
                 min_depth=0.55,
                 vertex_band=0.70,
+                max_depth=0.80,
             )
             if met:
                 out["M"].append(
