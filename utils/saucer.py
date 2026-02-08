@@ -36,6 +36,7 @@ def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     return out
 
 
+
 def _saucer_score(
     close: pd.Series,
     *,
@@ -43,58 +44,60 @@ def _saucer_score(
     lookback: int,
     min_progress: float,
     min_depth: float,
+    max_depth: float,
     vertex_band: float,
 ) -> Optional[Dict[str, float]]:
     """Return saucer metrics or None.
 
-    Heuristic saucer definition (auditable / deterministic):
-      - Rim = max(close) in lookback window
-      - Bottom = min(close) in lookback window
-      - Depth = (rim - bottom) / rim  (needs to be 'deep enough')
-      - Progress = close_last / rim   (needs to be close to rim)
-      - Vertex location: bottom should be around middle of window (avoid straight V)
+    「ソーサーボトム（カップ/皿）」の深さは浅すぎても(ノイズ)深すぎても(下落トレンド)質が落ちるため、
+    timeframe別に「最適レンジ」を採用する。
+
+    depth = (rim - bottom) / rim
+
+    出力する score は「候補の優先度」用途のみ。検知条件は progress / depth / vertex_band で決める。
     """
-    if close is None:
-        return None
-    c = close.dropna().astype(float)
-    if len(c) < min_len:
+    c = close.astype(float).dropna()
+    if len(c) < max(min_len, lookback + 5):
         return None
 
-    c = c.tail(lookback) if len(c) > lookback else c
-    if len(c) < min_len:
-        return None
+    seg = c.tail(lookback)
+    rim = float(seg.max())
+    bottom = float(seg.min())
+    last = float(seg.iloc[-1])
 
-    rim = float(np.nanmax(c.values))
-    bottom = float(np.nanmin(c.values))
-    last = float(c.iloc[-1])
-
-    if not (np.isfinite(rim) and np.isfinite(bottom) and np.isfinite(last)) or rim <= 0:
-        return None
-    if bottom <= 0:
+    if rim <= 0:
         return None
 
     depth = (rim - bottom) / rim
-    if depth < min_depth:
+    if not (np.isfinite(depth) and min_depth <= depth <= max_depth):
         return None
 
-    progress = last / rim
-    if progress < min_progress:
+    # Progress: how close last is to rim (0..1)
+    progress = (last - bottom) / max(1e-9, (rim - bottom))
+    if not (np.isfinite(progress) and progress >= min_progress):
         return None
 
-    # Vertex position should not be too close to the edges (avoid sharp V / straight decline)
-    idx_bottom = int(np.nanargmin(c.values))
-    mid = (len(c) - 1) / 2.0
-    vertex_pos = abs(idx_bottom - mid) / max(1.0, mid)  # 0 at center, 1 at edge
-    if vertex_pos > vertex_band:
+    # Vertex: bottom should be in the first half-ish (avoid V-shaped snapback)
+    idx_bottom = int(seg.values.argmin())
+    mid = int(len(seg) * 0.55)
+    if idx_bottom > mid:
         return None
 
-    # Smoothness proxy: penalize extremely jagged cups
-    # Use normalized std of returns as roughness.
-    rets = c.pct_change(fill_method=None).dropna()
-    rough = float(np.nanstd(rets.values)) if len(rets) >= 10 else 0.0
+    # Vertex band: last should not be too far above rim (avoid already extended)
+    if last > rim * (1.0 + vertex_band):
+        return None
 
-    # Ranking score: prefer deeper + closer to rim + smoother
-    score = (progress * 1.5) + (depth * 1.2) - (rough * 8.0)
+    # Roughness penalty: prefer smoother bowls (lower residual variance vs. rolling mean)
+    ma = seg.rolling(5, min_periods=3).mean()
+    rough = float(np.nanstd((seg - ma) / rim))
+
+    # Depth preference: maximize closeness to target depth (center of optimal range)
+    target = (min_depth + max_depth) / 2.0
+    width = max(1e-6, (max_depth - min_depth))
+    depth_pen = abs(depth - target) / width  # 0 at target, ~1 at edge
+
+    # Score: prioritize completion first, then depth quality, then smoothness
+    score = (progress * 2.0) - (depth_pen * 0.60) - (rough * 8.0)
 
     return {
         "rim": rim,
@@ -104,7 +107,6 @@ def _saucer_score(
         "progress": float(progress),
         "score": float(score),
     }
-
 
 def scan_saucers(
     ohlc_map: Dict[str, pd.DataFrame],
