@@ -57,6 +57,7 @@ def _saucer_score(
     vertex_band: tuple[float, float] = (0.35, 0.65),
     min_progress: float = 0.95,
     depth_opt: float = 0.28,
+    rim_frac: float = 1.0,
 ) -> dict | None:
     """
     Returns dict:
