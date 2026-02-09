@@ -33,6 +33,15 @@ def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         }
     )
     out = out.dropna()
+        # limit per timeframe
+    try:
+        me = int(max_each)
+    except Exception:
+        me = 5
+    if me > 0:
+        for tf in list(out.keys()):
+            out[tf] = out[tf][:me]
+
     return out
 
 
@@ -157,7 +166,7 @@ def _saucer_score(
         "length": int(n),
         "rim": float(rim),
     }
-def scan_saucers(universe: list[dict], ohlc_map: dict[str, pd.DataFrame]) -> dict[str, list[SaucerHit]]:
+def scan_saucers(universe, ohlc_map, max_each: int = 5):
     """
     Saucer (rounding bottom) scanner for D/W/M timeframes.
 
