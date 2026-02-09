@@ -166,121 +166,160 @@ def _saucer_score(
         "length": int(n),
         "rim": float(rim),
     }
-def scan_saucers(universe, ohlc_map, max_each: int = 5):
+def scan_saucers(ohlc_map, universe, tcol: str | None = None, max_each: int = 5):
+    """Scan saucer-bottom candidates on D/W/M timeframes.
+
+    Parameters
+    ----------
+    ohlc_map : dict[str, pandas.DataFrame]
+        Per-ticker daily OHLCV (index: datetime-like).
+    universe : pandas.DataFrame | list | tuple | set | dict
+        Universe source. If DataFrame, will auto-detect ticker/name/sector columns.
+        If list/set/tuple, elements may be ticker strings or dict-like rows.
+    tcol : str | None
+        Optional ticker column name when universe is a DataFrame.
+    max_each : int
+        Max tickers per timeframe to return.
+
+    Returns
+    -------
+    dict[str, list[dict]]
+        Keys: 'D','W','M' (daily/weekly/monthly). Values: list of dicts with
+        ticker/name/sector/timeframe/entry_rim/progress/depth.
     """
-    Saucer (rounding bottom) scanner for D/W/M timeframes.
+    # ---- normalize universe -> iterable of (ticker, name, sector) ----
+    ticker_meta = {}
 
-    Output dict keys: "D", "W", "M" -> list[SaucerHit] sorted by quality.
-    Each timeframe is capped later in report layer (max 5 per TF).
+    def _coerce_meta_from_row(row):
+        if isinstance(row, dict):
+            t = str(row.get("ticker") or row.get("code") or row.get("symbol") or "").strip()
+            if not t:
+                return None
+            name = row.get("name") or row.get("company") or row.get("銘柄名") or ""
+            sector = row.get("sector") or row.get("industry") or row.get("業種") or ""
+            return t, str(name) if name is not None else "", str(sector) if sector is not None else ""
+        # treat as ticker string
+        t = str(row).strip()
+        if not t:
+            return None
+        return t, "", ""
 
-    Notes:
-    - We intentionally bias toward *moderate* depth bases. Extremely deep bases are filtered out.
-    - Completion requires progress near the rim.
-    - Minimal volume confirmation (dry-up then expansion) is used when volume exists.
-    """
+    if isinstance(universe, pd.DataFrame):
+        cols = list(universe.columns)
+        if tcol is None:
+            # auto-detect ticker column
+            for cand in ("ticker", "code", "symbol", "銘柄コード"):
+                for c in cols:
+                    if str(c).lower() == cand:
+                        tcol = c
+                        break
+                if tcol is not None:
+                    break
+            if tcol is None and len(cols) > 0:
+                # fallback: first column
+                tcol = cols[0]
 
-    def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-        # expects columns: Open/High/Low/Close/Volume
-        if df is None or df.empty:
-            return pd.DataFrame()
-        x = df.copy()
-        if not isinstance(x.index, pd.DatetimeIndex):
-            x.index = pd.to_datetime(x.index, errors="coerce")
-        x = x.dropna(subset=["Close"])
-        if x.empty:
-            return pd.DataFrame()
-        ohlc = {
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Close": "last",
-            "Volume": "sum",
-        }
-        y = x.resample(rule).apply(ohlc).dropna(subset=["Close"])
-        return y
+        name_col = None
+        for cand in ("name", "company", "銘柄名"):
+            for c in cols:
+                if str(c).lower() == cand:
+                    name_col = c
+                    break
+            if name_col is not None:
+                break
 
-    # Config tuned for "quality" bases.
+        sector_col = None
+        for cand in ("sector", "industry", "業種"):
+            for c in cols:
+                if str(c).lower() == cand:
+                    sector_col = c
+                    break
+            if sector_col is not None:
+                break
+
+        for _, r in universe.iterrows():
+            t = str(r.get(tcol, "")).strip()
+            if not t:
+                continue
+            name = str(r.get(name_col, "")).strip() if name_col else ""
+            sector = str(r.get(sector_col, "")).strip() if sector_col else ""
+            ticker_meta[t] = (name, sector)
+
+        tickers = list(ticker_meta.keys())
+
+    elif isinstance(universe, (list, tuple, set)):
+        tickers = []
+        for row in universe:
+            meta = _coerce_meta_from_row(row)
+            if not meta:
+                continue
+            t, name, sector = meta
+            tickers.append(t)
+            if t not in ticker_meta:
+                ticker_meta[t] = (name, sector)
+
+    elif isinstance(universe, dict):
+        # if dict: keys are tickers OR dict has 'tickers' field
+        if "tickers" in universe and isinstance(universe["tickers"], (list, tuple, set)):
+            tickers = [str(x).strip() for x in universe["tickers"] if str(x).strip()]
+        else:
+            tickers = [str(k).strip() for k in universe.keys() if str(k).strip()]
+        for t in tickers:
+            ticker_meta.setdefault(t, ("", ""))
+
+    else:
+        # unknown type: try to coerce single ticker
+        meta = _coerce_meta_from_row(universe)
+        tickers = []
+        if meta:
+            t, name, sector = meta
+            tickers = [t]
+            ticker_meta[t] = (name, sector)
+
+    out = {"D": [], "W": [], "M": []}
+
     cfg = {
-        "D": dict(lookback=220, min_len=70, max_len=220, min_depth=0.18, max_depth=0.45, min_progress=0.97, depth_opt=0.28, ma_win=50),
-        "W": dict(lookback=160, min_len=26, max_len=120, min_depth=0.15, max_depth=0.40, min_progress=0.98, depth_opt=0.25, ma_win=30),
-        "M": dict(lookback=80,  min_len=12, max_len=60,  min_depth=0.12, max_depth=0.33, min_progress=0.985, depth_opt=0.22, ma_win=10),
+        "D": dict(min_len=60, max_len=220, min_depth=0.35, max_depth=0.65, rim_frac=0.15, min_progress=0.92),
+        "W": dict(min_len=40, max_len=180, min_depth=0.45, max_depth=0.85, rim_frac=0.18, min_progress=0.92),
+        "M": dict(min_len=18, max_len=80,  min_depth=0.55, max_depth=0.90, rim_frac=0.20, min_progress=0.95),
     }
 
-    out: dict[str, list[SaucerHit]] = {"D": [], "W": [], "M": []}
-
-    for row in universe:
-        ticker = str(row.get("ticker") or row.get("code") or "").strip()
-        if not ticker:
-            continue
-        df = ohlc_map.get(ticker)
-        if df is None or df.empty or "Close" not in df.columns:
-            continue
-
-        name = str(row.get("name", ticker))
-        sector = str(row.get("sector", row.get("industry_big", "不明")))
-
-        # Prepare D/W/M data
-        df_d = df.copy()
-        df_w = _resample(df, "W-FRI")
-        df_m = _resample(df, "M")
-
-        for tf, dfx in (("D", df_d), ("W", df_w), ("M", df_m)):
-            c = cfg[tf]
-            if dfx is None or dfx.empty or len(dfx) < c["min_len"]:
-                continue
-
-            dfx = dfx.tail(c["lookback"]).copy()
-
-            close = dfx["Close"].to_numpy(dtype=float)
-            volume = dfx["Volume"].to_numpy(dtype=float) if "Volume" in dfx.columns else None
-
-            # MA sanity: last close should be above MA (helps avoid bases that are still broken)
-            ma_win = int(c["ma_win"])
-            if len(close) >= ma_win:
-                ma = float(np.mean(close[-ma_win:]))
-                if close[-1] < ma:
-                    continue
-
-            met = _saucer_score(
-                close,
-                volume,
-                min_len=int(c["min_len"]),
-                max_len=int(c["max_len"]),
-                min_depth=float(c["min_depth"]),
-                max_depth=float(c["max_depth"]),
-                vertex_band=(0.35, 0.65),
-                min_progress=float(c["min_progress"]),
-                depth_opt=float(c["depth_opt"]),
-            )
-            if met is None:
-                continue
-
-            out[tf].append(
-                SaucerHit(
-                    ticker=ticker,
-                    name=name,
-                    sector=sector,
-                    timeframe=tf,
-                    rim_price=float(met["rim"]),
-                    progress=float(met["progress"]),
-                    depth=float(met["depth"]),
-                    score=float(met["score"]),
-                )
-            )
-
-    # Sort: score desc -> progress desc -> depth closer to optimal -> ticker
-    def _sort_key(hit: SaucerHit):
-        c = cfg[hit.timeframe]
-        depth_opt = float(c["depth_opt"])
-        return (
-            hit.score,
-            hit.progress,
-            -abs(hit.depth - depth_opt),
-            hit.rim_price,
-            hit.ticker,
-        )
-
     for tf in ("D", "W", "M"):
-        out[tf].sort(key=_sort_key, reverse=True)
+        met = []
+        rule = "ME" if tf == "M" else tf  # pandas >=2.2 uses 'ME' for month-end
+        for ticker in tickers:
+            df = ohlc_map.get(ticker)
+            if df is None or len(df) < 60:
+                continue
+
+            dfr = _resample(df, rule) if tf != "D" else df.copy()
+            if dfr is None or len(dfr) < cfg[tf]["min_len"]:
+                continue
+
+            m = _saucer_score(
+                dfr,
+                min_len=cfg[tf]["min_len"],
+                max_len=cfg[tf]["max_len"],
+                rim_frac=cfg[tf]["rim_frac"],
+                min_depth=cfg[tf]["min_depth"],
+                max_depth=cfg[tf]["max_depth"],
+                min_progress=cfg[tf]["min_progress"],
+            )
+            if not m:
+                continue
+
+            name, sector = ticker_meta.get(ticker, ("", ""))
+            met.append({
+                "ticker": ticker,
+                "name": name,
+                "sector": sector,
+                "timeframe": "日足" if tf == "D" else ("週足" if tf == "W" else "月足"),
+                "entry_rim": float(m["rim_price"]),
+                "progress": float(m["progress"]),
+                "depth": float(m["depth_pct"]),
+            })
+
+        met.sort(key=lambda x: (x["progress"], x["depth"]), reverse=True)
+        out[tf] = met[:max_each]
 
     return out
