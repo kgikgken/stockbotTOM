@@ -76,22 +76,34 @@ def _saucer_score(
         return None
     if n > max_len:
         close = close[-max_len:]
+        high = high[-max_len:]
+        low = low[-max_len:]
+        close = np.asarray(close, dtype=float)
+        close_arr = close.reshape(-1)
         if volume is not None:
             volume = volume[-max_len:]
         n = int(len(close))
 
     if np.any(~np.isfinite(close)) or np.nanmin(close) <= 0:
         return None
-    close = close.astype(float)
+    # Convert to a plain ndarray so integer indexing is positional.
+    # (pandas Series uses label-based indexing for `s[i]`, which can raise KeyError)
+    close = np.asarray(close, dtype=float)
+    high = np.asarray(high, dtype=float)
+    low = np.asarray(low, dtype=float)
+    # Flatten in case inputs are (n,1) arrays
+    close_arr = close.reshape(-1)
+    high_arr = high.reshape(-1)
+    low_arr = low.reshape(-1)
 
     # rims and bottom
     left_len = max(5, n // 4)
     right_len = max(5, n // 4)
-    left_rim = float(np.max(close[:left_len]))
-    right_rim = float(np.max(close[-right_len:]))
+    left_rim = float(np.max(close_arr[:left_len]))
+    right_rim = float(np.max(close_arr[-right_len:]))
     rim = float(min(left_rim, right_rim))
-    bottom_idx = int(np.argmin(close))
-    bottom = float(close[bottom_idx])
+    bottom_idx = int(np.argmin(close_arr))
+    bottom = float(close_arr[bottom_idx])
     if rim <= 0 or bottom <= 0:
         return None
 
@@ -103,7 +115,7 @@ def _saucer_score(
     if not (vertex_band[0] <= vertex_pos <= vertex_band[1]):
         return None
 
-    progress = float(close[-1] / rim)
+    progress = float(close_arr[-1] / rim)
     if progress < min_progress:
         return None
 
@@ -119,15 +131,15 @@ def _saucer_score(
             return 0.0
         return float(np.sum(xx * (yy - yy.mean())) / denom)
 
-    slope_l = _slope(x[: bottom_idx + 1], close[: bottom_idx + 1])
-    slope_r = _slope(x[bottom_idx:], close[bottom_idx:])
+    slope_l = _slope(x[: bottom_idx + 1], close_arr[: bottom_idx + 1])
+    slope_r = _slope(x[bottom_idx:], close_arr[bottom_idx:])
     if slope_l >= 0:
         return None
     if slope_r <= 0:
         return None
 
     # reject sharp V-bottoms
-    rets = np.diff(close) / close[:-1]
+    rets = np.diff(close_arr) / close_arr[:-1]
     if len(rets) >= 20:
         win = min(10, bottom_idx - 1, len(rets) - bottom_idx - 1) if bottom_idx > 1 else 0
         if win >= 3:
