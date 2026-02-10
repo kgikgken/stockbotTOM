@@ -22,7 +22,28 @@ class SaucerHit:
 
 
 def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    ohlc = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    """Resample an OHLCV DataFrame.
+
+    Expects columns Open/High/Low/Close/Volume (case-sensitive) and a DatetimeIndex.
+    Returns a resampled OHLCV DataFrame with NaN rows removed.
+    """
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
+
+    d = df.copy()
+    if not isinstance(d.index, pd.DatetimeIndex):
+        # Best-effort: try to convert index to datetime.
+        try:
+            d.index = pd.to_datetime(d.index)
+        except Exception:
+            return pd.DataFrame()
+
+    need_cols = ["Open", "High", "Low", "Close", "Volume"]
+    for c in need_cols:
+        if c not in d.columns:
+            return pd.DataFrame()
+
+    ohlc = d[need_cols].copy()
     out = ohlc.resample(rule).agg(
         {
             "Open": "first",
@@ -32,16 +53,7 @@ def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
             "Volume": "sum",
         }
     )
-    out = out.dropna()
-        # limit per timeframe
-    try:
-        me = int(max_each)
-    except Exception:
-        me = 5
-    if me > 0:
-        for tf in list(out.keys()):
-            out[tf] = out[tf][:me]
-
+    out = out.dropna(how="any")
     return out
 
 
@@ -71,30 +83,25 @@ def _saucer_score(
     with deeper bases generally lower quality / higher risk. We enforce min/max depth and
     add a soft penalty away from depth_opt.
     """
-    n = int(len(close))
+    close_arr = np.asarray(close, dtype=float).reshape(-1)
+    n = int(close_arr.size)
     if n < min_len:
         return None
+
+    # truncate to max_len for speed
     if n > max_len:
-        close = close[-max_len:]
-        high = high[-max_len:]
-        low = low[-max_len:]
-        close = np.asarray(close, dtype=float)
-        close_arr = close.reshape(-1)
+        close_arr = close_arr[-max_len:]
         if volume is not None:
-            volume = volume[-max_len:]
-        n = int(len(close))
+            volume = np.asarray(volume, dtype=float).reshape(-1)[-max_len:]
+        n = int(close_arr.size)
+
+    # downstream code expects `close` to be an ndarray
+    close = close_arr
 
     if np.any(~np.isfinite(close)) or np.nanmin(close) <= 0:
         return None
-    # Convert to a plain ndarray so integer indexing is positional.
-    # (pandas Series uses label-based indexing for `s[i]`, which can raise KeyError)
-    close = np.asarray(close, dtype=float)
-    high = np.asarray(high, dtype=float)
-    low = np.asarray(low, dtype=float)
     # Flatten in case inputs are (n,1) arrays
     close_arr = close.reshape(-1)
-    high_arr = high.reshape(-1)
-    low_arr = low.reshape(-1)
 
     # rims and bottom
     left_len = max(5, n // 4)
