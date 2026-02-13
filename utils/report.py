@@ -86,9 +86,56 @@ def build_report(
             lines.append("")
             # Entry
             lines.append("【エントリー】")
-            lines.append(f"・指値目安（中央）：{_fmt_yen(c.get('entry_price', (c.get('entry_low',0)+c.get('entry_high',0))/2.0))} 円")
+            entry_low = safe_float(c.get('entry_low'), 0.0)
+            entry_high = safe_float(c.get('entry_high'), 0.0)
+            entry_price = safe_float(c.get('entry_price'), (entry_low + entry_high) / 2.0)
+            sl = safe_float(c.get('sl'), 0.0)
+            close_last = safe_float(c.get('close_last'), 0.0)
+            risk_pct = safe_float(c.get('risk_pct'), 0.0)
+            if risk_pct <= 0.0 and entry_price > 0 and sl > 0:
+                risk_pct = (entry_price - sl) / entry_price * 100.0
+            
+            lines.append(f"・指値目安（中央）：{_fmt_yen(entry_price)} 円")
+            if entry_low > 0 and entry_high > 0:
+                lines.append(f"・エントリー帯：{_fmt_yen(entry_low)} 〜 {_fmt_yen(entry_high)} 円")
+            if close_last > 0 and entry_low > 0 and entry_high > 0:
+                if close_last < entry_low:
+                    need = (entry_low / close_last - 1.0) * 100.0
+                    dist_txt = f"（帯まで +{need:.1f}%）"
+                elif close_last > entry_high:
+                    need = (close_last / entry_high - 1.0) * 100.0
+                    dist_txt = f"（帯まで -{need:.1f}%）"
+                else:
+                    dist_txt = "（帯内）"
+                lines.append(f"・現値（終値）：{_fmt_yen(close_last)} 円{dist_txt}")
+            
             lines.append(f"・現値IN：{'OK' if market_in_ok else 'NG'}")
-            lines.append(f"・損切り：{_fmt_yen(c.get('sl', 0.0))} 円")
+            if not market_in_ok:
+                # NG reason (deterministic, aligned with entry_mode logic and global constraints)
+                p_hit0 = safe_float(c.get('p_hit'), 0.0)
+                reason = None
+                if no_trade:
+                    reason = "新規停止中"
+                elif macro_on:
+                    reason = "重要イベント警戒"
+                elif bool(c.get('gu', False)):
+                    reason = "GU（寄り後再判定）"
+                elif close_last > 0 and entry_low > 0 and close_last < entry_low:
+                    reason = "現値がエントリー帯より下（待ち）"
+                elif close_last > 0 and entry_high > 0 and close_last > entry_high:
+                    reason = "現値がエントリー帯より上（押し待ち/指値）"
+                elif p_hit0 < 0.750:
+                    reason = f"到達確率不足（p={p_hit0:.3f}<0.750）"
+                elif mkt_score < 60:
+                    reason = f"地合い不足（{mkt_score}<60）"
+                else:
+                    reason = "条件未達"
+                lines.append(f"・NG理由：{reason}")
+            
+            lines.append(f"・損切り：{_fmt_yen(sl)} 円")
+            warn = " ⚠" if risk_pct >= 8.0 else ""
+            if risk_pct > 0:
+                lines.append(f"・リスク幅：{risk_pct:.1f}%{warn}")
             lines.append("")
             # Targets (single line)
             lines.append("【利確目標】")
@@ -97,12 +144,16 @@ def build_report(
             # Indicators
             lines.append("【指標（参考）】")
             lines.append(f"・CAGR寄与度（/日）：{c.get('cagr', 0.0):.2f}")
-            lines.append(f"・到達確率（目安）：{c.get('p_hit', 0.0):.3f}")
-            p_hit = float(c.get('p_hit', 0.0) or 0.0)
-            exp_r_hit = float(c.get('exp_r_hit', (c.get('rr', 0.0) or 0.0) * p_hit) or 0.0)
-            lines.append(f"・期待R×到達確率：{exp_r_hit:.2f}")
-            lines.append(f"・RR（TP1基準）：{c.get('rr', 0.0):.2f}")
-            lines.append(f"・想定日数（中央値）：{c.get('expected_days', 0.0):.1f}日")
+            p_hit = safe_float(c.get('p_hit'), 0.0)
+            rr = safe_float(c.get('rr'), 0.0)
+            exp_r_hit = safe_float(c.get('exp_r_hit'), rr * p_hit)
+            p_be = (1.0 / (rr + 1.0)) if rr > 0 else 1.0
+            ev_r = (p_hit * rr) - ((1.0 - p_hit) * 1.0)
+            lines.append(f"・到達確率（目安）：{p_hit:.3f}（損益分岐 p={p_be:.3f}）")
+            lines.append(f"・期待値（R）：{ev_r:.2f}R")
+            lines.append(f"・期待R×到達確率（参考）：{exp_r_hit:.2f}")
+            lines.append(f"・RR（TP1基準）：{rr:.2f}")
+            lines.append(f"・想定日数（中央値）：{safe_float(c.get('expected_days'), 0.0):.1f}日")
             lines.append("")
     else:
         lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
