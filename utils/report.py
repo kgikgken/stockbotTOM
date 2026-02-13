@@ -92,6 +92,17 @@ def build_report(
             sl = safe_float(c.get('sl'), 0.0)
             close_last = safe_float(c.get('close_last'), 0.0)
             risk_pct = safe_float(c.get('risk_pct'), 0.0)
+            rr0 = safe_float(c.get('rr'), 0.0)
+            p_hit0 = safe_float(c.get('p_hit'), 0.0)
+            p_be0 = (1.0 / (rr0 + 1.0)) if rr0 > 0 else 1.0
+            band_tol = 0.0005  # 0.05%: 表示丸め/取得誤差の吸収（screener側と合わせる）
+            in_band_tol = (
+                (close_last > 0)
+                and (entry_low > 0)
+                and (entry_high > 0)
+                and (close_last >= entry_low * (1.0 - band_tol))
+                and (close_last <= entry_high * (1.0 + band_tol))
+            )
             if risk_pct <= 0.0 and entry_price > 0 and sl > 0:
                 risk_pct = (entry_price - sl) / entry_price * 100.0
             
@@ -99,20 +110,25 @@ def build_report(
             if entry_low > 0 and entry_high > 0:
                 lines.append(f"・エントリー帯：{_fmt_yen(entry_low)} 〜 {_fmt_yen(entry_high)} 円")
             if close_last > 0 and entry_low > 0 and entry_high > 0:
-                if close_last < entry_low:
+                # Distance to entry band (readability-first).
+                # IMPORTANT: use the same tolerance as the screener's entry_mode (band_tol),
+                # so the report and the decision logic never diverge.
+                if in_band_tol:
+                    dist_txt = "（帯内）"
+                elif close_last < entry_low:
                     need = (entry_low / close_last - 1.0) * 100.0
                     dist_txt = f"（帯まで +{need:.1f}%）"
-                elif close_last > entry_high:
+                else:
                     need = (close_last / entry_high - 1.0) * 100.0
                     dist_txt = f"（帯まで -{need:.1f}%）"
-                else:
-                    dist_txt = "（帯内）"
                 lines.append(f"・現値（終値）：{_fmt_yen(close_last)} 円{dist_txt}")
+
+            if bool(c.get('gu', False)):
+                lines.append("・GU：Yes（寄り後再判定）")
             
             lines.append(f"・現値IN：{'OK' if market_in_ok else 'NG'}")
             if not market_in_ok:
                 # NG reason (deterministic, aligned with entry_mode logic and global constraints)
-                p_hit0 = safe_float(c.get('p_hit'), 0.0)
                 reason = None
                 if no_trade:
                     reason = "新規停止中"
@@ -120,12 +136,14 @@ def build_report(
                     reason = "重要イベント警戒"
                 elif bool(c.get('gu', False)):
                     reason = "GU（寄り後再判定）"
-                elif close_last > 0 and entry_low > 0 and close_last < entry_low:
+                elif close_last > 0 and entry_low > 0 and close_last < entry_low * (1.0 - band_tol):
                     reason = "現値がエントリー帯より下（待ち）"
-                elif close_last > 0 and entry_high > 0 and close_last > entry_high:
+                elif close_last > 0 and entry_high > 0 and close_last > entry_high * (1.0 + band_tol):
                     reason = "現値がエントリー帯より上（押し待ち/指値）"
-                elif p_hit0 < 0.750:
-                    reason = f"到達確率不足（p={p_hit0:.3f}<0.750）"
+                elif (in_band_tol and risk_pct >= 8.0):
+                    reason = f"リスク幅大（{risk_pct:.1f}%）"
+                elif (in_band_tol and (p_hit0 < (p_be0 + 0.10))):
+                    reason = f"到達確率が損益分岐を十分上回らない（p={p_hit0:.3f} / p_be={p_be0:.3f}）"
                 elif mkt_score < 60:
                     reason = f"地合い不足（{mkt_score}<60）"
                 else:
@@ -144,10 +162,10 @@ def build_report(
             # Indicators
             lines.append("【指標（参考）】")
             lines.append(f"・CAGR寄与度（/日）：{c.get('cagr', 0.0):.2f}")
-            p_hit = safe_float(c.get('p_hit'), 0.0)
-            rr = safe_float(c.get('rr'), 0.0)
+            p_hit = p_hit0
+            rr = rr0
             exp_r_hit = safe_float(c.get('exp_r_hit'), rr * p_hit)
-            p_be = (1.0 / (rr + 1.0)) if rr > 0 else 1.0
+            p_be = p_be0
             ev_r = (p_hit * rr) - ((1.0 - p_hit) * 1.0)
             lines.append(f"・到達確率（目安）：{p_hit:.3f}（損益分岐 p={p_be:.3f}）")
             lines.append(f"・期待値（R）：{ev_r:.2f}R")
