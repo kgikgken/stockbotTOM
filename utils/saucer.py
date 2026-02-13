@@ -385,6 +385,30 @@ def _cup_with_handle_metrics(
         atrp=atrp,
         tf=tf,
     )
+
+    # Enforce the max risk *across the actionable entry zone*.
+    # We keep your preferred near-rim zone shape, but if the upper end would exceed
+    # the risk cap, we cap the entry_high down to the highest price that still
+    # satisfies max_risk_pct given the computed SL.
+    if (
+        np.isfinite(entry_low)
+        and np.isfinite(entry_high)
+        and entry_low > 0
+        and entry_high > 0
+        and np.isfinite(sl_price)
+        and sl_price > 0
+        and max_risk_pct > 0
+    ):
+        # highest entry that keeps risk <= cap
+        cap_high = sl_price / (1.0 - max_risk_pct / 100.0)
+        if np.isfinite(cap_high) and cap_high > 0:
+            entry_high = float(min(entry_high, cap_high))
+            if entry_high < entry_low:
+                return None
+            # recompute mid-zone risk after capping
+            entry_mid = (entry_low + entry_high) / 2.0
+            risk_pct = (entry_mid - sl_price) / entry_mid * 100.0 if entry_mid > 0 else float("nan")
+
     if np.isfinite(risk_pct) and risk_pct > max_risk_pct:
         return None
 
