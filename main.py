@@ -1,3 +1,14 @@
+"""stockbotTOM entry point.
+
+Why `send_line` is resolved dynamically:
+Some CI/runner layouts can accidentally import an unexpected `utils.line` module
+or a stale cached file that does not expose `send_line`, causing an import-time
+crash (ImportError: cannot import name 'send_line').
+
+This file resolves the sender at runtime and keeps a safe fallback that
+preserves the existing contract: `send_line(text: str) -> None`.
+"""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -17,7 +28,68 @@ from utils.screener import run_screen
 from utils.screen_logic import weekly_max_new, no_trade_conditions
 from utils.position import load_positions, analyze_positions
 from utils.report import build_report
-from utils.line import send_line
+
+from typing import Callable
+
+def _resolve_send_line() -> Callable[[str], None]:
+    """Resolve the LINE sender function.
+
+    Prefer `utils.line.send_line` if available; otherwise, fall back to an
+    internal implementation that matches the existing Worker contract.
+    """
+    # 1) Try to import our module and locate a compatible callable.
+    try:
+        import utils.line as _line  # type: ignore
+    except Exception:
+        _line = None  # type: ignore
+
+    if _line is not None:
+        for name in ("send_line", "send", "send_line_message"):
+            fn = getattr(_line, name, None)
+            if callable(fn):
+                return fn  # type: ignore[return-value]
+
+    # 2) Fallback: send via WORKER_URL if possible, otherwise print.
+    def _fallback(text: str) -> None:
+        import os
+        import time
+
+        worker_url = os.getenv("WORKER_URL")
+        if not worker_url:
+            print(text)
+            return
+
+        try:
+            import requests  # local import: keep module import resilient
+        except Exception:
+            # If requests isn't available, do not fail the run.
+            print(text)
+            return
+
+        chunk_size = 3800
+        chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+
+        for ch in chunks:
+            last_err = ""
+            for attempt in range(3):
+                try:
+                    r = requests.post(worker_url, json={"text": ch}, timeout=20)
+                    body = str(getattr(r, "text", ""))[:200]
+                    print("[LINE RESULT]", getattr(r, "status_code", "?"), body)
+                    if 200 <= int(getattr(r, "status_code", 0)) < 300:
+                        last_err = ""
+                        break
+                    last_err = f"HTTP {getattr(r, 'status_code', '?')}: {body}"
+                except Exception as e:
+                    last_err = repr(e)
+                time.sleep(0.8 * (2**attempt))
+            if last_err:
+                print("[LINE ERROR]", last_err)
+
+    return _fallback
+
+
+send_line = _resolve_send_line()
 
 def main() -> None:
     today_str = jst_today_str()
