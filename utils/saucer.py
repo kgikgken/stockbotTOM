@@ -152,7 +152,7 @@ def _calc_sl_and_risk(
     atr_px = ref_px * (atrp / 100.0) if (atrp > 0 and ref_px > 0) else 0.0
 
     # Pad below handle low: smaller on daily, larger on weekly/monthly.
-    pad_atr = {"D": 0.55, "W": 0.75, "M": 1.00}.get(tf, 0.65)
+    pad_atr = {"D": 0.55, "W": 0.65, "M": 1.00}.get(tf, 0.65)
     sl = handle_low_wick - pad_atr * atr_px if (np.isfinite(handle_low_wick) and handle_low_wick > 0) else float("nan")
     if not (np.isfinite(sl) and sl > 0):
         sl = handle_low_wick if (np.isfinite(handle_low_wick) and handle_low_wick > 0) else float("nan")
@@ -500,7 +500,7 @@ def scan_saucers(
             min_cup_len=90,
             min_progress=0.84,
             min_depth=0.10,
-            max_depth=0.60,
+            max_depth=0.55,
             left_rim_frac=0.35,
             rim_tol_below=0.10,
             rim_tol_above=0.05,
@@ -533,17 +533,17 @@ def scan_saucers(
                 min_cup_len=80,
                 min_progress=0.80,
                 min_depth=0.08,
-                max_depth=0.65,
+                max_depth=0.55,
                 left_rim_frac=0.40,
                 rim_tol_below=0.12,
                 rim_tol_above=0.07,
-                max_last_over_rim=0.010,
+                max_last_over_rim=0.007,
                 min_bottom_pos=0.26,
                 max_bottom_pos=0.74,
                 min_bottom_width_frac=0.02,
                 max_rise_slope_ratio=3.20,
                 handle_win=35,
-                handle_min_len=4,
+                handle_min_len=5,
                 handle_max_len=35,
                 handle_near_rim=0.06,
                 handle_min_pb=0.02,
@@ -551,7 +551,7 @@ def scan_saucers(
                 handle_max_range=0.18,
                 handle_min_upper_frac=0.40,
                 handle_vol_ratio_max=1.05,
-                handle_vol_ratio_hard_max=1.70,
+                handle_vol_ratio_hard_max=1.45,
                 max_risk_pct=8.0,
             )
             tier = "B" if met else ""
@@ -598,7 +598,7 @@ def scan_saucers(
                 min_cup_len=32,
                 min_progress=0.82,
                 min_depth=0.10,
-                max_depth=0.68,
+                max_depth=0.60,
                 left_rim_frac=0.35,
                 rim_tol_below=0.12,
                 rim_tol_above=0.07,
@@ -608,7 +608,7 @@ def scan_saucers(
                 min_bottom_width_frac=0.02,
                 max_rise_slope_ratio=3.00,
                 handle_win=14,
-                handle_min_len=2,
+                handle_min_len=3,
                 handle_max_len=14,
                 handle_near_rim=0.06,
                 handle_min_pb=0.03,
@@ -616,8 +616,8 @@ def scan_saucers(
                 handle_max_range=0.20,
                 handle_min_upper_frac=0.40,
                 handle_vol_ratio_max=1.05,
-                handle_vol_ratio_hard_max=1.60,
-                max_risk_pct=9.0,
+                handle_vol_ratio_hard_max=1.45,
+                max_risk_pct=8.0,
             )
             tier_w = "A" if met else ""
 
@@ -630,7 +630,7 @@ def scan_saucers(
                     min_cup_len=28,
                     min_progress=0.78,
                     min_depth=0.08,
-                    max_depth=0.72,
+                    max_depth=0.62,
                     left_rim_frac=0.40,
                     rim_tol_below=0.14,
                     rim_tol_above=0.09,
@@ -640,7 +640,7 @@ def scan_saucers(
                     min_bottom_width_frac=0.015,
                     max_rise_slope_ratio=3.40,
                     handle_win=16,
-                    handle_min_len=2,
+                    handle_min_len=3,
                     handle_max_len=16,
                     handle_near_rim=0.07,
                     handle_min_pb=0.03,
@@ -648,8 +648,8 @@ def scan_saucers(
                     handle_max_range=0.24,
                     handle_min_upper_frac=0.38,
                     handle_vol_ratio_max=1.10,
-                    handle_vol_ratio_hard_max=1.85,
-                    max_risk_pct=9.0,
+                    handle_vol_ratio_hard_max=1.55,
+                    max_risk_pct=8.0,
                 )
                 tier_w = "B" if met else ""
 
