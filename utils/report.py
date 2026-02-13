@@ -294,10 +294,11 @@ def build_report(
 
                 # Show where the current (TF-close) is relative to rim + IN zone.
                 if last_f > 0 and rim_f > 0:
-                    tol = 0.0005
-                    in_zone = bool(zone_low > 0 and zone_high > 0 and (zone_low * (1.0 - tol) <= last_f <= zone_high * (1.0 + tol)))
+                    tol_zone = 0.0010
+                    tol_rim = {"D": 0.0020, "W": 0.0030, "M": 0.0050}.get(key, 0.0020)
+                    in_zone = bool(zone_low > 0 and zone_high > 0 and (zone_low * (1.0 - tol_zone) <= last_f <= zone_high * (1.0 + tol_zone)))
 
-                    if abs(last_f / rim_f - 1.0) <= tol:
+                    if abs(last_f / rim_f - 1.0) <= tol_rim:
                         dist_txt = "（INゾーン内 / リム付近）" if in_zone else "（リム付近）"
                     elif last_f < rim_f:
                         need = (rim_f / last_f - 1.0) * 100.0
