@@ -161,6 +161,13 @@ def run_screen(
         market_ok = bool(in_band and (not bool(info.gu)) and (float(ev.p_reach) >= 0.750) and (int(mkt_score) >= 60) and (not bool(macro_on)))
         entry_mode = "MARKET_OK" if market_ok else "LIMIT_ONLY"
 
+        # Precompute entry/SL risk metrics for display and sorting
+        entry_low = float(info.entry_low)
+        entry_high = float(info.entry_high)
+        entry_price = float(info.entry_price if info.entry_price is not None else (entry_low + entry_high) / 2.0)
+        sl = float(info.sl)
+        risk_pct = float((entry_price - sl) / entry_price * 100.0) if entry_price > 0 else 0.0
+        
         cands.append(
             {
                 "ticker": ticker,
@@ -168,10 +175,10 @@ def run_screen(
                 "sector": sector,
                 "setup": info.setup,
                 "tier": int(info.tier),
-                "entry_low": float(info.entry_low),
-                "entry_high": float(info.entry_high),
-                "entry_price": float(info.entry_price if info.entry_price is not None else (info.entry_low + info.entry_high) / 2.0),
-                "sl": float(info.sl),
+                "entry_low": float(entry_low),
+                "entry_high": float(entry_high),
+                "entry_price": float(entry_price),
+                "sl": float(sl),
                 "tp1": float(info.tp1),
                 "tp2": float(info.tp2),
                 "rr": float(ev.rr),
@@ -186,6 +193,8 @@ def run_screen(
                 "adv20": float(adv),
                 "atrp": float(atrp),
                 "entry_mode": str(entry_mode),
+                "close_last": float(close_last),
+                "risk_pct": float(risk_pct),
             }
         )
 
@@ -196,8 +205,9 @@ def run_screen(
             float(x.get("p_hit", 0.0)),         # 2) 到達確率
             float(x.get("rr", 0.0)),            # 3) RR(TP1)
             -float(x.get("expected_days", 9.9)),# 4) 想定日数(短いほど)
-            float(x.get("adv20", 0.0)),         # 5) 流動性
-            str(x.get("ticker", "")),           # 6) 安定化
+            -float(x.get("risk_pct", 0.0)),   # 5) リスク幅(小さいほど)
+            float(x.get("adv20", 0.0)),         # 6) 流動性
+            str(x.get("ticker", "")),           # 7) 安定化
         ),
         reverse=True,
     )
