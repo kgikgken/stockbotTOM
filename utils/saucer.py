@@ -175,6 +175,9 @@ def _cup_with_handle_metrics(
     # rim symmetry
     rim_tol_below: float,
     rim_tol_above: float,
+    # actionable pre-break constraint (how far the *last close* may be above rim)
+    # Your "ココ" entry is pre-break, so this should be small.
+    max_last_over_rim: float,
     # bottom shape
     min_bottom_pos: float,
     max_bottom_pos: float,
@@ -191,6 +194,8 @@ def _cup_with_handle_metrics(
     handle_max_range: float,
     handle_min_upper_frac: float,
     handle_vol_ratio_max: float,
+    # hard filter: if handle volume is materially higher than prior, drop (reduces false positives)
+    handle_vol_ratio_hard_max: float,
     # risk control
     max_risk_pct: float = 8.0,
 ) -> Optional[Dict[str, float]]:
@@ -284,8 +289,9 @@ def _cup_with_handle_metrics(
     if not (np.isfinite(last) and last > 0):
         return None
 
-    # Too extended above rim => already broke out (not pre-breakout)
-    if last > rim * (1.0 + rim_tol_above):
+    # Too extended above rim => already broke out (not pre-breakout).
+    # NOTE: this is intentionally much stricter than rim symmetry tolerances.
+    if last > rim * (1.0 + float(max_last_over_rim)):
         return None
 
     # ------------------
@@ -354,6 +360,10 @@ def _cup_with_handle_metrics(
         pv = float(v.iloc[pv_start:idx_handle_start].mean()) if idx_handle_start > pv_start else float("nan")
         if np.isfinite(hv) and np.isfinite(pv) and pv > 0:
             handle_vol_ratio = hv / pv
+            # Hard filter: handle should *not* show a large volume expansion versus prior.
+            # (Dry-up is ideal; flat is acceptable; expansion tends to be noisy/late.)
+            if np.isfinite(handle_vol_ratio) and handle_vol_ratio_hard_max > 0 and handle_vol_ratio > handle_vol_ratio_hard_max:
+                return None
             if handle_vol_ratio <= handle_vol_ratio_max:
                 vol_bonus = 0.25
             else:
@@ -482,6 +492,7 @@ def scan_saucers(
             left_rim_frac=0.25,
             rim_tol_below=0.08,
             rim_tol_above=0.03,
+            max_last_over_rim=0.004,
             min_bottom_pos=0.30,
             max_bottom_pos=0.70,
             min_bottom_width_frac=0.04,
@@ -495,6 +506,7 @@ def scan_saucers(
             handle_max_range=0.12,
             handle_min_upper_frac=0.50,
             handle_vol_ratio_max=0.90,
+            handle_vol_ratio_hard_max=1.25,
             max_risk_pct=8.0,
         )
         if met:
@@ -542,6 +554,7 @@ def scan_saucers(
                 left_rim_frac=0.25,
                 rim_tol_below=0.10,
                 rim_tol_above=0.05,
+                max_last_over_rim=0.006,
                 min_bottom_pos=0.28,
                 max_bottom_pos=0.72,
                 min_bottom_width_frac=0.03,
@@ -555,6 +568,7 @@ def scan_saucers(
                 handle_max_range=0.16,
                 handle_min_upper_frac=0.45,
                 handle_vol_ratio_max=0.95,
+                handle_vol_ratio_hard_max=1.30,
                 max_risk_pct=9.0,
             )
             if met:
@@ -606,6 +620,7 @@ def scan_saucers(
                 left_rim_frac=0.22,
                 rim_tol_below=0.14,
                 rim_tol_above=0.08,
+                max_last_over_rim=0.010,
                 min_bottom_pos=0.22,
                 max_bottom_pos=0.78,
                 min_bottom_width_frac=0.02,
@@ -619,6 +634,7 @@ def scan_saucers(
                 handle_max_range=0.30,
                 handle_min_upper_frac=0.40,
                 handle_vol_ratio_max=1.10,
+                handle_vol_ratio_hard_max=1.45,
                 max_risk_pct=12.0,
             )
             if met:
