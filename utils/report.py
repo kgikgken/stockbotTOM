@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from utils.screen_logic import rr_min_by_market
 from utils.util import safe_float
 
 def _fmt_yen(x: float) -> str:
@@ -48,8 +47,9 @@ def build_report(
                     lines.append("・" + ev.replace("⚠ ", "").split("（")[0])
             lines.append("")
     # Header
-    if no_trade and not cands:
-        lines.append("新規：🛑 NO（新規ゼロ）")
+    if no_trade:
+        reason = "重要イベント警戒" if macro_on else "地合い条件"
+        lines.append(f"新規：🛑 NO（{reason}）")
     else:
         lines.append("新規：✅ OK（指値 / 現値INは銘柄別）")
     lines.append("")
@@ -61,22 +61,33 @@ def build_report(
     lines.append(f"推奨レバ：{leverage:.1f}x")
     lines.append("")
 
-    # Policy
+    # Policy (explicit; was previously computed but not rendered)
+    if policy_lines:
+        lines.append("🧭 運用ルール（本日）")
+        for p in policy_lines:
+            if str(p).strip():
+                lines.append("・" + str(p).strip())
+        lines.append("")
+
     # Candidates
     if cands:
-        lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
+        if no_trade:
+            lines.append("👀 監視リスト（新規は見送り / 最大5）")
+        else:
+            lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
         for c in cands:
             ticker = str(c.get("ticker", ""))
             name = str(c.get("name", ticker))
             sector = str(c.get("sector", ""))
-            entry_mode = str(c.get("entry_mode", "LIMIT"))
-            suffix = "（現値IN可）" if (entry_mode == "MARKET_OK" and not macro_on) else ""
+            entry_mode = str(c.get("entry_mode", "LIMIT_ONLY"))
+            market_in_ok = bool(entry_mode == "MARKET_OK" and (not macro_on) and (not no_trade))
+            suffix = "（現値IN可）" if market_in_ok else ""
             lines.append(f"■ {ticker} {name}（{sector}）{suffix}")
             lines.append("")
             # Entry
             lines.append("【エントリー】")
             lines.append(f"・指値目安（中央）：{_fmt_yen(c.get('entry_price', (c.get('entry_low',0)+c.get('entry_high',0))/2.0))} 円")
-            lines.append(f"・現値IN：{'OK' if (entry_mode == 'MARKET_OK' and not macro_on) else 'NG'}")
+            lines.append(f"・現値IN：{'OK' if market_in_ok else 'NG'}")
             lines.append(f"・損切り：{_fmt_yen(c.get('sl', 0.0))} 円")
             lines.append("")
             # Targets (single line)
