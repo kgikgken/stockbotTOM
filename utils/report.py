@@ -222,17 +222,45 @@ def build_report(
                 ticker = str(s.get("ticker", ""))
                 name = str(s.get("name", ticker))
                 sector = str(s.get("sector", ""))
-                rim = _fmt_yen(s.get("rim"))
+                rim_f = safe_float(s.get("rim"), 0.0)
+                last_f = safe_float(s.get("last"), 0.0)
+                atrp_f = safe_float(s.get("atrp"), 0.0)
                 progress = float(s.get("progress", 0.0))
-                prog_pct = int(round(progress * 100))
+                prog_pct = int(round(min(1.5, max(0.0, progress)) * 100))
                 depth = float(s.get("depth", 0.0))
-                # Display:
-                #  - TF tag in [] for quick scan
-                #  - Rim price as execution anchor (limit at rim)
-                #  - Progress as % to rim (audit)
-                #  - Depth as % (cup depth)
+
+                # User intention: IN at the "right rim" point of the saucer.
+                # Practical execution is a breakout trigger (buy-stop) slightly above rim.
+                base_buf = {"D": 0.003, "W": 0.005, "M": 0.008}.get(key, 0.005)
+                atr_buf = (atrp_f / 100.0) * 0.25 if atrp_f > 0 else 0.0
+                buf = max(base_buf, atr_buf)
+                buf = min(buf, 0.015)  # cap 1.5%
+                trigger = rim_f * (1.0 + buf) if rim_f > 0 else 0.0
+
                 lines.append(f"■ {ticker} {name}（{sector}）[{_tf_title(key)}]")
-                lines.append(f"・指値目安（リム）：{rim}（進捗 {prog_pct}% / 深さ {depth:.0%}）")
+                if rim_f > 0:
+                    lines.append(
+                        f"・IN（リムブレイク/逆指値）：{_fmt_yen(trigger)} 円（リム {_fmt_yen(rim_f)}）"
+                    )
+                else:
+                    lines.append("・IN（リムブレイク/逆指値）：-")
+
+                # Show where the current (TF-close) is relative to rim.
+                if last_f > 0 and rim_f > 0:
+                    tol = 0.0005
+                    if abs(last_f / rim_f - 1.0) <= tol:
+                        dist_txt = "（リム付近）"
+                    elif last_f < rim_f:
+                        need = (rim_f / last_f - 1.0) * 100.0
+                        dist_txt = f"（リムまで +{need:.1f}%）"
+                    else:
+                        up = (last_f / rim_f - 1.0) * 100.0
+                        dist_txt = f"（上抜け済 +{up:.1f}%）"
+                    lines.append(
+                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%}）"
+                    )
+                else:
+                    lines.append(f"・進捗 {prog_pct}% / 深さ {depth:.0%}")
 
 
     return "\n".join(lines).rstrip() + "\n"
