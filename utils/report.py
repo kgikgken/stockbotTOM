@@ -225,42 +225,59 @@ def build_report(
                 rim_f = safe_float(s.get("rim"), 0.0)
                 last_f = safe_float(s.get("last"), 0.0)
                 atrp_f = safe_float(s.get("atrp"), 0.0)
+                cup_len = int(s.get("cup_len", 0) or 0)
                 progress = float(s.get("progress", 0.0))
                 prog_pct = int(round(min(1.5, max(0.0, progress)) * 100))
                 depth = float(s.get("depth", 0.0))
 
-                # User intention: IN at the "right rim" point of the saucer.
-                # Practical execution is a breakout trigger (buy-stop) slightly above rim.
-                base_buf = {"D": 0.003, "W": 0.005, "M": 0.008}.get(key, 0.005)
-                atr_buf = (atrp_f / 100.0) * 0.25 if atrp_f > 0 else 0.0
-                buf = max(base_buf, atr_buf)
-                buf = min(buf, 0.015)  # cap 1.5%
-                trigger = rim_f * (1.0 + buf) if rim_f > 0 else 0.0
+                def _len_label(tf_key: str, n: int) -> str:
+                    if n <= 0:
+                        return "-"
+                    if tf_key == "W":
+                        return f"{n}週"
+                    if tf_key == "M":
+                        return f"{n}ヶ月"
+                    return f"{n}本"
+
+                # User intention: IN *before* a clean breakout (riskier, anticipatory entry).
+                # We define a "pre-break" entry zone slightly below the rim.
+                # Buffer is based on timeframe + ATR% (higher vol -> wider zone).
+                base_pre = {"D": 0.6, "W": 0.9, "M": 1.2}.get(key, 0.8)  # percent
+                max_pre = {"D": 2.0, "W": 3.0, "M": 4.0}.get(key, 2.5)   # percent
+                atr_pre = (atrp_f * 0.35) if atrp_f > 0 else 0.0            # percent
+                pre_buf_pct = max(base_pre, atr_pre)
+                pre_buf_pct = min(pre_buf_pct, max_pre)
+                pre_entry = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
 
                 lines.append(f"■ {ticker} {name}（{sector}）[{_tf_title(key)}]")
                 if rim_f > 0:
                     lines.append(
-                        f"・IN（リムブレイク/逆指値）：{_fmt_yen(trigger)} 円（リム {_fmt_yen(rim_f)}）"
+                        f"・IN（先回り/リム手前 指値）：{_fmt_yen(pre_entry)} 円（リム {_fmt_yen(rim_f)}）"
                     )
                 else:
-                    lines.append("・IN（リムブレイク/逆指値）：-")
+                    lines.append("・IN（先回り/リム手前 指値）：-")
 
                 # Show where the current (TF-close) is relative to rim.
                 if last_f > 0 and rim_f > 0:
                     tol = 0.0005
+                    # IN zone: [pre_entry, rim]
+                    in_zone = bool(pre_entry > 0 and last_f >= pre_entry * (1.0 - tol))
                     if abs(last_f / rim_f - 1.0) <= tol:
-                        dist_txt = "（リム付近）"
+                        dist_txt = "（INゾーン内 / リム付近）" if in_zone else "（リム付近）"
                     elif last_f < rim_f:
                         need = (rim_f / last_f - 1.0) * 100.0
-                        dist_txt = f"（リムまで +{need:.1f}%）"
+                        z = "INゾーン内" if in_zone else "INゾーン外"
+                        dist_txt = f"（{z} / リムまで +{need:.1f}%）"
                     else:
                         up = (last_f / rim_f - 1.0) * 100.0
                         dist_txt = f"（上抜け済 +{up:.1f}%）"
                     lines.append(
-                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%}）"
+                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / 長さ {_len_label(key, cup_len)}）"
                     )
                 else:
-                    lines.append(f"・進捗 {prog_pct}% / 深さ {depth:.0%}")
+                    lines.append(
+                        f"・進捗 {prog_pct}% / 深さ {depth:.0%} / 長さ {_len_label(key, cup_len)}"
+                    )
 
 
     return "\n".join(lines).rstrip() + "\n"
