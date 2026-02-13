@@ -317,7 +317,7 @@ def build_report(
                         vtxt = f"{hvol_ratio:.2f}x"
 
                     lines.append(
-                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / ハンドル {htxt} / 期間 {hlen_txt} / V {vtxt} / 長さ {_len_label(key, cup_len)}）"
+                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / ハンドル {htxt} / 期間 {hlen_txt} / 出来高 {vtxt} / 長さ {_len_label(key, cup_len)}）"
                     )
                 else:
                     lines.append(
