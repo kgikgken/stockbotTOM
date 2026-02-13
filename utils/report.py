@@ -246,35 +246,46 @@ def build_report(
                         return f"{n}ヶ月"
                     return f"{n}本"
 
-                # Your intent: enter at the small "handle" dip near the rim (before a clean breakout).
-                # If handle metrics are available, we use them to define an IN zone.
-                # Otherwise we fallback to a rim-buffer zone based on timeframe + ATR%.
-                base_pre = {"D": 0.6, "W": 0.9, "M": 1.2}.get(key, 0.8)  # percent
-                max_pre = {"D": 2.0, "W": 3.0, "M": 4.0}.get(key, 2.5)   # percent
-                atr_pre = (atrp_f * 0.35) if atrp_f > 0 else 0.0
-                pre_buf_pct = max(base_pre, atr_pre)
-                pre_buf_pct = min(pre_buf_pct, max_pre)
+                # Execution zone from saucer scan (preferred).
+                entry_low = safe_float(s.get("entry_low"), float("nan"))
+                entry_high = safe_float(s.get("entry_high"), float("nan"))
+                sl_s = safe_float(s.get("sl"), float("nan"))
+                risk_s = safe_float(s.get("risk_pct"), float("nan"))
+                handle_len = int(s.get("handle_len", 0) or 0)
+                hvol_ratio = safe_float(s.get("handle_vol_ratio"), float("nan"))
 
-                # Fallback zone (no handle info)
-                fb_low = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
-                fb_high = rim_f * (1.0 - base_pre / 100.0) if rim_f > 0 else 0.0
-
-                if rim_f > 0 and handle_ok and (handle_low > 0) and (not np.isnan(handle_low)):
-                    zone_low = handle_low
-                    zone_high = max(zone_low, fb_high)
+                # Your intent: enter *before* a clean breakout, inside the handle, near the rim ("ココ").
+                # If scan provides an explicit zone, use it; otherwise fallback to a rim-buffer zone.
+                if rim_f > 0 and np.isfinite(entry_low) and np.isfinite(entry_high) and entry_low > 0 and entry_high > 0:
+                    zone_low = float(min(entry_low, entry_high))
+                    zone_high = float(max(entry_low, entry_high))
                 else:
-                    zone_low = fb_low
-                    zone_high = max(zone_low, fb_high)
-
+                    base_pre = {"D": 0.6, "W": 0.9, "M": 1.2}.get(key, 0.8)  # percent
+                    max_pre = {"D": 2.0, "W": 3.0, "M": 4.0}.get(key, 2.5)   # percent
+                    atr_pre = (atrp_f * 0.35) if atrp_f > 0 else 0.0
+                    pre_buf_pct = max(base_pre, atr_pre)
+                    pre_buf_pct = min(pre_buf_pct, max_pre)
+                    zone_low = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
+                    zone_high = rim_f * (1.0 - base_pre / 100.0) if rim_f > 0 else 0.0
+                    zone_high = max(zone_low, zone_high)
                 lines.append(f"■ {ticker} {name}（{sector}）[{_tf_title(key)}]")
+                extra_parts = []
+                if rim_f > 0:
+                    extra_parts.append(f"リム {_fmt_yen(rim_f)}")
+                if np.isfinite(sl_s) and sl_s > 0:
+                    extra_parts.append(f"SL {_fmt_yen(sl_s)}")
+                if np.isfinite(risk_s) and risk_s > 0:
+                    extra_parts.append(f"リスク {risk_s:.1f}%")
+                extra = " / ".join(extra_parts) if extra_parts else ""
+
                 if rim_f > 0 and zone_low > 0 and zone_high > 0:
                     if abs(zone_high / zone_low - 1.0) <= 0.001:
                         lines.append(
-                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 円（リム {_fmt_yen(rim_f)}）"
+                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 円（{extra}）"
                         )
                     else:
                         lines.append(
-                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 〜 {_fmt_yen(zone_high)} 円（リム {_fmt_yen(rim_f)}）"
+                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 〜 {_fmt_yen(zone_high)} 円（{extra}）"
                         )
                 else:
                     lines.append("・IN（先回り/ハンドル 指値）：-")
@@ -298,8 +309,15 @@ def build_report(
                     if np.isfinite(handle_pb) and handle_pb > 0:
                         htxt = f"{handle_pb * 100.0:.1f}%"
 
+                    hlen_txt = "-"
+                    if handle_len > 0:
+                        hlen_txt = _len_label(key, handle_len)
+                    vtxt = "-"
+                    if np.isfinite(hvol_ratio) and hvol_ratio > 0:
+                        vtxt = f"{hvol_ratio:.2f}x"
+
                     lines.append(
-                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / ハンドル {htxt} / 長さ {_len_label(key, cup_len)}）"
+                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / ハンドル {htxt} / 期間 {hlen_txt} / V {vtxt} / 長さ {_len_label(key, cup_len)}）"
                     )
                 else:
                     lines.append(
