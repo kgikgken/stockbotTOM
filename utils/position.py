@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+import re
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -23,6 +25,31 @@ def load_positions(path: str = "positions.csv") -> pd.DataFrame:
         return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
+
+
+def _normalize_ticker(t: str) -> str:
+    """Normalize tickers for yfinance.
+
+    Your project uses JP tickers (e.g. 6951.T). In positions.csv, users sometimes
+    write them as `6951T`, `285AT`, or even `285A T`.
+
+    This function:
+      - removes spaces,
+      - keeps tickers that already contain a dot as-is,
+      - converts `XXXXT` / `XXXAT` -> `XXXX.T` / `XXXA.T` when it looks like a JP code.
+    """
+    s = str(t or "").strip().replace(" ", "")
+    if not s:
+        return ""
+    if "." in s:
+        return s
+    # JP code patterns we want to fix: 3-5 digits + optional letter + trailing 'T'
+    if re.match(r"^\d{3,5}[A-Z]?T$", s):
+        return s[:-1] + ".T"
+    # If user omitted the trailing 'T' but it's obviously a JP code, still append .T
+    if re.match(r"^\d{3,5}[A-Z]?$", s):
+        return s + ".T"
+    return s
 
 
 def _download_positions_history(tickers: List[str]) -> dict:
@@ -90,16 +117,21 @@ def analyze_positions(
     if df is None or len(df) == 0:
         return "ノーポジション", 2_000_000.0
 
-    new_set = set([str(x).strip() for x in (new_tickers or []) if str(x).strip()])
+    new_set = set([
+        _normalize_ticker(x)
+        for x in (new_tickers or [])
+        if str(x).strip()
+    ])
 
     # Bulk fetch for speed; per-ticker fallback exists.
     tickers = []
     try:
-        tickers = (
-            df.get("ticker", pd.Series(dtype=str)).astype(str).str.strip().tolist()
+        raw = (
+            df.get("ticker", pd.Series(dtype=str)).astype(str).tolist()
             if df is not None and len(df)
             else []
         )
+        tickers = [_normalize_ticker(t) for t in raw]
     except Exception:
         tickers = []
 
@@ -109,7 +141,7 @@ def analyze_positions(
     total_value = 0.0
 
     for _, row in df.iterrows():
-        ticker = str(row.get("ticker", "")).strip()
+        ticker = _normalize_ticker(row.get("ticker", ""))
         if not ticker:
             continue
 
