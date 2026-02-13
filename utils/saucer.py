@@ -20,6 +20,7 @@ class SaucerHit:
     atrp: float
     progress: float  # 0-1, 1 = breakout at rim
     depth: float     # 0-1, cup depth ratio
+    cup_len: int     # bars from left rim to current (longer is better)
     score: float     # ranking score (internal)
 
 
@@ -79,8 +80,18 @@ def _saucer_score(
     if not (np.isfinite(progress) and progress >= min_progress):
         return None
 
-    # Vertex: bottom should be in the first half-ish (avoid V-shaped snapback)
+    # Cup length: prefer longer bowls.
+    # Define left rim as the highest close before the bottom within the lookback segment.
     idx_bottom = int(seg.values.argmin())
+    left_part = seg.iloc[: idx_bottom + 1]
+    if left_part is None or len(left_part) < 5:
+        return None
+    idx_left_rim = int(left_part.values.argmax())
+    cup_len = int(len(seg) - idx_left_rim)
+    if cup_len < int(min_len):
+        return None
+
+    # Vertex: bottom should be in the first half-ish (avoid V-shaped snapback)
     mid = int(len(seg) * 0.55)
     if idx_bottom > mid:
         return None
@@ -98,8 +109,13 @@ def _saucer_score(
     width = max(1e-6, (max_depth - min_depth))
     depth_pen = abs(depth - target) / width  # 0 at target, ~1 at edge
 
-    # Score: prioritize completion first, then depth quality, then smoothness
-    score = (progress * 2.0) - (depth_pen * 0.60) - (rough * 8.0)
+    # Length bonus: longer is better (normalized within [min_len, lookback])
+    length_ratio = (cup_len - float(min_len)) / max(1e-9, float(lookback - min_len))
+    length_ratio = float(np.clip(length_ratio, 0.0, 1.0))
+    length_bonus = float(np.sqrt(length_ratio) * 0.85)
+
+    # Score: prioritize completion first, then depth quality, then smoothness, and finally length.
+    score = (progress * 2.0) - (depth_pen * 0.60) - (rough * 8.0) + length_bonus
 
     return {
         "rim": rim,
@@ -107,6 +123,7 @@ def _saucer_score(
         "last": last,
         "depth": float(depth),
         "progress": float(progress),
+        "cup_len": int(cup_len),
         "score": float(score),
     }
 
@@ -173,6 +190,7 @@ def scan_saucers(
                     atrp=float(atrp),
                     progress=float(met["progress"]),
                     depth=float(met["depth"]),
+                    cup_len=int(met.get("cup_len", 0) or 0),
                     score=float(met["score"]),
                 )
             )
@@ -205,6 +223,7 @@ def scan_saucers(
                         atrp=float(atrp_w),
                         progress=float(met["progress"]),
                         depth=float(met["depth"]),
+                        cup_len=int(met.get("cup_len", 0) or 0),
                         score=float(met["score"]),
                     )
                 )
@@ -237,6 +256,7 @@ def scan_saucers(
                         atrp=float(atrp_m),
                         progress=float(met["progress"]),
                         depth=float(met["depth"]),
+                        cup_len=int(met.get("cup_len", 0) or 0),
                         score=float(met["score"]),
                     )
                 )
@@ -245,7 +265,10 @@ def scan_saucers(
     ret: Dict[str, List[Dict]] = {}
     for tf in ("D", "W", "M"):
         hits = out[tf]
-        hits.sort(key=lambda x: (x.score, x.progress, x.depth, x.rim_price, x.ticker), reverse=True)
+        hits.sort(
+            key=lambda x: (x.score, x.cup_len, x.progress, x.depth, x.rim_price, x.ticker),
+            reverse=True,
+        )
         hits = hits[: max_each]
         ret[tf] = [
             {
@@ -258,6 +281,7 @@ def scan_saucers(
                 "atrp": float(h.atrp),
                 "progress": float(h.progress),
                 "depth": float(h.depth),
+                "cup_len": int(h.cup_len),
                 "score": float(h.score),
             }
             for h in hits
