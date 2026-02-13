@@ -276,35 +276,84 @@ def build_report(
                     extra_parts.append(f"リム {_fmt_yen(rim_f)}")
                 if np.isfinite(sl_s) and sl_s > 0:
                     extra_parts.append(f"SL {_fmt_yen(sl_s)}")
-                if np.isfinite(risk_s) and risk_s > 0:
-                    extra_parts.append(f"リスク {risk_s:.1f}%")
+                # Risk is a function of where you get filled inside the zone.
+                # To avoid misleading "one number", show a range (low->high) when possible.
+                risk_txt = ""
+                if np.isfinite(sl_s) and sl_s > 0 and zone_low > 0 and zone_high > 0:
+                    r1 = (zone_low - sl_s) / zone_low * 100.0
+                    r2 = (zone_high - sl_s) / zone_high * 100.0
+                    if np.isfinite(r1) and np.isfinite(r2) and r1 > 0 and r2 > 0:
+                        r_lo = min(r1, r2)
+                        r_hi = max(r1, r2)
+                        if abs(r_hi - r_lo) >= 0.15:
+                            risk_txt = f"リスク {r_lo:.1f}〜{r_hi:.1f}%"
+                        else:
+                            risk_txt = f"リスク {r_hi:.1f}%"
+                elif np.isfinite(risk_s) and risk_s > 0:
+                    risk_txt = f"リスク {risk_s:.1f}%"
+                if risk_txt:
+                    extra_parts.append(risk_txt)
                 extra = " / ".join(extra_parts) if extra_parts else ""
+
+                # Order type hint (important):
+                # - If current close is below the zone, a *limit* above the market is misleading.
+                #   Treat it as a stop/trigger idea (buy when price rises into the zone).
+                # - If above the zone, it's an "押し待ち".
+                order_tag = "指値"
+                if last_f > 0 and zone_low > 0 and zone_high > 0:
+                    tol_zone = 0.0010
+                    if last_f < zone_low * (1.0 - tol_zone):
+                        order_tag = "逆指値"
+                    elif last_f > zone_high * (1.0 + tol_zone):
+                        order_tag = "押し待ち指値"
 
                 if rim_f > 0 and zone_low > 0 and zone_high > 0:
                     if abs(zone_high / zone_low - 1.0) <= 0.001:
                         lines.append(
-                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 円（{extra}）"
+                            f"・IN（先回り/ハンドル {order_tag}）：{_fmt_yen(zone_low)} 円（{extra}）"
                         )
                     else:
                         lines.append(
-                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 〜 {_fmt_yen(zone_high)} 円（{extra}）"
+                            f"・IN（先回り/ハンドル {order_tag}）：{_fmt_yen(zone_low)} 〜 {_fmt_yen(zone_high)} 円（{extra}）"
                         )
                 else:
                     lines.append("・IN（先回り/ハンドル 指値）：-")
 
-                # Show where the current (TF-close) is relative to rim + IN zone.
+                # Show where the current (TF-close) is relative to IN zone and rim.
                 if last_f > 0 and rim_f > 0:
                     tol_zone = 0.0010
                     tol_rim = {"D": 0.0020, "W": 0.0030, "M": 0.0050}.get(key, 0.0020)
                     in_zone = bool(zone_low > 0 and zone_high > 0 and (zone_low * (1.0 - tol_zone) <= last_f <= zone_high * (1.0 + tol_zone)))
 
+                    # Distance helpers
+                    dist_to_rim = (rim_f / last_f - 1.0) * 100.0 if last_f > 0 else float("nan")
+                    dist_txt = ""
                     if abs(last_f / rim_f - 1.0) <= tol_rim:
-                        dist_txt = "（INゾーン内 / リム付近）" if in_zone else "（リム付近）"
+                        # around the rim
+                        if in_zone:
+                            dist_txt = "（INゾーン内 / リム付近）"
+                        else:
+                            # above zone but still at rim-ish
+                            if zone_high > 0 and last_f > zone_high * (1.0 + tol_zone):
+                                over = (last_f / zone_high - 1.0) * 100.0
+                                dist_txt = f"（INゾーン外（上） / INゾーン上 +{over:.1f}% / リム付近）"
+                            else:
+                                dist_txt = "（リム付近）"
                     elif last_f < rim_f:
-                        need = (rim_f / last_f - 1.0) * 100.0
-                        z = "INゾーン内" if in_zone else "INゾーン外"
-                        dist_txt = f"（{z} / リムまで +{need:.1f}%）"
+                        # below rim
+                        if in_zone:
+                            dist_txt = f"（INゾーン内 / リムまで +{dist_to_rim:.1f}%）"
+                        else:
+                            if zone_low > 0 and last_f < zone_low * (1.0 - tol_zone):
+                                to_zone = (zone_low / last_f - 1.0) * 100.0
+                                dist_txt = f"（INゾーン外（下） / INゾーンまで +{to_zone:.1f}% / リムまで +{dist_to_rim:.1f}%）"
+                            elif zone_high > 0 and last_f > zone_high * (1.0 + tol_zone):
+                                over = (last_f / zone_high - 1.0) * 100.0
+                                dist_txt = f"（INゾーン外（上） / INゾーン上 +{over:.1f}% / リムまで +{dist_to_rim:.1f}%）"
+                            else:
+                                dist_txt = f"（INゾーン外 / リムまで +{dist_to_rim:.1f}%）"
                     else:
+                        # above rim (already broke out)
                         up = (last_f / rim_f - 1.0) * 100.0
                         dist_txt = f"（上抜け済 +{up:.1f}%）"
 
@@ -318,6 +367,9 @@ def build_report(
                     vtxt = "-"
                     if np.isfinite(hvol_ratio) and hvol_ratio > 0:
                         vtxt = f"{hvol_ratio:.2f}x"
+                        # Handle volume expansion is typically not ideal; mark it when clearly expanding.
+                        if hvol_ratio >= 1.25:
+                            vtxt = vtxt + " ⚠"
 
                     lines.append(
                         f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / ハンドル {htxt} / 期間 {hlen_txt} / 出来高 {vtxt} / 長さ {_len_label(key, cup_len)}）"
