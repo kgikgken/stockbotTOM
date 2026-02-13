@@ -26,6 +26,9 @@ def _default_state() -> Dict[str, Any]:
             "tier0_exception": [],
             "distortion": [],
         },
+        # Snapshot of last-seen open positions (tickers). Used to infer weekly new count
+        # without requiring an explicit 'open_date' column.
+        "positions_last": [],
     }
 
 def load_state(path: str = STATE_PATH) -> Dict[str, Any]:
@@ -40,6 +43,9 @@ def load_state(path: str = STATE_PATH) -> Dict[str, Any]:
         d.update(st)
         d.setdefault("cooldowns", _default_state()["cooldowns"])
         d.setdefault("paper_trades", _default_state()["paper_trades"])
+        d.setdefault("positions_last", _default_state()["positions_last"])
+        if not isinstance(d.get("positions_last"), list):
+            d["positions_last"] = []
         return d
     except Exception:
         return _default_state()
@@ -64,6 +70,28 @@ def update_week(state: Dict[str, Any]) -> None:
 def inc_weekly_new(state: Dict[str, Any], n: int = 1) -> None:
     state["weekly_new_count"] = int(state.get("weekly_new_count", 0)) + int(n)
 
+
+def update_weekly_from_positions(state: Dict[str, Any], current_tickers: List[str]) -> int:
+    """Infer weekly new positions by diffing today's positions against the last snapshot.
+
+    Rationale:
+      - This project does not execute orders itself.
+      - The only reliable source of "what was actually opened" is the user's positions.csv.
+      - By snapshotting tickers, we can increment weekly_new_count when new tickers appear.
+
+    Returns:
+      number of newly detected tickers
+    """
+    cur = [str(x).strip() for x in (current_tickers or []) if str(x).strip()]
+    cur_set = set(cur)
+    prev = state.get("positions_last", [])
+    prev_set = set([str(x).strip() for x in prev]) if isinstance(prev, list) else set()
+    new = sorted(list(cur_set - prev_set))
+    if new:
+        inc_weekly_new(state, n=len(new))
+    # Always refresh snapshot (closures should be reflected too).
+    state["positions_last"] = sorted(list(cur_set))
+    return int(len(new))
 def weekly_left(state: Dict[str, Any], max_new: int = 3) -> Tuple[int, int]:
     used = int(state.get("weekly_new_count", 0))
     return used, max_new
