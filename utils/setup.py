@@ -24,6 +24,9 @@ class SetupInfo:
     pullback_quality: float
     gu: bool
     breakout_line: Optional[float] = None
+    # Liquidity/volatility telemetry (used by reach-prob heuristic).
+    adv20: Optional[float] = None
+    atrp: Optional[float] = None
     # Central limit price used for execution (midpoint of entry band).
     entry_price: Optional[float] = None
     # RR at TP1 (used as expected R basis for CAGR contribution score).
@@ -160,7 +163,13 @@ def liquidity_filters(df: pd.DataFrame, price_min=200.0, price_max=15000.0, adv_
         ok = False
     return ok, float(price), float(adv), float(atrp)
 
-def structure_sl_tp(df: pd.DataFrame, entry_price: float, atr: float, macro_on: bool, setup: str):
+def structure_sl_tp(
+    df: pd.DataFrame,
+    entry_price: float,
+    atr: float,
+    macro_on: bool,
+    setup: str = "A1",
+):
     """Compute structural SL/TP targets.
 
     Latest spec alignment:
@@ -281,15 +290,21 @@ def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) ->
     ma20 = sma(c, 20)
     ma50 = sma(c, 50)
 
-    atr = atr14(df, 14)
-    atr_last = safe_float(atr.iloc[-1], np.nan)
+    a = atr14(df)
+    atr_last = safe_float(a.iloc[-1], np.nan)
     if not np.isfinite(atr_last) or atr_last <= 0:
         return None
 
     # positions: entry band is not used (execution already happened)
     entry_low = entry_high = float(entry_price)
 
-    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(df, float(entry_price), float(atr_last), macro_on)
+    sl, tp1, tp2, rr_tp2, expected_days = structure_sl_tp(
+        df,
+        float(entry_price),
+        float(atr_last),
+        macro_on=bool(macro_on),
+        setup=str(setup),
+    )
 
     risk = max(1e-6, float(entry_price) - float(sl))
     rr_tp1 = float((float(tp1) - float(entry_price)) / risk)
@@ -315,6 +330,8 @@ def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) ->
         pullback_quality=float(pullback_quality),
         gu=False,
         breakout_line=None,
+        adv20=float(adv20(df)),
+        atrp=float(atr_pct_last(df)),
         entry_price=float(entry_price),
         rr_tp1=float(rr_tp1),
     )
