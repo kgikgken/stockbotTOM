@@ -16,6 +16,8 @@ class SaucerHit:
     sector: str
     tf: str  # 'D' | 'W' | 'M'
     rim_price: float
+    last_price: float
+    atrp: float
     progress: float  # 0-1, 1 = breakout at rim
     depth: float     # 0-1, cup depth ratio
     score: float     # ranking score (internal)
@@ -167,6 +169,8 @@ def scan_saucers(
                     sector=sector,
                     tf="D",
                     rim_price=float(met["rim"]),
+                    last_price=float(met["last"]),
+                    atrp=float(atrp),
                     progress=float(met["progress"]),
                     depth=float(met["depth"]),
                     score=float(met["score"]),
@@ -179,6 +183,7 @@ def scan_saucers(
         except Exception:
             w = None
         if w is not None and not w.empty and len(w) >= 60:
+            atrp_w = atr_pct_last(w)
             met = _saucer_score(
                 w["Close"],
                 min_len=50,
@@ -196,6 +201,8 @@ def scan_saucers(
                         sector=sector,
                         tf="W",
                         rim_price=float(met["rim"]),
+                        last_price=float(met["last"]),
+                        atrp=float(atrp_w),
                         progress=float(met["progress"]),
                         depth=float(met["depth"]),
                         score=float(met["score"]),
@@ -208,6 +215,7 @@ def scan_saucers(
         except Exception:
             m = None
         if m is not None and not m.empty and len(m) >= 36:
+            atrp_m = atr_pct_last(m)
             met = _saucer_score(
                 m["Close"],
                 min_len=30,
@@ -225,6 +233,8 @@ def scan_saucers(
                         sector=sector,
                         tf="M",
                         rim_price=float(met["rim"]),
+                        last_price=float(met["last"]),
+                        atrp=float(atrp_m),
                         progress=float(met["progress"]),
                         depth=float(met["depth"]),
                         score=float(met["score"]),
@@ -244,6 +254,8 @@ def scan_saucers(
                 "sector": h.sector,
                 "tf": h.tf,
                 "rim": float(h.rim_price),
+                "last": float(h.last_price),
+                "atrp": float(h.atrp),
                 "progress": float(h.progress),
                 "depth": float(h.depth),
                 "score": float(h.score),
