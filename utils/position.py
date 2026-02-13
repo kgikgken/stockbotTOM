@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.setup import build_setup_info, build_position_info
+from utils.setup import SetupInfo, build_position_info, detect_setup, structure_sl_tp
 from utils.rr_ev import calc_ev
-from utils.util import safe_float
+from utils.util import atr14, adv20, atr_pct_last, safe_float
 
 def load_positions(path: str = "positions.csv") -> pd.DataFrame:
     try:
@@ -50,32 +50,75 @@ def analyze_positions(df: pd.DataFrame, mkt_score: int, macro_on: bool) -> Tuple
         p_hit = np.nan
         adj = np.nan
         exp_days = np.nan
-        if hist is not None and len(hist) >= 120 and entry_price > 0:
-            info = build_position_info(hist, entry_price=float(entry_price), macro_on=macro_on)
-            if info is not None and info.setup != "NONE":
-                ev = calc_ev(info, mkt_score=mkt_score, macro_on=macro_on)
-                rr = ev.rr
-                adj = ev.adj_ev
-                p_hit = ev.p_reach
-                exp_days = ev.expected_days
-                cagr = ev.cagr_score
+
+        info: SetupInfo | None = None
+        if hist is not None and len(hist) >= 60 and entry_price > 0:
+            # First try the normal audited path (uses setup detection).
+            if len(hist) >= 120:
+                info = build_position_info(hist, entry_price=float(entry_price), macro_on=macro_on)
+
+            # If setup detection fails (e.g., the position is already "out of pattern"),
+            # fall back to a synthetic info object so the position remains auditable.
+            if info is None or info.setup == "NONE":
+                try:
+                    setup_hint = str(row.get("setup", "")).strip() or detect_setup(hist)[0]
+                except Exception:
+                    setup_hint = "A1"
+                if setup_hint not in ("A1-Strong", "A1", "A2", "B"):
+                    setup_hint = "A1"
+
+                a = atr14(hist)
+                atr_last = float(a.iloc[-1]) if a is not None and len(a) else np.nan
+                if np.isfinite(atr_last) and atr_last > 0:
+                    sl, tp1, tp2, _rr_tp2, expected_days = structure_sl_tp(
+                        hist, float(entry_price), float(atr_last), bool(macro_on), setup_hint
+                    )
+                    risk = max(1e-6, float(entry_price) - float(sl))
+                    rr_tp1 = float((float(tp1) - float(entry_price)) / risk)
+                    info = SetupInfo(
+                        setup=setup_hint,
+                        tier=1,
+                        entry_low=float(entry_price),
+                        entry_high=float(entry_price),
+                        sl=float(sl),
+                        tp1=float(tp1),
+                        tp2=float(tp2),
+                        rr=float(rr_tp1),
+                        expected_days=float(expected_days),
+                        rday=float(rr_tp1 / max(0.5, float(expected_days))),
+                        trend_strength=1.0,
+                        pullback_quality=1.0,
+                        gu=False,
+                        breakout_line=None,
+                        adv20=float(adv20(hist)),
+                        atrp=float(atr_pct_last(hist)),
+                        entry_price=float(entry_price),
+                        rr_tp1=float(rr_tp1),
+                    )
+
+        if info is not None and info.setup != "NONE":
+            ev = calc_ev(info, mkt_score=mkt_score, macro_on=macro_on)
+            rr = ev.rr
+            adj = ev.adj_ev
+            p_hit = ev.p_reach
+            exp_days = ev.expected_days
+            cagr = ev.cagr_score
+
+        lines.append(f"■ {ticker}")
+        lines.append("・状態：保有中（新規追加なし）")
+        # Always show PnL as supplementary telemetry.
+        lines.append(f"・損益：{pnl_pct:+.2f}%")
 
         if np.isfinite(rr) and np.isfinite(cagr):
             warn = "（要注意）" if cagr < 0.5 else ""
-            lines.append(f"■ {ticker}")
-            lines.append("・状態：保有中（新規追加なし）")
-            lines.append(f"・RR（TP1基準）：{rr:.2f}")
             lines.append(f"・CAGR寄与度（/日）：{cagr:.2f}{warn}")
             if np.isfinite(p_hit):
                 lines.append(f"・到達確率（目安）：{p_hit:.2f}")
             if np.isfinite(adj):
                 lines.append(f"・期待R×到達確率：{adj:.2f}")
+            lines.append(f"・RR（TP1基準）：{rr:.2f}")
             if np.isfinite(exp_days):
                 lines.append(f"・想定日数（中央値）：{exp_days:.1f}日")
-        else:
-            lines.append(f"■ {ticker}")
-            lines.append("・状態：保有中（新規追加なし）")
-            lines.append(f"・損益：{pnl_pct:+.2f}%")
         lines.append("")
 
     if not lines:
