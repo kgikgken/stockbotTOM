@@ -224,6 +224,8 @@ def build_report(
                 ticker = str(s.get("ticker", ""))
                 name = str(s.get("name", ticker))
                 sector = str(s.get("sector", ""))
+                tier = str(s.get("tier", "A") or "A")
+                tier_tag = "（準候補）" if tier.upper() == "B" else ""
                 rim_f = safe_float(s.get("rim"), 0.0)
                 last_f = safe_float(s.get("last"), 0.0)
                 atrp_f = safe_float(s.get("atrp"), 0.0)
@@ -268,7 +270,7 @@ def build_report(
                     zone_low = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
                     zone_high = rim_f * (1.0 - base_pre / 100.0) if rim_f > 0 else 0.0
                     zone_high = max(zone_low, zone_high)
-                lines.append(f"■ {ticker} {name}（{sector}）[{_tf_title(key)}]")
+                lines.append(f"■ {ticker} {name}（{sector}）[{_tf_title(key)}]{tier_tag}")
                 extra_parts = []
                 if rim_f > 0:
                     extra_parts.append(f"リム {_fmt_yen(rim_f)}")
