@@ -107,6 +107,9 @@ def main() -> None:
         )
     except Exception:
         pos_tickers = []
+    prev_snapshot = state.get("positions_last", [])
+    prev_set = set([str(x).strip() for x in prev_snapshot]) if isinstance(prev_snapshot, list) else set()
+    new_tickers = sorted(list(set([str(x).strip() for x in pos_tickers if str(x).strip()]) - prev_set))
     update_weekly_from_positions(state, pos_tickers)
 
     mkt = market_score()
@@ -152,9 +155,8 @@ def main() -> None:
             "リスク幅8%超は除外",
             "GUは寄り後再判定",
         ]
-
     # positions
-    pos_text, _asset = analyze_positions(pos_df, mkt_score=mkt_score, macro_on=macro_on)
+    pos_text, _asset = analyze_positions(pos_df, mkt_score=mkt_score, macro_on=macro_on, new_tickers=new_tickers)
 
     report = build_report(
         today_str=today_str,
