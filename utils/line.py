@@ -1,34 +1,38 @@
 from __future__ import annotations
 
-import os
-from typing import List
+from typing import Dict, List
 
-import requests
+import numpy as np
 
-WORKER_URL = os.getenv("WORKER_URL")
+from utils.util import corr_60d
 
-def send_line(text: str) -> None:
-    """
-    Cloudflare Worker へ POST json={"text": "..."} を送る（既存仕様維持）
-    """
-    if not WORKER_URL:
-        print(text)
-        return
+def apply_sector_cap(cands: List[Dict], max_per_sector: int = 2) -> List[Dict]:
+    out = []
+    cnt = {}
+    for c in cands:
+        sec = str(c.get("sector", "不明"))
+        cnt.setdefault(sec, 0)
+        if cnt[sec] >= max_per_sector:
+            continue
+        out.append(c)
+        cnt[sec] += 1
+    return out
 
-    chunk_size = 3800
-    chunks: List[str] = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
-
-    for ch in chunks:
-        ok = False
-        last_err = ""
-        for attempt in range(3):
-            try:
-                r = requests.post(WORKER_URL, json={"text": ch}, timeout=20)
-                print("[LINE RESULT]", r.status_code, str(r.text)[:200])
-                ok = True
+def apply_corr_filter(cands: List[Dict], ohlc_map: Dict[str, object], max_corr: float = 0.75) -> List[Dict]:
+    out: List[Dict] = []
+    for c in cands:
+        t = c.get("ticker")
+        ok = True
+        for chosen in out:
+            t2 = chosen.get("ticker")
+            df1 = ohlc_map.get(t)
+            df2 = ohlc_map.get(t2)
+            if df1 is None or df2 is None:
+                continue
+            cr = corr_60d(df1, df2)
+            if np.isfinite(cr) and cr > max_corr:
+                ok = False
                 break
-            except Exception as e:
-                last_err = repr(e)
-        if not ok:
-            # Never fail the whole run because LINE is temporarily unavailable.
-            print("[LINE ERROR]", last_err)
+        if ok:
+            out.append(c)
+    return out
