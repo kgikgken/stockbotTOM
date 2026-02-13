@@ -185,6 +185,7 @@ def run_screen(
                 "gu": bool(info.gu),
                 "adv20": float(adv),
                 "atrp": float(atrp),
+                "entry_mode": str(entry_mode),
             }
         )
 
@@ -224,7 +225,8 @@ def run_screen(
                     entry=entry_price,
                     sl=pick["sl"],
                     tp2=pick["tp2"],
-                    expected_r=float(pick["rr"]),
+                    # Align expected_r with realized_r (paper-trade closes at TP2).
+                    expected_r=float((float(pick["tp2"]) - float(entry_price)) / max(float(entry_price) - float(pick["sl"]), 1e-9)),
                 )
     else:
         final = _apply_setup_mix(cands, max_display(macro_on))
@@ -251,7 +253,8 @@ def run_screen(
                 entry=entry_price,
                 sl=c["sl"],
                 tp2=c["tp2"],
-                expected_r=float(c["rr"]),
+                # Align expected_r with realized_r (paper-trade closes at TP2).
+                expected_r=float((float(c["tp2"]) - float(entry_price)) / max(float(entry_price) - float(c["sl"]), 1e-9)),
             )
 
     # Tier0 exception brake
@@ -271,7 +274,7 @@ def run_screen(
         "final": int(len(final)),
         "avgAdjEV": float(avg_adj),
         "GU": float(gu_ratio),
-        "saucers": scan_saucers(universe=uni, ohlc_map=ohlc_map, max_each=5),
+        "saucers": scan_saucers(ohlc_map, uni, tcol, max_each=5),
     }
 
     return final, meta, ohlc_map
