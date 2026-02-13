@@ -22,28 +22,7 @@ class SaucerHit:
 
 
 def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample an OHLCV DataFrame.
-
-    Expects columns Open/High/Low/Close/Volume (case-sensitive) and a DatetimeIndex.
-    Returns a resampled OHLCV DataFrame with NaN rows removed.
-    """
-    if df is None or len(df) == 0:
-        return pd.DataFrame()
-
-    d = df.copy()
-    if not isinstance(d.index, pd.DatetimeIndex):
-        # Best-effort: try to convert index to datetime.
-        try:
-            d.index = pd.to_datetime(d.index)
-        except Exception:
-            return pd.DataFrame()
-
-    need_cols = ["Open", "High", "Low", "Close", "Volume"]
-    for c in need_cols:
-        if c not in d.columns:
-            return pd.DataFrame()
-
-    ohlc = d[need_cols].copy()
+    ohlc = df[["Open", "High", "Low", "Close", "Volume"]].copy()
     out = ohlc.resample(rule).agg(
         {
             "Open": "first",
@@ -53,293 +32,222 @@ def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
             "Volume": "sum",
         }
     )
-    out = out.dropna(how="any")
+    out = out.dropna()
     return out
 
 
 
 def _saucer_score(
-    close: np.ndarray,
-    volume: np.ndarray | None = None,
+    close: pd.Series,
     *,
     min_len: int,
-    max_len: int,
+    lookback: int,
+    min_progress: float,
     min_depth: float,
     max_depth: float,
-    vertex_band: tuple[float, float] = (0.35, 0.65),
-    min_progress: float = 0.95,
-    depth_opt: float = 0.28,
-    rim_frac: float = 1.0,
-) -> dict | None:
-    """
-    Returns dict:
-      score (0..1), progress (0..), depth (0..1), length (bars), rim (price)
+    vertex_band: float,
+) -> Optional[Dict[str, float]]:
+    """Return saucer metrics or None.
 
-    Depth = (rim - bottom) / rim
-    progress = current / rim
+    「ソーサーボトム（カップ/皿）」の深さは浅すぎても(ノイズ)深すぎても(下落トレンド)質が落ちるため、
+    timeframe別に「最適レンジ」を採用する。
 
-    Design goal (spec): "saucer" quality should NOT reward overly-deep bases.
-    Guidance for classical "cup" depth is often cited around ~12%–33% (e.g., O'Neil/IBD),
-    with deeper bases generally lower quality / higher risk. We enforce min/max depth and
-    add a soft penalty away from depth_opt.
+    depth = (rim - bottom) / rim
+
+    出力する score は「候補の優先度」用途のみ。検知条件は progress / depth / vertex_band で決める。
     """
-    close_arr = np.asarray(close, dtype=float).reshape(-1)
-    n = int(close_arr.size)
-    if n < min_len:
+    c = close.astype(float).dropna()
+    if len(c) < max(min_len, lookback + 5):
         return None
 
-    # truncate to max_len for speed
-    if n > max_len:
-        close_arr = close_arr[-max_len:]
-        if volume is not None:
-            volume = np.asarray(volume, dtype=float).reshape(-1)[-max_len:]
-        n = int(close_arr.size)
+    seg = c.tail(lookback)
+    rim = float(seg.max())
+    bottom = float(seg.min())
+    last = float(seg.iloc[-1])
 
-    # downstream code expects `close` to be an ndarray
-    close = close_arr
-
-    if np.any(~np.isfinite(close)) or np.nanmin(close) <= 0:
-        return None
-    # Flatten in case inputs are (n,1) arrays
-    close_arr = close.reshape(-1)
-
-    # rims and bottom
-    left_len = max(5, n // 4)
-    right_len = max(5, n // 4)
-    left_rim = float(np.max(close_arr[:left_len]))
-    right_rim = float(np.max(close_arr[-right_len:]))
-    rim = float(min(left_rim, right_rim))
-    bottom_idx = int(np.argmin(close_arr))
-    bottom = float(close_arr[bottom_idx])
-    if rim <= 0 or bottom <= 0:
+    if rim <= 0:
         return None
 
     depth = (rim - bottom) / rim
-    if (depth < min_depth) or (depth > max_depth):
+    if not (np.isfinite(depth) and min_depth <= depth <= max_depth):
         return None
 
-    vertex_pos = bottom_idx / max(1, n - 1)
-    if not (vertex_band[0] <= vertex_pos <= vertex_band[1]):
+    # Progress: how close last is to rim (0..1)
+    progress = (last - bottom) / max(1e-9, (rim - bottom))
+    if not (np.isfinite(progress) and progress >= min_progress):
         return None
 
-    progress = float(close_arr[-1] / rim)
-    if progress < min_progress:
+    # Vertex: bottom should be in the first half-ish (avoid V-shaped snapback)
+    idx_bottom = int(seg.values.argmin())
+    mid = int(len(seg) * 0.55)
+    if idx_bottom > mid:
         return None
 
-    # shape slopes
-    if bottom_idx < 10 or (n - bottom_idx) < 10:
-        return None
-    x = np.arange(n, dtype=float)
-
-    def _slope(xx: np.ndarray, yy: np.ndarray) -> float:
-        xx = xx - xx.mean()
-        denom = float(np.sum(xx * xx))
-        if denom <= 0:
-            return 0.0
-        return float(np.sum(xx * (yy - yy.mean())) / denom)
-
-    slope_l = _slope(x[: bottom_idx + 1], close_arr[: bottom_idx + 1])
-    slope_r = _slope(x[bottom_idx:], close_arr[bottom_idx:])
-    if slope_l >= 0:
-        return None
-    if slope_r <= 0:
+    # Vertex band: last should not be too far above rim (avoid already extended)
+    if last > rim * (1.0 + vertex_band):
         return None
 
-    # reject sharp V-bottoms
-    rets = np.diff(close_arr) / close_arr[:-1]
-    if len(rets) >= 20:
-        win = min(10, bottom_idx - 1, len(rets) - bottom_idx - 1) if bottom_idx > 1 else 0
-        if win >= 3:
-            local = float(np.mean(np.abs(rets[bottom_idx - win : bottom_idx + win])))
-            overall = float(np.mean(np.abs(rets)))
-            if overall > 0 and local > overall * 2.2:
-                return None
+    # Roughness penalty: prefer smoother bowls (lower residual variance vs. rolling mean)
+    ma = seg.rolling(5, min_periods=3).mean()
+    rough = float(np.nanstd((seg - ma) / rim))
 
-    # volume confirmation (optional)
-    vol_score = 0.0
-    if volume is not None and len(volume) == len(close):
-        v = volume.astype(float)
-        if np.all(np.isfinite(v)) and float(np.nanmedian(v)) > 0:
-            a = n // 3
-            b = 2 * n // 3
-            v1 = float(np.nanmedian(v[:a]))
-            v2 = float(np.nanmedian(v[a:b]))
-            v3 = float(np.nanmedian(v[b:]))
-            if v1 > 0 and v2 > 0 and v3 > 0:
-                dry = max(0.0, min(1.0, (v1 - v2) / v1))
-                exp = max(0.0, min(1.0, (v3 - v2) / v3))
-                vol_score = 0.5 * dry + 0.5 * exp
+    # Depth preference: maximize closeness to target depth (center of optimal range)
+    target = (min_depth + max_depth) / 2.0
+    width = max(1e-6, (max_depth - min_depth))
+    depth_pen = abs(depth - target) / width  # 0 at target, ~1 at edge
 
-    # depth quality
-    depth_pen = max(0.0, 1.0 - abs(depth - depth_opt) / max(1e-6, (max_depth - min_depth)))
-    depth_pen = max(0.0, min(1.0, depth_pen))
-
-    # progress quality
-    prog_q = max(0.0, min(1.0, (min(progress, 1.05) - min_progress) / (1.05 - min_progress)))
-
-    score = 0.45 * prog_q + 0.45 * depth_pen + 0.10 * vol_score
+    # Score: prioritize completion first, then depth quality, then smoothness
+    score = (progress * 2.0) - (depth_pen * 0.60) - (rough * 8.0)
 
     return {
-        "score": float(score),
-        "progress": float(progress),
+        "rim": rim,
+        "bottom": bottom,
+        "last": last,
         "depth": float(depth),
-        "length": int(n),
-        "rim": float(rim),
+        "progress": float(progress),
+        "score": float(score),
     }
-def scan_saucers(ohlc_map, universe, tcol: str | None = None, max_each: int = 5):
-    """Scan saucer-bottom candidates on D/W/M timeframes.
 
-    Parameters
-    ----------
-    ohlc_map : dict[str, pandas.DataFrame]
-        Per-ticker daily OHLCV (index: datetime-like).
-    universe : pandas.DataFrame | list | tuple | set | dict
-        Universe source. If DataFrame, will auto-detect ticker/name/sector columns.
-        If list/set/tuple, elements may be ticker strings or dict-like rows.
-    tcol : str | None
-        Optional ticker column name when universe is a DataFrame.
-    max_each : int
-        Max tickers per timeframe to return.
+def scan_saucers(
+    ohlc_map: Dict[str, pd.DataFrame],
+    uni: pd.DataFrame,
+    tcol: str,
+    *,
+    max_each: int = 5,
+) -> Dict[str, List[Dict]]:
+    """Scan saucers on D/W/M. Returns dict for report.
 
-    Returns
-    -------
-    dict[str, list[dict]]
-        Keys: 'D','W','M' (daily/weekly/monthly). Values: list of dicts with
-        ticker/name/sector/timeframe/entry_rim/progress/depth.
+    - Daily: stricter and longer window (avoid noisy short cups)
+    - Weekly/Monthly: structural saucers
     """
-    # ---- normalize universe -> iterable of (ticker, name, sector) ----
-    ticker_meta = {}
+    out: Dict[str, List[SaucerHit]] = {"D": [], "W": [], "M": []}
+    if uni is None or uni.empty:
+        return {"D": [], "W": [], "M": []}
 
-    def _coerce_meta_from_row(row):
-        if isinstance(row, dict):
-            t = str(row.get("ticker") or row.get("code") or row.get("symbol") or "").strip()
-            if not t:
-                return None
-            name = row.get("name") or row.get("company") or row.get("銘柄名") or ""
-            sector = row.get("sector") or row.get("industry") or row.get("業種") or ""
-            return t, str(name) if name is not None else "", str(sector) if sector is not None else ""
-        # treat as ticker string
-        t = str(row).strip()
-        if not t:
-            return None
-        return t, "", ""
+    for _, row in uni.iterrows():
+        ticker = str(row.get(tcol, "")).strip()
+        if not ticker:
+            continue
+        df = ohlc_map.get(ticker)
+        if df is None or df.empty or len(df) < 180:
+            continue
 
-    if isinstance(universe, pd.DataFrame):
-        cols = list(universe.columns)
-        if tcol is None:
-            # auto-detect ticker column
-            for cand in ("ticker", "code", "symbol", "銘柄コード"):
-                for c in cols:
-                    if str(c).lower() == cand:
-                        tcol = c
-                        break
-                if tcol is not None:
-                    break
-            if tcol is None and len(cols) > 0:
-                # fallback: first column
-                tcol = cols[0]
+        # Sanity / liquidity guardrails (avoid broken series causing absurd rim prices)
+        last_close = safe_float(df["Close"].iloc[-1], np.nan)
+        if not np.isfinite(last_close):
+            continue
+        # JP equities price sanity (very loose). Reject obvious scale bugs (e.g. billions).
+        if last_close < 50.0 or last_close > 200000.0:
+            continue
+        adv = adv20(df)
+        atrp = atr_pct_last(df)
+        if (not np.isfinite(adv)) or adv < 100e6:
+            continue
+        if (not np.isfinite(atrp)) or atrp < 0.6:
+            continue
 
-        name_col = None
-        for cand in ("name", "company", "銘柄名"):
-            for c in cols:
-                if str(c).lower() == cand:
-                    name_col = c
-                    break
-            if name_col is not None:
-                break
+        name = str(row.get("name", ticker))
+        sector = str(row.get("sector", row.get("industry_big", "不明")))
 
-        sector_col = None
-        for cand in ("sector", "industry", "業種"):
-            for c in cols:
-                if str(c).lower() == cand:
-                    sector_col = c
-                    break
-            if sector_col is not None:
-                break
-
-        for _, r in universe.iterrows():
-            t = str(r.get(tcol, "")).strip()
-            if not t:
-                continue
-            name = str(r.get(name_col, "")).strip() if name_col else ""
-            sector = str(r.get(sector_col, "")).strip() if sector_col else ""
-            ticker_meta[t] = (name, sector)
-
-        tickers = list(ticker_meta.keys())
-
-    elif isinstance(universe, (list, tuple, set)):
-        tickers = []
-        for row in universe:
-            meta = _coerce_meta_from_row(row)
-            if not meta:
-                continue
-            t, name, sector = meta
-            tickers.append(t)
-            if t not in ticker_meta:
-                ticker_meta[t] = (name, sector)
-
-    elif isinstance(universe, dict):
-        # if dict: keys are tickers OR dict has 'tickers' field
-        if "tickers" in universe and isinstance(universe["tickers"], (list, tuple, set)):
-            tickers = [str(x).strip() for x in universe["tickers"] if str(x).strip()]
-        else:
-            tickers = [str(k).strip() for k in universe.keys() if str(k).strip()]
-        for t in tickers:
-            ticker_meta.setdefault(t, ("", ""))
-
-    else:
-        # unknown type: try to coerce single ticker
-        meta = _coerce_meta_from_row(universe)
-        tickers = []
-        if meta:
-            t, name, sector = meta
-            tickers = [t]
-            ticker_meta[t] = (name, sector)
-
-    out = {"D": [], "W": [], "M": []}
-
-    cfg = {
-        "D": dict(min_len=60, max_len=220, min_depth=0.35, max_depth=0.65, rim_frac=0.15, min_progress=0.92),
-        "W": dict(min_len=40, max_len=180, min_depth=0.45, max_depth=0.85, rim_frac=0.18, min_progress=0.92),
-        "M": dict(min_len=18, max_len=80,  min_depth=0.55, max_depth=0.90, rim_frac=0.20, min_progress=0.95),
-    }
-
-    for tf in ("D", "W", "M"):
-        met = []
-        rule = "ME" if tf == "M" else tf  # pandas >=2.2 uses 'ME' for month-end
-        for ticker in tickers:
-            df = ohlc_map.get(ticker)
-            if df is None or len(df) < 60:
-                continue
-
-            dfr = _resample(df, rule) if tf != "D" else df.copy()
-            if dfr is None or len(dfr) < cfg[tf]["min_len"]:
-                continue
-
-            m = _saucer_score(
-                dfr,
-                min_len=cfg[tf]["min_len"],
-                max_len=cfg[tf]["max_len"],
-                rim_frac=cfg[tf]["rim_frac"],
-                min_depth=cfg[tf]["min_depth"],
-                max_depth=cfg[tf]["max_depth"],
-                min_progress=cfg[tf]["min_progress"],
+        # Daily (strict)
+        met = _saucer_score(
+            df["Close"],
+            min_len=160,
+            lookback=260,
+            min_progress=0.95,
+            min_depth=0.35,
+            vertex_band=0.55,
+                max_depth=0.75,
+        )
+        if met:
+            out["D"].append(
+                SaucerHit(
+                    ticker=ticker,
+                    name=name,
+                    sector=sector,
+                    tf="D",
+                    rim_price=float(met["rim"]),
+                    progress=float(met["progress"]),
+                    depth=float(met["depth"]),
+                    score=float(met["score"]),
+                )
             )
-            if not m:
-                continue
 
-            name, sector = ticker_meta.get(ticker, ("", ""))
-            met.append({
-                "ticker": ticker,
-                "name": name,
-                "sector": sector,
-                "timeframe": "日足" if tf == "D" else ("週足" if tf == "W" else "月足"),
-                "entry_rim": float(m["rim_price"]),
-                "progress": float(m["progress"]),
-                "depth": float(m["depth_pct"]),
-            })
+        # Weekly
+        try:
+            w = _resample(df, "W-FRI")
+        except Exception:
+            w = None
+        if w is not None and not w.empty and len(w) >= 60:
+            met = _saucer_score(
+                w["Close"],
+                min_len=50,
+                lookback=104,  # ~2y
+                min_progress=0.95,
+                min_depth=0.45,
+                vertex_band=0.60,
+                max_depth=0.75,
+            )
+            if met:
+                out["W"].append(
+                    SaucerHit(
+                        ticker=ticker,
+                        name=name,
+                        sector=sector,
+                        tf="W",
+                        rim_price=float(met["rim"]),
+                        progress=float(met["progress"]),
+                        depth=float(met["depth"]),
+                        score=float(met["score"]),
+                    )
+                )
 
-        met.sort(key=lambda x: (x["progress"], x["depth"]), reverse=True)
-        out[tf] = met[:max_each]
+        # Monthly
+        try:
+            m = _resample(df, "ME")  # pandas>=2 uses month-end "ME"
+        except Exception:
+            m = None
+        if m is not None and not m.empty and len(m) >= 36:
+            met = _saucer_score(
+                m["Close"],
+                min_len=30,
+                lookback=120,  # up to 10y
+                min_progress=0.92,
+                min_depth=0.55,
+                vertex_band=0.70,
+                max_depth=0.80,
+            )
+            if met:
+                out["M"].append(
+                    SaucerHit(
+                        ticker=ticker,
+                        name=name,
+                        sector=sector,
+                        tf="M",
+                        rim_price=float(met["rim"]),
+                        progress=float(met["progress"]),
+                        depth=float(met["depth"]),
+                        score=float(met["score"]),
+                    )
+                )
 
-    return out
+    # Sort and truncate
+    ret: Dict[str, List[Dict]] = {}
+    for tf in ("D", "W", "M"):
+        hits = out[tf]
+        hits.sort(key=lambda x: (x.score, x.progress, x.depth, x.rim_price, x.ticker), reverse=True)
+        hits = hits[: max_each]
+        ret[tf] = [
+            {
+                "ticker": h.ticker,
+                "name": h.name,
+                "sector": h.sector,
+                "tf": h.tf,
+                "rim": float(h.rim_price),
+                "progress": float(h.progress),
+                "depth": float(h.depth),
+                "score": float(h.score),
+            }
+            for h in hits
+        ]
+    return ret
