@@ -22,6 +22,7 @@ from utils.state import (
 
 UNIVERSE_PATH = "universe_jpx.csv"
 EARNINGS_EXCLUDE_DAYS = 3  # 暦日近似（±3日）
+MAX_RISK_PCT = 8.0  # リスク幅（%）がこの値以上の候補は除外（事故率低下）
 
 def _apply_setup_mix(cands: List[Dict], max_n: int) -> List[Dict]:
     """Enforce strategy mix per spec (when alternatives exist).
@@ -155,18 +156,41 @@ def run_screen(
         name = str(row.get("name", ticker))
         sector = str(row.get("sector", row.get("industry_big", "不明")))
 
-        # 現値IN判定（計算ロジックは変えず、実行モードだけ付与）
-        close_last = float(df["Close"].iloc[-1])
-        in_band = (close_last >= float(info.entry_low)) and (close_last <= float(info.entry_high))
-        market_ok = bool(in_band and (not bool(info.gu)) and (float(ev.p_reach) >= 0.750) and (int(mkt_score) >= 60) and (not bool(macro_on)))
-        entry_mode = "MARKET_OK" if market_ok else "LIMIT_ONLY"
-
         # Precompute entry/SL risk metrics for display and sorting
+        close_last = float(df["Close"].iloc[-1])
         entry_low = float(info.entry_low)
         entry_high = float(info.entry_high)
         entry_price = float(info.entry_price if info.entry_price is not None else (entry_low + entry_high) / 2.0)
         sl = float(info.sl)
         risk_pct = float((entry_price - sl) / entry_price * 100.0) if entry_price > 0 else 0.0
+        # リスク幅フィルタ（表示・採用対象から除外）
+        # - 8%超はギャップ/滑りで想定損失が破綻しやすいため、候補自体を落とす
+        if risk_pct >= MAX_RISK_PCT:
+            continue
+
+
+        # 現値IN判定（運用ルールに沿って“現実的にOK”な条件に限定）
+        # - エントリー帯内（微小誤差は許容）
+        # - GUではない
+        # - Macro警戒ではない
+        # - 地合いが一定以上
+        # - リスク幅が過大ではない
+        # - 到達確率が損益分岐を十分上回る
+        band_tol = 0.0005  # 0.05%: 表示丸め/取得誤差の吸収
+        in_band = (close_last >= entry_low * (1.0 - band_tol)) and (close_last <= entry_high * (1.0 + band_tol))
+        p_hit = float(ev.p_reach)
+        rr = float(ev.rr)
+        p_be = (1.0 / (rr + 1.0)) if rr > 0 else 1.0
+        prob_margin = 0.10
+        market_ok = bool(
+            in_band
+            and (not bool(info.gu))
+            and (not bool(macro_on))
+            and (int(mkt_score) >= 60)
+            and (risk_pct <= 6.0)
+            and (p_hit >= (p_be + prob_margin))
+        )
+        entry_mode = "MARKET_OK" if market_ok else "LIMIT_ONLY"
         
         cands.append(
             {
