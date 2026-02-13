@@ -54,6 +54,11 @@ class SaucerHit:
 
     score: float            # ranking score (internal)
 
+    # Classification tier:
+    # - "A": canonical cup-with-handle constraints (higher quality)
+    # - "B": relaxed constraints used only when the market is sparse (keeps ideas flowing)
+    tier: str = "A"
+
 
 def _resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     ohlc = df[["Open", "High", "Low", "Close", "Volume"]].copy()
@@ -479,36 +484,78 @@ def scan_saucers(
         sector = str(row.get("sector", row.get("industry_big", "不明")))
 
         # ------------------
-        # Daily (Cup-with-handle tuned)
+        # Daily (Cup-with-handle, practical mode)
         # ------------------
+        # v13 was deliberately strict; in practice it can produce "no hits" on many days.
+        # Here we relax *only* the parts that commonly suppress good-looking handles:
+        # - allow slightly shallower / less-complete cups
+        # - allow the left rim to occur a bit later in the early window
+        # - widen rim symmetry tolerances a touch
+        # - permit small rim overshoots while still staying "pre-breakout"
+        # - tolerate handle volume being flat-ish (dry-up is still preferred)
         met = _cup_with_handle_metrics(
             df,
             tf="D",
-            lookback=390,
-            min_cup_len=120,
-            min_progress=0.88,
-            min_depth=0.12,
+            lookback=420,
+            min_cup_len=90,
+            min_progress=0.84,
+            min_depth=0.10,
             max_depth=0.60,
-            left_rim_frac=0.25,
-            rim_tol_below=0.08,
-            rim_tol_above=0.03,
-            max_last_over_rim=0.004,
-            min_bottom_pos=0.30,
-            max_bottom_pos=0.70,
-            min_bottom_width_frac=0.04,
-            max_rise_slope_ratio=2.20,
-            handle_win=25,
+            left_rim_frac=0.35,
+            rim_tol_below=0.10,
+            rim_tol_above=0.05,
+            max_last_over_rim=0.007,
+            min_bottom_pos=0.28,
+            max_bottom_pos=0.72,
+            min_bottom_width_frac=0.03,
+            max_rise_slope_ratio=2.80,
+            handle_win=30,
             handle_min_len=5,
-            handle_max_len=25,
-            handle_near_rim=0.03,
+            handle_max_len=30,
+            handle_near_rim=0.045,
             handle_min_pb=0.02,
-            handle_max_pb=0.15,
-            handle_max_range=0.12,
-            handle_min_upper_frac=0.50,
-            handle_vol_ratio_max=0.90,
-            handle_vol_ratio_hard_max=1.25,
+            handle_max_pb=0.18,
+            handle_max_range=0.14,
+            handle_min_upper_frac=0.45,
+            handle_vol_ratio_max=1.00,
+            handle_vol_ratio_hard_max=1.45,
             max_risk_pct=8.0,
         )
+        tier = "A" if met else ""
+
+        # Fallback (tier B): only slightly looser; keeps the list from going empty
+        # while still enforcing: long cup + handle + pre-breakout proximity + risk cap.
+        if met is None:
+            met = _cup_with_handle_metrics(
+                df,
+                tf="D",
+                lookback=420,
+                min_cup_len=80,
+                min_progress=0.80,
+                min_depth=0.08,
+                max_depth=0.65,
+                left_rim_frac=0.40,
+                rim_tol_below=0.12,
+                rim_tol_above=0.07,
+                max_last_over_rim=0.010,
+                min_bottom_pos=0.26,
+                max_bottom_pos=0.74,
+                min_bottom_width_frac=0.02,
+                max_rise_slope_ratio=3.20,
+                handle_win=35,
+                handle_min_len=4,
+                handle_max_len=35,
+                handle_near_rim=0.06,
+                handle_min_pb=0.02,
+                handle_max_pb=0.22,
+                handle_max_range=0.18,
+                handle_min_upper_frac=0.40,
+                handle_vol_ratio_max=1.05,
+                handle_vol_ratio_hard_max=1.70,
+                max_risk_pct=8.0,
+            )
+            tier = "B" if met else ""
+
         if met:
             out["D"].append(
                 SaucerHit(
@@ -532,11 +579,12 @@ def scan_saucers(
                     sl_price=float(met.get("sl", float("nan"))),
                     risk_pct=float(met.get("risk_pct", float("nan"))),
                     score=float(met["score"]),
+                    tier=tier or "A",
                 )
             )
 
         # ------------------
-        # Weekly
+        # Weekly (practical mode)
         # ------------------
         try:
             w = _resample(df, "W-FRI")
@@ -546,31 +594,65 @@ def scan_saucers(
             met = _cup_with_handle_metrics(
                 w,
                 tf="W",
-                lookback=156,
-                min_cup_len=40,
-                min_progress=0.86,
-                min_depth=0.12,
-                max_depth=0.65,
-                left_rim_frac=0.25,
-                rim_tol_below=0.10,
-                rim_tol_above=0.05,
-                max_last_over_rim=0.006,
-                min_bottom_pos=0.28,
-                max_bottom_pos=0.72,
-                min_bottom_width_frac=0.03,
-                max_rise_slope_ratio=2.40,
-                handle_win=12,
+                lookback=182,
+                min_cup_len=32,
+                min_progress=0.82,
+                min_depth=0.10,
+                max_depth=0.68,
+                left_rim_frac=0.35,
+                rim_tol_below=0.12,
+                rim_tol_above=0.07,
+                max_last_over_rim=0.010,
+                min_bottom_pos=0.26,
+                max_bottom_pos=0.74,
+                min_bottom_width_frac=0.02,
+                max_rise_slope_ratio=3.00,
+                handle_win=14,
                 handle_min_len=2,
-                handle_max_len=12,
-                handle_near_rim=0.04,
+                handle_max_len=14,
+                handle_near_rim=0.06,
                 handle_min_pb=0.03,
-                handle_max_pb=0.18,
-                handle_max_range=0.16,
-                handle_min_upper_frac=0.45,
-                handle_vol_ratio_max=0.95,
-                handle_vol_ratio_hard_max=1.30,
+                handle_max_pb=0.22,
+                handle_max_range=0.20,
+                handle_min_upper_frac=0.40,
+                handle_vol_ratio_max=1.05,
+                handle_vol_ratio_hard_max=1.60,
                 max_risk_pct=9.0,
             )
+            tier_w = "A" if met else ""
+
+            # Weekly fallback (tier B)
+            if met is None:
+                met = _cup_with_handle_metrics(
+                    w,
+                    tf="W",
+                    lookback=182,
+                    min_cup_len=28,
+                    min_progress=0.78,
+                    min_depth=0.08,
+                    max_depth=0.72,
+                    left_rim_frac=0.40,
+                    rim_tol_below=0.14,
+                    rim_tol_above=0.09,
+                    max_last_over_rim=0.014,
+                    min_bottom_pos=0.24,
+                    max_bottom_pos=0.76,
+                    min_bottom_width_frac=0.015,
+                    max_rise_slope_ratio=3.40,
+                    handle_win=16,
+                    handle_min_len=2,
+                    handle_max_len=16,
+                    handle_near_rim=0.07,
+                    handle_min_pb=0.03,
+                    handle_max_pb=0.25,
+                    handle_max_range=0.24,
+                    handle_min_upper_frac=0.38,
+                    handle_vol_ratio_max=1.10,
+                    handle_vol_ratio_hard_max=1.85,
+                    max_risk_pct=9.0,
+                )
+                tier_w = "B" if met else ""
+
             if met:
                 atrp_w = atr_pct_last(w)
                 out["W"].append(
@@ -595,11 +677,12 @@ def scan_saucers(
                         sl_price=float(met.get("sl", float("nan"))),
                         risk_pct=float(met.get("risk_pct", float("nan"))),
                         score=float(met["score"]),
+                        tier=tier_w or "A",
                     )
                 )
 
         # ------------------
-        # Monthly (more permissive; handle optional)
+        # Monthly (more permissive)
         # ------------------
         try:
             m = _resample(df, "ME")
@@ -669,7 +752,14 @@ def scan_saucers(
     for tf in ("D", "W", "M"):
         hits = out[tf]
         hits.sort(
-            key=lambda x: (x.score, x.cup_len, x.progress, -x.risk_pct if np.isfinite(x.risk_pct) else 0.0, x.ticker),
+            key=lambda x: (
+                1 if str(getattr(x, "tier", "A")) == "A" else 0,
+                x.score,
+                x.cup_len,
+                x.progress,
+                -x.risk_pct if np.isfinite(x.risk_pct) else 0.0,
+                x.ticker,
+            ),
             reverse=True,
         )
         hits = hits[: max_each]
@@ -679,6 +769,7 @@ def scan_saucers(
                 "name": h.name,
                 "sector": h.sector,
                 "tf": h.tf,
+                "tier": getattr(h, "tier", "A"),
                 "rim": float(h.rim_price),
                 "last": float(h.last_price),
                 "atrp": float(h.atrp),
