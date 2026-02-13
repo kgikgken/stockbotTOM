@@ -6,6 +6,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+import math
+
 from utils.util import safe_float, adv20, atr_pct_last
 
 
@@ -86,6 +88,56 @@ def _lin_slope(y: np.ndarray) -> float:
     if denom <= 0:
         return float("nan")
     return float(((x * (y - y.mean())).sum()) / denom)
+
+
+
+def _tick_size_jpx(price: float) -> float:
+    """Approximate JPX (TSE) tick size table by price range.
+
+    This is used to snap suggested levels so that rounding does not violate the risk cap.
+    """
+    try:
+        p = float(price)
+    except Exception:
+        return 1.0
+    if not np.isfinite(p) or p <= 0:
+        return 1.0
+
+    # Most common ranges for cash equities
+    if p < 10_000:
+        return 1.0
+    if p < 30_000:
+        return 5.0
+    if p < 50_000:
+        return 10.0
+    if p < 100_000:
+        return 10.0
+    if p < 300_000:
+        return 50.0
+    if p < 500_000:
+        return 100.0
+    if p < 1_000_000:
+        return 100.0
+    if p < 3_000_000:
+        return 500.0
+    if p < 5_000_000:
+        return 1_000.0
+    if p < 10_000_000:
+        return 1_000.0
+    if p < 30_000_000:
+        return 5_000.0
+    return 10_000.0
+
+
+def _floor_to_tick(price: float, tick: float) -> float:
+    try:
+        p = float(price)
+        t = float(tick)
+    except Exception:
+        return float("nan")
+    if not (np.isfinite(p) and np.isfinite(t) and t > 0):
+        return float("nan")
+    return float(math.floor(p / t) * t)
 
 
 def _entry_zone_prebreak(
@@ -408,6 +460,37 @@ def _cup_with_handle_metrics(
             # recompute mid-zone risk after capping
             entry_mid = (entry_low + entry_high) / 2.0
             risk_pct = (entry_mid - sl_price) / entry_mid * 100.0 if entry_mid > 0 else float("nan")
+
+    
+    # Snap levels to tradable ticks (conservative) so that report rounding does not
+    # accidentally push the effective risk above the cap (e.g. 8.01% due to rounding).
+    tick = _tick_size_jpx(rim)
+    if np.isfinite(tick) and tick > 0:
+        entry_low = _floor_to_tick(entry_low, tick)
+        entry_high = _floor_to_tick(entry_high, tick)
+        sl_price = _floor_to_tick(sl_price, tick)
+
+        if not (
+            np.isfinite(entry_low)
+            and np.isfinite(entry_high)
+            and np.isfinite(sl_price)
+            and entry_low > 0
+            and entry_high > 0
+            and sl_price > 0
+        ):
+            return None
+
+        # Re-apply strict cap on the snapped values (ensures max risk holds on real order prices).
+        cap_high = sl_price / (1.0 - max_risk_pct / 100.0)
+        cap_high = _floor_to_tick(cap_high, tick)
+        if np.isfinite(cap_high) and cap_high > 0:
+            entry_high = float(min(entry_high, cap_high))
+
+        if entry_high < entry_low:
+            return None
+
+        entry_mid = (entry_low + entry_high) / 2.0
+        risk_pct = (entry_mid - sl_price) / entry_mid * 100.0 if entry_mid > 0 else float("nan")
 
     if np.isfinite(risk_pct) and risk_pct > max_risk_pct:
         return None
