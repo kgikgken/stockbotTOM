@@ -308,14 +308,27 @@ def build_report(
                         order_tag = "押し待ち指値"
 
                 if rim_f > 0 and zone_low > 0 and zone_high > 0:
-                    if abs(zone_high / zone_low - 1.0) <= 0.001:
-                        lines.append(
-                            f"・IN（先回り/ハンドル {order_tag}）：{_fmt_yen(zone_low)} 円（{extra}）"
-                        )
+                    # Print order guide:
+                    # - 逆指値: show trigger/limit to avoid "range means limit" confusion
+                    # - 指値/押し待ち指値: show zone as a band
+                    if order_tag == "逆指値":
+                        if abs(zone_high / zone_low - 1.0) <= 0.001:
+                            lines.append(
+                                f"・IN（先回り/ハンドル 逆指値）：トリガー {_fmt_yen(zone_low)} 円（{extra}）"
+                            )
+                        else:
+                            lines.append(
+                                f"・IN（先回り/ハンドル 逆指値）：トリガー {_fmt_yen(zone_low)} 円 / 上限 {_fmt_yen(zone_high)} 円（{extra}）"
+                            )
                     else:
-                        lines.append(
-                            f"・IN（先回り/ハンドル {order_tag}）：{_fmt_yen(zone_low)} 〜 {_fmt_yen(zone_high)} 円（{extra}）"
-                        )
+                        if abs(zone_high / zone_low - 1.0) <= 0.001:
+                            lines.append(
+                                f"・IN（先回り/ハンドル {order_tag}）：{_fmt_yen(zone_low)} 円（{extra}）"
+                            )
+                        else:
+                            lines.append(
+                                f"・IN（先回り/ハンドル {order_tag}）：{_fmt_yen(zone_low)} 〜 {_fmt_yen(zone_high)} 円（{extra}）"
+                            )
                 else:
                     lines.append("・IN（先回り/ハンドル 指値）：-")
 
@@ -327,6 +340,12 @@ def build_report(
 
                     # Distance helpers
                     dist_to_rim = (rim_f / last_f - 1.0) * 100.0 if last_f > 0 else float("nan")
+                    risk_last = float("nan")
+                    if np.isfinite(sl_s) and sl_s > 0 and last_f > 0:
+                        risk_last = (last_f - sl_s) / last_f * 100.0
+                    risk_last_note = ""
+                    if np.isfinite(risk_last) and risk_last > 8.0:
+                        risk_last_note = f" / 現値リスク {risk_last:.1f}%（上限超）"
                     dist_txt = ""
                     if abs(last_f / rim_f - 1.0) <= tol_rim:
                         # around the rim
@@ -336,7 +355,7 @@ def build_report(
                             # above zone but still at rim-ish
                             if zone_high > 0 and last_f > zone_high * (1.0 + tol_zone):
                                 over = (last_f / zone_high - 1.0) * 100.0
-                                dist_txt = f"（INゾーン外（上） / INゾーン上 +{over:.1f}% / リム付近）"
+                                dist_txt = f"（INゾーン外（上） / INゾーン上 +{over:.1f}% / リム付近{risk_last_note}）"
                             else:
                                 dist_txt = "（リム付近）"
                     elif last_f < rim_f:
@@ -349,7 +368,7 @@ def build_report(
                                 dist_txt = f"（INゾーン外（下） / INゾーンまで +{to_zone:.1f}% / リムまで +{dist_to_rim:.1f}%）"
                             elif zone_high > 0 and last_f > zone_high * (1.0 + tol_zone):
                                 over = (last_f / zone_high - 1.0) * 100.0
-                                dist_txt = f"（INゾーン外（上） / INゾーン上 +{over:.1f}% / リムまで +{dist_to_rim:.1f}%）"
+                                dist_txt = f"（INゾーン外（上） / INゾーン上 +{over:.1f}% / リムまで +{dist_to_rim:.1f}%{risk_last_note}）"
                             else:
                                 dist_txt = f"（INゾーン外 / リムまで +{dist_to_rim:.1f}%）"
                     else:
