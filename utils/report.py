@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Dict, List
+import numpy as np
+
 
 from utils.util import safe_float
 
@@ -230,6 +232,11 @@ def build_report(
                 prog_pct = int(round(min(1.5, max(0.0, progress)) * 100))
                 depth = float(s.get("depth", 0.0))
 
+                handle_low = safe_float(s.get("handle_low"), float("nan"))
+                handle_high = safe_float(s.get("handle_high"), float("nan"))
+                handle_pb = safe_float(s.get("handle_pb"), float("nan"))
+                handle_ok = bool(s.get("handle_ok", False))
+
                 def _len_label(tf_key: str, n: int) -> str:
                     if n <= 0:
                         return "-"
@@ -239,29 +246,44 @@ def build_report(
                         return f"{n}ヶ月"
                     return f"{n}本"
 
-                # User intention: IN *before* a clean breakout (riskier, anticipatory entry).
-                # We define a "pre-break" entry zone slightly below the rim.
-                # Buffer is based on timeframe + ATR% (higher vol -> wider zone).
+                # Your intent: enter at the small "handle" dip near the rim (before a clean breakout).
+                # If handle metrics are available, we use them to define an IN zone.
+                # Otherwise we fallback to a rim-buffer zone based on timeframe + ATR%.
                 base_pre = {"D": 0.6, "W": 0.9, "M": 1.2}.get(key, 0.8)  # percent
                 max_pre = {"D": 2.0, "W": 3.0, "M": 4.0}.get(key, 2.5)   # percent
-                atr_pre = (atrp_f * 0.35) if atrp_f > 0 else 0.0            # percent
+                atr_pre = (atrp_f * 0.35) if atrp_f > 0 else 0.0
                 pre_buf_pct = max(base_pre, atr_pre)
                 pre_buf_pct = min(pre_buf_pct, max_pre)
-                pre_entry = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
+
+                # Fallback zone (no handle info)
+                fb_low = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
+                fb_high = rim_f * (1.0 - base_pre / 100.0) if rim_f > 0 else 0.0
+
+                if rim_f > 0 and handle_ok and (handle_low > 0) and (not np.isnan(handle_low)):
+                    zone_low = handle_low
+                    zone_high = max(zone_low, fb_high)
+                else:
+                    zone_low = fb_low
+                    zone_high = max(zone_low, fb_high)
 
                 lines.append(f"■ {ticker} {name}（{sector}）[{_tf_title(key)}]")
-                if rim_f > 0:
-                    lines.append(
-                        f"・IN（先回り/リム手前 指値）：{_fmt_yen(pre_entry)} 円（リム {_fmt_yen(rim_f)}）"
-                    )
+                if rim_f > 0 and zone_low > 0 and zone_high > 0:
+                    if abs(zone_high / zone_low - 1.0) <= 0.001:
+                        lines.append(
+                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 円（リム {_fmt_yen(rim_f)}）"
+                        )
+                    else:
+                        lines.append(
+                            f"・IN（先回り/ハンドル 指値）：{_fmt_yen(zone_low)} 〜 {_fmt_yen(zone_high)} 円（リム {_fmt_yen(rim_f)}）"
+                        )
                 else:
-                    lines.append("・IN（先回り/リム手前 指値）：-")
+                    lines.append("・IN（先回り/ハンドル 指値）：-")
 
-                # Show where the current (TF-close) is relative to rim.
+                # Show where the current (TF-close) is relative to rim + IN zone.
                 if last_f > 0 and rim_f > 0:
                     tol = 0.0005
-                    # IN zone: [pre_entry, rim]
-                    in_zone = bool(pre_entry > 0 and last_f >= pre_entry * (1.0 - tol))
+                    in_zone = bool(zone_low > 0 and zone_high > 0 and (zone_low * (1.0 - tol) <= last_f <= zone_high * (1.0 + tol)))
+
                     if abs(last_f / rim_f - 1.0) <= tol:
                         dist_txt = "（INゾーン内 / リム付近）" if in_zone else "（リム付近）"
                     elif last_f < rim_f:
@@ -271,13 +293,16 @@ def build_report(
                     else:
                         up = (last_f / rim_f - 1.0) * 100.0
                         dist_txt = f"（上抜け済 +{up:.1f}%）"
+
+                    htxt = "-"
+                    if np.isfinite(handle_pb) and handle_pb > 0:
+                        htxt = f"{handle_pb * 100.0:.1f}%"
+
                     lines.append(
-                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / 長さ {_len_label(key, cup_len)}）"
+                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / ハンドル {htxt} / 長さ {_len_label(key, cup_len)}）"
                     )
                 else:
                     lines.append(
                         f"・進捗 {prog_pct}% / 深さ {depth:.0%} / 長さ {_len_label(key, cup_len)}"
                     )
-
-
     return "\n".join(lines).rstrip() + "\n"
