@@ -102,8 +102,9 @@ def build_report(
             return float("nan")
 
         # Keep original ranking (idx) but renumber within each bucket for readability.
-        order_items: List[Tuple[int, str]] = []
-        watch_items: List[Tuple[int, str]] = []
+        # We store (rank, header, detail) to allow beginner-friendly line breaks.
+        order_items: List[Tuple[int, str, str]] = []
+        watch_items: List[Tuple[int, str, str]] = []
         skip_items: List[Tuple[int, str]] = []
 
         for idx, c in enumerate(cands, 1):
@@ -194,7 +195,8 @@ def build_report(
                 order_items.append(
                     (
                         idx,
-                        f"🟢 {ticker} {name}{tag_txt} 今IN（現値 {_fmt_yen(close_last)}） / SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
+                        f"🟢 {ticker} {name}{tag_txt}",
+                        f"成行（現値）{_fmt_yen(close_last)} / SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
                     )
                 )
                 continue
@@ -205,7 +207,8 @@ def build_report(
                 order_items.append(
                     (
                         idx,
-                        f"🟢 {ticker} {name}{tag_txt} 指値（押し待ち）{_fmt_yen(entry_price)} / SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
+                        f"🟢 {ticker} {name}{tag_txt}",
+                        f"指値（押し待ち）{_fmt_yen(entry_price)} / SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
                     )
                 )
                 continue
@@ -217,23 +220,34 @@ def build_report(
                     order_items.append(
                         (
                             idx,
-                            f"🟢 {ticker} {name}{tag_txt} 指値（帯内）{_fmt_yen(entry_price)} / SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
+                            f"🟢 {ticker} {name}{tag_txt}",
+                            f"指値（帯内）{_fmt_yen(entry_price)} / SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
                         )
                     )
                 else:
-                    watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt} 監視（帯内だが指値が上：注文は様子見）"))
+                    watch_items.append(
+                        (
+                            idx,
+                            f"🟡 {ticker} {name}{tag_txt}",
+                            "監視（帯内だが指値が上：注文は様子見）",
+                        )
+                    )
                 continue
 
             if below_band:
-                watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt} 監視（戻り待ち：帯まで距離あり）"))
+                watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt}", "監視（戻り待ち：帯まで距離あり）"))
                 continue
 
-            watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt} 監視"))
+            watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt}", "監視"))
 
         if order_items:
             lines.append("✅ 今日やること：注文（上から優先）")
-            for n, (_rank, txt) in enumerate(sorted(order_items, key=lambda x: x[0]), 1):
-                lines.append(f"{n}. {txt}")
+            _orders = sorted(order_items, key=lambda x: x[0])
+            for n, (_rank, head, detail) in enumerate(_orders, 1):
+                lines.append(f"{n}. {head}")
+                lines.append(f"   {detail}")
+                if n != len(_orders):
+                    lines.append("")
         else:
             lines.append("✅ 今日やること：注文")
             lines.append("・該当なし")
@@ -241,8 +255,13 @@ def build_report(
         if watch_items:
             lines.append("")
             lines.append("👀 監視（まだ入らない）")
-            for n, (_rank, txt) in enumerate(sorted(watch_items, key=lambda x: x[0]), 1):
-                lines.append(f"{n}. {txt}")
+            _watch = sorted(watch_items, key=lambda x: x[0])
+            for n, (_rank, head, detail) in enumerate(_watch, 1):
+                lines.append(f"{n}. {head}")
+                if detail:
+                    lines.append(f"   {detail}")
+                if n != len(_watch):
+                    lines.append("")
 
         if skip_items:
             lines.append("")
@@ -261,7 +280,27 @@ def build_report(
         import re
 
         def _pick_num(line: str) -> str:
-            m = re.search(r"([0-9]{1,3}(?:,[0-9]{3})*)", str(line or ""))
+            """Pick the *price-like* number from a segment.
+
+            Important: segments like "TP1 26,205" contain a digit in the label ("TP1").
+            A naive regex would incorrectly return "1".
+            """
+            s = str(line or "")
+            # Remove TP/TP1/TP2... tokens to avoid picking the digit in the label.
+            s = re.sub(r"\bTP[0-9]+\b", "TP", s)
+
+            # Prefer comma-grouped numbers (most yen prices are formatted like 12,345).
+            m = re.search(r"([0-9]{1,3}(?:,[0-9]{3})+)", s)
+            if m:
+                return m.group(1)
+
+            # Fallback: any 2+ digit number.
+            m = re.search(r"([0-9]{2,})", s)
+            if m:
+                return m.group(1)
+
+            # Last resort: single digit, but only if preceded by a separator.
+            m = re.search(r"(?:\s|：)([0-9])\b", s)
             return m.group(1) if m else ""
 
         def _cut_tail(s: str) -> str:
@@ -350,22 +389,33 @@ def build_report(
                     setup_used = _cut_tail(ln.split("Setup", 1)[1])
 
             act = next_act or status or "保有"
-            parts: List[str] = [f"■ {head}：{act}"]
-            if entry:
-                parts.append(f"Entry {entry}")
-            if now:
-                parts.append(f"Now {now}")
-            if pnl:
-                parts.append(f"PnL {pnl}")
-            if sl:
-                parts.append(f"SL {sl}")
-            if tp1:
-                parts.append(f"TP1 {tp1}")
-            if setup_used:
-                parts.append(f"Setup {setup_used}")
-            lines.append(" / ".join(parts))
 
-        lines.append("")
+            # Beginner-first: multi-line, no ambiguity about what to do.
+            lines.append(f"■ {head}：{act}")
+
+            p1_parts: List[str] = []
+            if entry or now:
+                e = entry or "-"
+                n = now or "-"
+                p1_parts.append(f"Entry {e} → Now {n}")
+            if pnl:
+                p1_parts.append(f"PnL {pnl}")
+            if p1_parts:
+                lines.append("   " + " / ".join(p1_parts))
+
+            p2_parts: List[str] = []
+            if sl:
+                p2_parts.append(f"SL {sl}")
+            if tp1:
+                p2_parts.append(f"TP1 {tp1}")
+            if setup_used:
+                p2_parts.append(f"Setup {setup_used}")
+            if p2_parts:
+                lines.append("   " + " / ".join(p2_parts))
+
+            # Visual separator between multiple positions
+            lines.append("")
+        # (blank line already appended after each block)
 
     # Summary: removed (beginner-first mode). The actionable list above is the summary.
 
@@ -457,21 +507,22 @@ def build_report(
                     elif last_f > zone_high * (1.0 + tol_zone):
                         order_tag = "押し待ち指値"
 
-                # Where is price now? (one short note)
+                # Where is price now? (one short note; avoid nested parentheses)
                 now_note = ""
                 if last_f > 0:
                     if last_f < zone_low * (1.0 - tol_zone):
                         to_zone = (zone_low / last_f - 1.0) * 100.0
-                        now_note = f"（今は下：+{to_zone:.1f}%待ち）"
+                        now_note = f"今：下（ゾーンまで +{to_zone:.1f}%待ち）"
                     elif last_f > zone_high * (1.0 + tol_zone):
                         over = (last_f / zone_high - 1.0) * 100.0
                         risk_last = (last_f - sl_s) / last_f * 100.0
-                        chase = f" r_now {risk_last:.1f}%" if np.isfinite(risk_last) else ""
-                        if np.isfinite(risk_last) and risk_last > 8.0:
-                            chase += "（今買うな）"
-                        now_note = f"（今は上：+{over:.1f}%{chase}）"
+                        now_note = f"今：上（上 +{over:.1f}%）"
+                        if np.isfinite(risk_last):
+                            now_note += f" / r_now {risk_last:.1f}%"
+                            if risk_last > 8.0:
+                                now_note += " / 今買うな"
                     else:
-                        now_note = "（ゾーン内）"
+                        now_note = "今：ゾーン内"
 
                 # Print one line per symbol
                 if order_tag == "逆指値":
@@ -487,9 +538,13 @@ def build_report(
                     if order_tag == "押し待ち指値":
                         ord_txt = "指値（押し待ち）" + ord_txt.replace("指値 ", "")
 
-                # Beginner-first: show only what matters for execution + one short "now" note.
-                # (Progress/length are kept in data but hidden to reduce noise for beginners.)
-                lines.append(
-                    f"{idx}. 🟢 {ticker} {name}{tier_tag}{warn} {ord_txt} / SL {_fmt_yen(sl_s)} / Risk {risk_txt} {now_note}"
-                )
+                # Beginner-first: use 2 lines per symbol.
+                # (Progress/length are kept in data but hidden to reduce noise.)
+                lines.append(f"{idx}. 🟢 {ticker} {name}{tier_tag}{warn}")
+                line2 = f"{ord_txt} / SL {_fmt_yen(sl_s)} / Risk {risk_txt}"
+                if now_note:
+                    line2 += f" / {now_note}"
+                lines.append("   " + line2)
+                if idx != len(items):
+                    lines.append("")
     return "\n".join(lines).rstrip() + "\n"
