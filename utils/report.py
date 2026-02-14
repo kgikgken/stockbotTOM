@@ -224,19 +224,30 @@ def build_report(
             ac = safe_float(c.get("atr_contr"), np.nan)
             gf = safe_float(c.get("gap_freq"), np.nan)
             r20 = safe_float(c.get("ret20"), np.nan)
+            rs20 = safe_float(c.get("rs20"), np.nan)
             noise = safe_float(c.get("noise_score"), np.nan)
+            pb_atr = safe_float(c.get("pb_atr"), np.nan)
+            weekly_ok = c.get("weekly_ok", None)
 
             extras = []
             if np.isfinite(q):
                 extras.append(f"品質:{q:+.2f}")
             if np.isfinite(r20):
                 extras.append(f"20日騰落:{r20:+.1f}%")
+            if np.isfinite(rs20):
+                extras.append(f"RS20:{rs20:+.1f}%")
             if np.isfinite(vr):
                 extras.append(f"出来高5/20:{vr:.2f}x")
             if np.isfinite(ac):
                 extras.append(f"ボラ5/20:{ac:.2f}x")
             if np.isfinite(gf):
                 extras.append(f"Gap頻度:{gf*100:.0f}%")
+            if np.isfinite(pb_atr):
+                extras.append(f"PB距離:{pb_atr:.1f}ATR")
+            if weekly_ok is True:
+                extras.append("週足:OK")
+            elif weekly_ok is False:
+                extras.append("週足:NG")
             if np.isfinite(noise):
                 extras.append(f"ノイズ:{int(noise)}")
             if extras:
