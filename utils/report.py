@@ -88,216 +88,159 @@ def build_report(
                 lines.append("・" + str(p).strip())
         lines.append("")
 
-    # Candidates
+    # Candidates (compact; hide non-load-bearing metrics)
     if cands:
-        if no_trade:
-            lines.append("👀 監視リスト（新規は見送り / 最大5）")
-        else:
-            lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
+        lines.append("👀 監視リスト（新規は見送り / 最大5）" if no_trade else "🏆 狙える形（1〜7営業日 / 最大5）")
+
+        band_tol = 0.0005  # 0.05% 表示/判定のズレを吸収
+
         for c in cands:
             ticker = str(c.get("ticker", ""))
             name = str(c.get("name", ticker))
             sector = str(c.get("sector", ""))
+            setup = str(c.get("setup", "")).strip()
+
+            entry_low = safe_float(c.get("entry_low"), 0.0)
+            entry_high = safe_float(c.get("entry_high"), 0.0)
+            entry_price = safe_float(c.get("entry_price"), (entry_low + entry_high) / 2.0)
+            sl = safe_float(c.get("sl"), 0.0)
+            tp1 = safe_float(c.get("tp1"), 0.0)
+            tp2 = safe_float(c.get("tp2"), 0.0)
+            close_last = safe_float(c.get("close_last"), 0.0)
+
+            rr = safe_float(c.get("rr"), 0.0)
+            p_hit = safe_float(c.get("p_hit"), 0.0)
+            exp_days = safe_float(c.get("expected_days"), 0.0)
+            pb_atr = safe_float(c.get("pb_atr"), float("nan"))
+            risk_low = safe_float(c.get("risk_pct_low"), float("nan"))
+            risk_high = safe_float(c.get("risk_pct_high"), float("nan"))
+
+            # Market-in (現値IN) – show only as a flag.
             entry_mode = str(c.get("entry_mode", "LIMIT_ONLY"))
             market_in_ok = bool(entry_mode == "MARKET_OK" and (not macro_on) and (not no_trade))
-            suffix = "（現値IN可）" if market_in_ok else ""
-            lines.append(f"■ {ticker} {name}（{sector}）{suffix}")
-            lines.append("")
-            # Entry
-            lines.append("【エントリー】")
-            entry_low = safe_float(c.get('entry_low'), 0.0)
-            entry_high = safe_float(c.get('entry_high'), 0.0)
-            entry_price = safe_float(c.get('entry_price'), (entry_low + entry_high) / 2.0)
-            sl = safe_float(c.get('sl'), 0.0)
-            close_last = safe_float(c.get('close_last'), 0.0)
-            risk_pct = safe_float(c.get('risk_pct'), 0.0)
-            risk_low = safe_float(c.get('risk_pct_low'), float('nan'))
-            risk_high = safe_float(c.get('risk_pct_high'), float('nan'))
-            risk_now = safe_float(c.get('risk_now'), float('nan'))
-            rr0 = safe_float(c.get('rr'), 0.0)
-            p_hit0 = safe_float(c.get('p_hit'), 0.0)
-            p_be0 = (1.0 / (rr0 + 1.0)) if rr0 > 0 else 1.0
-            band_tol = 0.0005  # 0.05%: 表示丸め/取得誤差の吸収（screener側と合わせる）
-            in_band_tol = (
+
+            # Liquidity tags (board-thin proxies)
+            liq_grade = int(safe_float(c.get("liq_grade"), 0.0)) if c.get("liq_grade") is not None else 0
+            adv20 = safe_float(c.get("adv20"), float("nan"))
+            impact = safe_float(c.get("amihud_bps100m"), float("nan"))
+            weekly_ok = c.get("weekly_ok", None)
+
+            tags: List[str] = []
+            if setup:
+                tags.append(setup)
+            if liq_grade in (1, 2):
+                tags.append(f"板厚{'◎' if liq_grade==2 else '○'}")
+            if np.isfinite(adv20):
+                tags.append(f"ADV{_fmt_oku(adv20)}")
+            if np.isfinite(impact):
+                tags.append(f"Imp{impact:.0f}")
+            if weekly_ok is True:
+                tags.append("週足OK")
+            elif weekly_ok is False:
+                tags.append("週足NG")
+            if bool(c.get("gu", False)):
+                tags.append("GU")
+            if market_in_ok:
+                tags.append("現値IN可")
+
+            tag_txt = f" [{' / '.join(tags)}]" if tags else ""
+            lines.append(f"■ {ticker} {name}（{sector}）{tag_txt}")
+
+            # Location vs entry band
+            in_band = (
                 (close_last > 0)
                 and (entry_low > 0)
                 and (entry_high > 0)
                 and (close_last >= entry_low * (1.0 - band_tol))
                 and (close_last <= entry_high * (1.0 + band_tol))
             )
-            if risk_pct <= 0.0 and entry_price > 0 and sl > 0:
-                risk_pct = (entry_price - sl) / entry_price * 100.0
-            
-            lines.append(f"・指値目安（中央）：{_fmt_yen(entry_price)} 円")
-            if entry_low > 0 and entry_high > 0:
-                lines.append(f"・エントリー帯：{_fmt_yen(entry_low)} 〜 {_fmt_yen(entry_high)} 円")
+            loc = ""
             if close_last > 0 and entry_low > 0 and entry_high > 0:
-                # Distance to entry band (readability-first).
-                # IMPORTANT: use the same tolerance as the screener's entry_mode (band_tol),
-                # so the report and the decision logic never diverge.
-                # Extra safety: when price is ABOVE the entry band, show the *current* risk
-                # (if the user were to chase at current) to prevent accidental rule-violations.
-                cur_risk_pct = float("nan")
-                if close_last > 0 and sl > 0:
-                    try:
-                        cur_risk_pct = float((close_last - sl) / close_last * 100.0)
-                    except Exception:
-                        cur_risk_pct = float("nan")
-                if in_band_tol:
-                    dist_txt = "（帯内）"
+                if in_band:
+                    loc = "帯内"
                 elif close_last < entry_low:
                     need = (entry_low / close_last - 1.0) * 100.0
-                    dist_txt = f"（帯まで +{need:.1f}%）"
+                    loc = f"帯下 {need:.1f}%"
                 else:
                     need = (close_last / entry_high - 1.0) * 100.0
-                    extra = ""
-                    if np.isfinite(cur_risk_pct):
-                        if cur_risk_pct > 8.0:
-                            extra = f" / 現値リスク {cur_risk_pct:.1f}%（上限超）"
-                        else:
-                            extra = f" / 現値リスク {cur_risk_pct:.1f}%"
-                    dist_txt = f"（帯まで -{need:.1f}%{extra}）"
-                lines.append(f"・現値（終値）：{_fmt_yen(close_last)} 円{dist_txt}")
+                    loc = f"帯上 {need:.1f}%"
 
-            if bool(c.get('gu', False)):
-                lines.append("・GU：Yes（寄り後再判定）")
-            
-            lines.append(f"・現値IN：{'OK' if market_in_ok else 'NG'}")
-            if not market_in_ok:
-                # NG reason (deterministic, aligned with entry_mode logic and global constraints)
-                reason = None
-                if no_trade:
-                    reason = "新規停止中"
-                elif macro_on:
-                    reason = "重要イベント警戒"
-                elif bool(c.get('gu', False)):
-                    reason = "GU（寄り後再判定）"
-                elif close_last > 0 and entry_low > 0 and close_last < entry_low * (1.0 - band_tol):
-                    reason = "現値がエントリー帯より下（待ち）"
-                elif close_last > 0 and entry_high > 0 and close_last > entry_high * (1.0 + band_tol):
-                    reason = "現値がエントリー帯より上（押し待ち/指値）"
-                elif in_band_tol:
-                    # in-band なのに現値IN不可のケースは「なぜ不可か」を明示する
-                    q0 = safe_float(c.get('quality'), np.nan)
-                    vr0 = safe_float(c.get('vol_ratio'), np.nan)
-                    ac0 = safe_float(c.get('atr_contr'), np.nan)
-                    gf0 = safe_float(c.get('gap_freq'), np.nan)
-                    ns0 = safe_float(c.get('noise_score'), np.nan)
-                    rn0 = risk_now
+            # Current risk if user were to chase (safety)
+            cur_risk = float("nan")
+            if close_last > 0 and sl > 0:
+                try:
+                    cur_risk = float((close_last - sl) / close_last * 100.0)
+                except Exception:
+                    cur_risk = float("nan")
 
-                    if np.isfinite(rn0) and rn0 > 6.0:
-                        reason = f"現値リスク大（{rn0:.1f}%）"
-                    elif np.isfinite(ns0) and ns0 > 1:
-                        reason = f"ノイズ多（{int(ns0)}）"
-                    elif np.isfinite(vr0) and vr0 > 1.35:
-                        reason = f"出来高拡大（5/20={vr0:.2f}x）"
-                    elif np.isfinite(ac0) and ac0 > 1.15:
-                        reason = f"ボラ拡大（5/20={ac0:.2f}x）"
-                    elif np.isfinite(gf0) and gf0 > 0.25:
-                        reason = f"Gap頻度高（{gf0*100:.0f}%）"
-                    elif np.isfinite(q0) and q0 < -0.05:
-                        reason = f"品質不足（q={q0:+.2f}）"
-                    elif risk_pct >= 8.0:
-                        reason = f"リスク幅大（{risk_pct:.1f}%）"
-                elif (in_band_tol and (p_hit0 < (p_be0 + 0.10))):
-                    reason = f"到達確率が損益分岐を十分上回らない（p={p_hit0:.3f} / p_be={p_be0:.3f}）"
-                elif mkt_score < 60:
-                    reason = f"地合い不足（{mkt_score}<60）"
-                else:
-                    reason = "条件未達"
-                lines.append(f"・NG理由：{reason}")
-            
-            lines.append(f"・損切り：{_fmt_yen(sl)} 円")
-            # リスク幅は band があるならレンジ表示（実運用の安全側）
-            if np.isfinite(risk_low) and np.isfinite(risk_high) and risk_high > 0 and (abs(risk_high - risk_low) >= 0.05):
-                warn = " ⚠" if risk_high >= 8.0 else ""
-                lines.append(f"・リスク幅：{risk_low:.1f}〜{risk_high:.1f}%{warn}")
+            # Risk range display
+            if np.isfinite(risk_low) and np.isfinite(risk_high) and risk_high > 0:
+                risk_txt = f"{risk_low:.1f}〜{risk_high:.1f}%"
             else:
-                warn = " ⚠" if risk_pct >= 8.0 else ""
-                if risk_pct > 0:
-                    lines.append(f"・リスク幅：{risk_pct:.1f}%{warn}")
-            lines.append("")
-            # Targets (single line)
-            lines.append("【利確目標】")
-            lines.append(f"・利確①：{_fmt_yen(c.get('tp1', 0.0))} 円、②：{_fmt_yen(c.get('tp2', 0.0))} 円")
-            lines.append("")
-            # Indicators
-            lines.append("【指標（参考）】")
-            lines.append(f"・CAGR寄与度（/日）：{c.get('cagr', 0.0):.2f}")
-            p_hit = p_hit0
-            rr = rr0
-            exp_r_hit = safe_float(c.get('exp_r_hit'), rr * p_hit)
-            p_be = p_be0
+                risk_txt = "-"
+
+            # IN note (short)
+            in_note = "IN:OK" if market_in_ok else "IN:NG"
+            if not market_in_ok:
+                ns = safe_float(c.get("noise_score"), float("nan"))
+                q = safe_float(c.get("quality"), float("nan"))
+                vr = safe_float(c.get("vol_ratio"), float("nan"))
+                gf = safe_float(c.get("gap_freq"), float("nan"))
+                if no_trade:
+                    in_note = "IN:NG（停止）"
+                elif macro_on:
+                    in_note = "IN:NG（イベント）"
+                elif bool(c.get("gu", False)):
+                    in_note = "IN:NG（GU）"
+                elif close_last > 0 and entry_high > 0 and close_last > entry_high * (1.0 + band_tol):
+                    in_note = "IN:NG（押し待ち）"
+                elif close_last > 0 and entry_low > 0 and close_last < entry_low * (1.0 - band_tol):
+                    in_note = "IN:NG（待ち）"
+                elif in_band and np.isfinite(ns) and ns >= 2:
+                    in_note = f"IN:NG（ノイズ{int(ns)}）"
+                elif in_band and np.isfinite(vr) and vr > 1.35:
+                    in_note = f"IN:NG（出来高↑）"
+                elif in_band and np.isfinite(gf) and gf > 0.25:
+                    in_note = "IN:NG（Gap多）"
+                elif in_band and np.isfinite(q) and q < -0.05:
+                    in_note = "IN:NG（品質低）"
+
+            # Line 1: plan
+            band_txt = "-" if not (entry_low > 0 and entry_high > 0) else f"{_fmt_yen(entry_low)}-{_fmt_yen(entry_high)}"
+            now_txt = "-" if not (close_last > 0) else _fmt_yen(close_last)
+            loc_txt = f"（{loc}" + (f" / r_now {cur_risk:.1f}%" if np.isfinite(cur_risk) else "") + ")" if loc else ""
+            lines.append(
+                f"・Entry {_fmt_yen(entry_price)}（{band_txt}） / Now {now_txt}{loc_txt} / SL {_fmt_yen(sl)} / Risk {risk_txt} / {in_note}"
+            )
+
+            # Line 2: targets & EV
             ev_r = (p_hit * rr) - ((1.0 - p_hit) * 1.0)
-            lines.append(f"・到達確率（目安）：{p_hit:.3f}（損益分岐 p={p_be:.3f}）")
-            lines.append(f"・期待値（R）：{ev_r:.2f}R")
-            lines.append(f"・期待R×到達確率（参考）：{exp_r_hit:.2f}")
-            lines.append(f"・RR（TP1基準）：{rr:.2f}")
-            lines.append(f"・想定日数（中央値）：{safe_float(c.get('expected_days'), 0.0):.1f}日")
+            pb_txt = f" / PB {pb_atr:.1f}ATR" if np.isfinite(pb_atr) else ""
+            lines.append(
+                f"・TP {_fmt_yen(tp1)}/{_fmt_yen(tp2)} / EV {ev_r:.2f}R / p {p_hit:.3f} / RR {rr:.2f} / d {exp_days:.1f}日{pb_txt}"
+            )
 
-            # 品質補助情報（スクリーニングの透明性）
-            q = safe_float(c.get("quality"), np.nan)
-            vr = safe_float(c.get("vol_ratio"), np.nan)
-            ac = safe_float(c.get("atr_contr"), np.nan)
-            gf = safe_float(c.get("gap_freq"), np.nan)
-            r20 = safe_float(c.get("ret20"), np.nan)
-            rs20 = safe_float(c.get("rs20"), np.nan)
-            noise = safe_float(c.get("noise_score"), np.nan)
-            pb_atr = safe_float(c.get("pb_atr"), np.nan)
-            weekly_ok = c.get("weekly_ok", None)
-
-            adv20 = safe_float(c.get("adv20"), np.nan)
-            mdv20 = safe_float(c.get("mdv20"), np.nan)
-            impact = safe_float(c.get("amihud_bps100m"), np.nan)
-            liq_grade = int(safe_float(c.get("liq_grade"), 0.0)) if c.get("liq_grade") is not None else 0
-            liq_adv_min = safe_float(c.get("liq_adv_min"), np.nan)
-
-            extras = []
-            if np.isfinite(q):
-                extras.append(f"品質:{q:+.2f}")
-            if np.isfinite(r20):
-                extras.append(f"20日騰落:{r20:+.1f}%")
-            if np.isfinite(rs20):
-                extras.append(f"RS20:{rs20:+.1f}%")
-            if np.isfinite(vr):
-                extras.append(f"出来高5/20:{vr:.2f}x")
-            if np.isfinite(ac):
-                extras.append(f"ボラ5/20:{ac:.2f}x")
-
-            if np.isfinite(gf):
-                extras.append(f"Gap頻度:{gf*100:.0f}%")
-            # Liquidity display (board-thin proxy)
-            if liq_grade in (1, 2):
-                extras.append(f"板厚:{'◎' if liq_grade==2 else '○'}")
-            if np.isfinite(adv20):
-                warn = ""
-                # grade=1 is allowed only when no grade=2 exists, but still deserves a caution label.
-                if liq_grade == 1:
-                    warn = " ⚠"
-                # If a threshold is available, also caution when very close to the minimum.
-                elif np.isfinite(liq_adv_min) and adv20 < float(liq_adv_min) * 1.05:
-                    warn = " ⚠"
-                extras.append(f"ADV20:{_fmt_oku(adv20)}{warn}")
-            if np.isfinite(mdv20):
-                extras.append(f"MED20:{_fmt_oku(mdv20)}")
-            if np.isfinite(impact):
-                warn_i = " ⚠" if impact >= 90.0 else ""
-                extras.append(f"インパクト:{impact:.0f}bps/1億{warn_i}")
-            if np.isfinite(pb_atr):
-                extras.append(f"PB距離:{pb_atr:.1f}ATR")
-            if weekly_ok is True:
-                extras.append("週足:OK")
-            elif weekly_ok is False:
-                extras.append("週足:NG")
-            if np.isfinite(noise):
-                extras.append(f"ノイズ:{int(noise)}")
-            if extras:
-                lines.append("・" + " / ".join(extras))
+            # Optional warnings (only when meaningful)
+            warns: List[str] = []
+            ns2 = safe_float(c.get("noise_score"), float("nan"))
+            vr2 = safe_float(c.get("vol_ratio"), float("nan"))
+            ac2 = safe_float(c.get("atr_contr"), float("nan"))
+            gf2 = safe_float(c.get("gap_freq"), float("nan"))
+            if np.isfinite(ns2) and ns2 >= 2:
+                warns.append(f"ノイズ{int(ns2)}")
+            if np.isfinite(vr2) and vr2 >= 1.60:
+                warns.append(f"出来高↑{vr2:.2f}x")
+            if np.isfinite(ac2) and ac2 >= 1.15:
+                warns.append(f"ボラ↑{ac2:.2f}x")
+            if np.isfinite(gf2) and gf2 >= 0.20:
+                warns.append(f"Gap{gf2*100:.0f}%")
+            if warns:
+                lines.append("・注意：" + " / ".join(warns))
 
             lines.append("")
     else:
         lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
-        lines.append("該当なし")
+        lines.append("・該当なし")
         lines.append("")
 
     # Positions (as-is; already unified in latest spec for audit, if enabled upstream)
@@ -510,8 +453,10 @@ def build_report(
                         if hvol_ratio >= 1.25:
                             vtxt = vtxt + " ⚠"
 
+                    # Compact saucer telemetry (avoid dense separators)
+                    depth_pct = int(round(depth * 100.0))
                     lines.append(
-                        f"・現値（終値）：{_fmt_yen(last_f)} 円{dist_txt}（進捗 {prog_pct}% / 深さ {depth:.0%} / ハンドル {htxt} / 期間 {hlen_txt} / 出来高 {vtxt} / 長さ {_len_label(key, cup_len)}）"
+                        f"・現値：{_fmt_yen(last_f)} 円{dist_txt}（進捗{prog_pct}% 深さ{depth_pct}% ハ{htxt} 期{hlen_txt} V{vtxt} L{_len_label(key, cup_len)}）"
                     )
                 else:
                     lines.append(
