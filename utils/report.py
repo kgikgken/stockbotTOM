@@ -249,6 +249,8 @@ def build_report(
             adv20 = safe_float(c.get("adv20"), np.nan)
             mdv20 = safe_float(c.get("mdv20"), np.nan)
             impact = safe_float(c.get("amihud_bps100m"), np.nan)
+            liq_grade = int(safe_float(c.get("liq_grade"), 0.0)) if c.get("liq_grade") is not None else 0
+            liq_adv_min = safe_float(c.get("liq_adv_min"), np.nan)
 
             extras = []
             if np.isfinite(q):
@@ -265,8 +267,16 @@ def build_report(
             if np.isfinite(gf):
                 extras.append(f"Gap頻度:{gf*100:.0f}%")
             # Liquidity display (board-thin proxy)
+            if liq_grade in (1, 2):
+                extras.append(f"板厚:{'◎' if liq_grade==2 else '○'}")
             if np.isfinite(adv20):
-                warn = ' ⚠' if adv20 < 5e8 else ''
+                warn = ""
+                # grade=1 is allowed only when no grade=2 exists, but still deserves a caution label.
+                if liq_grade == 1:
+                    warn = " ⚠"
+                # If a threshold is available, also caution when very close to the minimum.
+                elif np.isfinite(liq_adv_min) and adv20 < float(liq_adv_min) * 1.05:
+                    warn = " ⚠"
                 extras.append(f"ADV20:{_fmt_oku(adv20)}{warn}")
             if np.isfinite(mdv20):
                 extras.append(f"MED20:{_fmt_oku(mdv20)}")
