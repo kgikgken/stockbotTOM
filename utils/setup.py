@@ -31,6 +31,18 @@ class SetupInfo:
     entry_price: Optional[float] = None
     # RR at TP1 (used as expected R basis for CAGR contribution score).
     rr_tp1: Optional[float] = None
+    # --- Quality/structure telemetry for main setups (used for screening and reach-prob refinement)
+    # 20日騰落（%）
+    ret20: Optional[float] = None
+    # 出来高比（直近5本平均 / 直近20本平均）
+    vol_ratio: Optional[float] = None
+    # ボラ収縮（ATR%直近5本平均 / 直近20本平均）  <1 が収縮
+    atr_contr: Optional[float] = None
+    # ギャップ頻度（直近20本で|Gap|>1.2% の比率）
+    gap_freq: Optional[float] = None
+    # レンジ収縮（(H-L)/Close の直近5本平均 / 直近20本平均）
+    range_contr: Optional[float] = None
+
 
 def _trend_strength(c: pd.Series, ma20: pd.Series, ma50: pd.Series) -> float:
     c_last = safe_float(c.iloc[-1], np.nan)
@@ -72,6 +84,77 @@ def _pullback_quality(c: pd.Series, ma20: pd.Series, ma50: pd.Series, atr: float
         q = 1.00
 
     return float(clamp(q, 0.80, 1.20))
+
+
+def _ret_n(close: pd.Series, n: int = 20) -> float:
+    """n本騰落（%）"""
+    try:
+        n = int(n)
+    except Exception:
+        n = 20
+    if close is None or len(close) < n + 1:
+        return np.nan
+    base = safe_float(close.iloc[-(n + 1)], np.nan)
+    last = safe_float(close.iloc[-1], np.nan)
+    if not (np.isfinite(base) and np.isfinite(last) and base > 0):
+        return np.nan
+    return float((last / base - 1.0) * 100.0)
+
+
+def _vol_ratio(df: pd.DataFrame, short: int = 5, long: int = 20) -> float:
+    """出来高比（直近short平均 / 直近long平均）"""
+    if df is None or df.empty or "Volume" not in df.columns:
+        return np.nan
+    v = df["Volume"].astype(float)
+    if len(v) < max(short, long) + 1:
+        return np.nan
+    vs = safe_float(v.tail(short).mean(), np.nan)
+    vl = safe_float(v.tail(long).mean(), np.nan)
+    if not (np.isfinite(vs) and np.isfinite(vl) and vl > 0):
+        return np.nan
+    return float(vs / vl)
+
+
+def _atrp_contr(df: pd.DataFrame, short: int = 5, long: int = 20) -> float:
+    """ATR%収縮（直近short平均 / 直近long平均）"""
+    if df is None or df.empty or len(df) < max(short, long) + 30:
+        # ATR14のウォームアップも必要
+        return np.nan
+    a = atr14(df)
+    c = df["Close"].astype(float)
+    atrp = (a / (c + 1e-9)) * 100.0
+    if len(atrp) < max(short, long):
+        return np.nan
+    s = safe_float(atrp.tail(short).mean(), np.nan)
+    l = safe_float(atrp.tail(long).mean(), np.nan)
+    if not (np.isfinite(s) and np.isfinite(l) and l > 0):
+        return np.nan
+    return float(s / l)
+
+
+def _range_contr(df: pd.DataFrame, short: int = 5, long: int = 20) -> float:
+    """レンジ収縮（(H-L)/Close の直近short平均 / 直近long平均）"""
+    if df is None or df.empty or len(df) < max(short, long) + 1:
+        return np.nan
+    h = df["High"].astype(float)
+    l = df["Low"].astype(float)
+    c = df["Close"].astype(float)
+    rng = ((h - l).abs() / (c + 1e-9)) * 100.0
+    s = safe_float(rng.tail(short).mean(), np.nan)
+    lg = safe_float(rng.tail(long).mean(), np.nan)
+    if not (np.isfinite(s) and np.isfinite(lg) and lg > 0):
+        return np.nan
+    return float(s / lg)
+
+
+def _gap_freq(df: pd.DataFrame, window: int = 20, thresh: float = 0.012) -> float:
+    """ギャップ頻度（直近window本で|Gap|>thresh の比率）"""
+    if df is None or df.empty or len(df) < window + 2:
+        return np.nan
+    o = df["Open"].astype(float)
+    pc = df["Close"].astype(float).shift(1)
+    gap = ((o - pc).abs() / (pc + 1e-9))
+    return float((gap.tail(window) > float(thresh)).mean())
 
 def detect_setup(df: pd.DataFrame) -> Tuple[str, int]:
     if df is None or df.empty or len(df) < 120:
@@ -250,6 +333,13 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool, entry_override: float | N
     ts = _trend_strength(c, ma20, ma50)
     pq = _pullback_quality(c, ma20, ma50, atr, setup)
 
+    # --- quality telemetry (screening)
+    ret20 = _ret_n(c, 20)
+    vol_ratio = _vol_ratio(df, 5, 20)
+    atr_contr = _atrp_contr(df, 5, 20)
+    gap_freq = _gap_freq(df, 20, 0.012)
+    range_contr = _range_contr(df, 5, 20)
+
     return SetupInfo(
         entry_price=entry_price,
         rr_tp1=rr_tp1,
@@ -267,6 +357,11 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool, entry_override: float | N
         pullback_quality=float(pq),
         gu=bool(gu),
         breakout_line=breakout_line,
+        ret20=float(ret20) if np.isfinite(ret20) else None,
+        vol_ratio=float(vol_ratio) if np.isfinite(vol_ratio) else None,
+        atr_contr=float(atr_contr) if np.isfinite(atr_contr) else None,
+        gap_freq=float(gap_freq) if np.isfinite(gap_freq) else None,
+        range_contr=float(range_contr) if np.isfinite(range_contr) else None,
     )
 
 
@@ -315,6 +410,13 @@ def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) ->
     trend_strength = _trend_strength(c, ma20, ma50)
     pullback_quality = _pullback_quality(c, ma20, ma50, float(atr_last), setup)
 
+    # --- quality telemetry (positions)
+    ret20 = _ret_n(c, 20)
+    vol_ratio = _vol_ratio(df, 5, 20)
+    atr_contr = _atrp_contr(df, 5, 20)
+    gap_freq = _gap_freq(df, 20, 0.012)
+    range_contr = _range_contr(df, 5, 20)
+
     info = SetupInfo(
         setup=setup,
         tier=int(tier),
@@ -334,6 +436,11 @@ def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) ->
         atrp=float(atr_pct_last(df)),
         entry_price=float(entry_price),
         rr_tp1=float(rr_tp1),
+        ret20=float(ret20) if np.isfinite(ret20) else None,
+        vol_ratio=float(vol_ratio) if np.isfinite(vol_ratio) else None,
+        atr_contr=float(atr_contr) if np.isfinite(atr_contr) else None,
+        gap_freq=float(gap_freq) if np.isfinite(gap_freq) else None,
+        range_contr=float(range_contr) if np.isfinite(range_contr) else None,
     )
     return info
 
