@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import csv
 import os
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple, Optional
 
-from PIL import Image, ImageDraw, ImageFont
+# Pillow is optional in some environments.
+# We keep this module importable even if PIL is missing so the caller can
+# degrade gracefully (e.g., export CSV instead).
+try:
+    from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+    _HAVE_PIL = True
+except Exception:  # pragma: no cover
+    Image = None  # type: ignore
+    ImageDraw = None  # type: ignore
+    ImageFont = None  # type: ignore
+    _HAVE_PIL = False
 
 
 @dataclass
@@ -29,11 +41,14 @@ def _first_existing(paths: Sequence[str]) -> Optional[str]:
     return None
 
 
-def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+def _load_font(size: int, bold: bool = False):
     """Load a Japanese-capable font.
 
-    We prefer Noto Sans CJK which is commonly available on Linux images.
+    Prefer Noto Sans CJK on Linux if present.
     """
+
+    if not _HAVE_PIL:
+        raise RuntimeError("Pillow (PIL) is not installed")
 
     reg = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -47,40 +62,40 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
+
     path = _first_existing(bld if bold else reg) or _first_existing(reg)
     if not path:
-        raise RuntimeError("No usable font found for table image rendering")
+        # Fall back to Pillow's default bitmap font (ASCII-centric). This keeps
+        # the pipeline alive even if Japanese glyphs may not render ideally.
+        try:
+            return ImageFont.load_default()  # type: ignore[attr-defined]
+        except Exception as e:
+            raise RuntimeError("No usable font found for table image rendering") from e
 
     # For .ttc, Pillow can take an index; default 0 is fine for NotoSansCJK.
     try:
-        return ImageFont.truetype(path, size=size, index=0)
+        return ImageFont.truetype(path, size=size, index=0)  # type: ignore[arg-type]
     except TypeError:
         # Some Pillow builds don't accept index for non-ttc fonts.
-        return ImageFont.truetype(path, size=size)
+        return ImageFont.truetype(path, size=size)  # type: ignore[arg-type]
 
 
-def _text_bbox(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> Tuple[int, int]:
+def _text_bbox(draw, text: str, font) -> Tuple[int, int]:
     """Return (w, h) for a single-line text."""
 
     s = "" if text is None else str(text)
-    # textbbox gives more accurate width than font.getbbox for some glyphs.
     x0, y0, x1, y1 = draw.textbbox((0, 0), s, font=font)
     return int(x1 - x0), int(y1 - y0)
 
 
-def _truncate_to_px(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    max_px: int,
-    ellipsis: str = "…",
-) -> str:
+def _truncate_to_px(draw, text: str, font, max_px: int, ellipsis: str = "…") -> str:
     s = "" if text is None else str(text)
     if max_px <= 0:
         return s
     w, _ = _text_bbox(draw, s, font)
     if w <= max_px:
         return s
+
     # Binary search for best prefix.
     lo, hi = 0, len(s)
     best = ""
@@ -103,13 +118,12 @@ def render_table_png(
     out_path: str,
     style: TableImageStyle | None = None,
 ) -> str:
-    """Render a simple table to a PNG image.
+    """Render a simple table to a PNG image."""
 
-    This is intended for human-friendly daily reports (e.g., sharing as an image).
-    """
+    if not _HAVE_PIL:
+        raise RuntimeError("Pillow (PIL) is not installed; cannot render PNG")
 
     style = style or TableImageStyle()
-
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
     title_font = _load_font(style.title_font_size, bold=True)
@@ -117,8 +131,8 @@ def render_table_png(
     header_font = _load_font(style.font_size, bold=True)
 
     # First pass: measure content.
-    tmp = Image.new("RGB", (10, 10), "white")
-    draw = ImageDraw.Draw(tmp)
+    tmp = Image.new("RGB", (10, 10), "white")  # type: ignore[attr-defined]
+    draw = ImageDraw.Draw(tmp)  # type: ignore[attr-defined]
 
     headers_s = ["" if h is None else str(h) for h in headers]
     rows_s = [["" if c is None else str(c) for c in r] for r in rows]
@@ -147,9 +161,7 @@ def render_table_png(
     # If total is too wide, shrink by truncation.
     total_w = sum(col_px) + style.margin * 2
     if total_w > style.max_total_px and n_cols > 0:
-        # Reduce wide columns first.
         over = total_w - style.max_total_px
-        # Compute how much each column can be reduced.
         reducible = [max(0, w - 160) for w in col_px]
         while over > 0 and sum(reducible) > 0:
             for j in range(n_cols):
@@ -178,16 +190,18 @@ def render_table_png(
         rows_fit.append(rr)
 
     # Heights
-    title_w, title_h = _text_bbox(draw, title, title_font)
+    _title_w, title_h = _text_bbox(draw, title, title_font)
     row_h = int(max(_text_bbox(draw, "A", font)[1], _text_bbox(draw, "あ", font)[1]) + style.pad_y * 2)
-    head_h = int(max(_text_bbox(draw, "A", header_font)[1], _text_bbox(draw, "あ", header_font)[1]) + style.pad_y * 2)
+    head_h = int(
+        max(_text_bbox(draw, "A", header_font)[1], _text_bbox(draw, "あ", header_font)[1]) + style.pad_y * 2
+    )
 
     table_h = head_h + row_h * max(1, len(rows_fit))
     img_h = style.margin * 2 + title_h + 12 + table_h
     img_w = int(total_w)
 
-    img = Image.new("RGB", (img_w, img_h), "white")
-    d = ImageDraw.Draw(img)
+    img = Image.new("RGB", (img_w, img_h), "white")  # type: ignore[attr-defined]
+    d = ImageDraw.Draw(img)  # type: ignore[attr-defined]
 
     # Title
     tx = style.margin
@@ -202,13 +216,12 @@ def render_table_png(
     d.rectangle([x0, y0, img_w - style.margin, y0 + head_h], fill="#F0F0F0")
 
     # Grid lines
-    # Vertical lines
     x = x0
     d.line([x, y0, x, y0 + head_h + row_h * max(1, len(rows_fit))], fill="#202020", width=style.line_width)
     for w in col_px:
         x += w
         d.line([x, y0, x, y0 + head_h + row_h * max(1, len(rows_fit))], fill="#202020", width=style.line_width)
-    # Horizontal lines
+
     y = y0
     d.line([x0, y, img_w - style.margin, y], fill="#202020", width=style.line_width)
     y += head_h
@@ -233,4 +246,24 @@ def render_table_png(
             x += col_px[j]
 
     img.save(out_path)
+    return out_path
+
+
+def render_table_csv(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    out_path: str,
+) -> str:
+    """Export the table as UTF-8 CSV (Excel-friendly with BOM)."""
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        if title:
+            w.writerow([title])
+            w.writerow([])
+        w.writerow(list(headers))
+        for r in rows:
+            w.writerow(list(r))
     return out_path
