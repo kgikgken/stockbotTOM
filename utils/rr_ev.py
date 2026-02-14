@@ -23,6 +23,7 @@ class EVInfo:
     cagr_score: float
     expected_r: float
     p_reach: float
+    ev_r: float
     time_penalty_pts: float
 
 
@@ -65,6 +66,44 @@ def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
         env = clamp((int(mkt_score) - 55) / 25.0, -1.0, 1.0)
         p += 0.03 * env
 
+    # --- Additional structure/quality adjustments (lightweight; avoid overfitting)
+    # 20日騰落（勢い）
+    ret20 = float(setup.ret20) if getattr(setup, "ret20", None) is not None else np.nan
+    if np.isfinite(ret20):
+        p += 0.03 * clamp(ret20 / 10.0, -0.6, 0.8)
+
+    # 出来高（pullback/baseは減っている方が偽物が少ない）
+    vr = float(setup.vol_ratio) if getattr(setup, "vol_ratio", None) is not None else np.nan
+    if np.isfinite(vr):
+        if vr <= 0.85:
+            p += 0.02
+        elif vr <= 0.95:
+            p += 0.01
+        elif vr >= 1.60:
+            p -= 0.04
+        elif vr >= 1.30:
+            p -= 0.02
+
+    # ボラ収縮（収縮→拡張で伸びやすい）
+    ac = float(setup.atr_contr) if getattr(setup, "atr_contr", None) is not None else np.nan
+    if np.isfinite(ac):
+        if ac <= 0.90:
+            p += 0.02
+        elif ac <= 0.98:
+            p += 0.01
+        elif ac >= 1.35:
+            p -= 0.04
+        elif ac >= 1.15:
+            p -= 0.02
+
+    # ギャップ頻度が高い銘柄は滑り/イベントに弱い
+    gf = float(setup.gap_freq) if getattr(setup, "gap_freq", None) is not None else np.nan
+    if np.isfinite(gf):
+        if gf >= 0.20:
+            p -= 0.03
+        elif gf >= 0.12:
+            p -= 0.02
+
     return float(clamp(p, 0.30, 0.85))
 
 def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
@@ -86,6 +125,9 @@ def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
 
     p = _reach_prob(setup, mkt_score=mkt_score)
 
+    # Expected value in R (TP1 basis): p*RR - (1-p)*1
+    ev_r = float((p * expected_r) - ((1.0 - p) * 1.0))
+
     # 時間効率ペナルティ（機械）
     penalty = 0.0
     if expected_days >= 6.0:
@@ -101,6 +143,7 @@ def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
             cagr_score=-999.0,
             expected_r=expected_r,
             p_reach=p,
+            ev_r=ev_r,
             time_penalty_pts=99.0,
         )
     if expected_days >= 5.0:
@@ -111,8 +154,10 @@ def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
     adj_ev = float(expected_r * p)  # 期待値（補正）
     if setup.gu:
         adj_ev -= 0.10
+        ev_r -= 0.10
     if macro_on:
         adj_ev -= 0.08
+        ev_r -= 0.08
 
     adj_ev = float(clamp(adj_ev, -0.50, 2.50))
     rday = float(adj_ev / max(expected_days, 1e-6))
@@ -132,6 +177,7 @@ def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
         cagr_score=cagr_score,
         expected_r=expected_r,
         p_reach=p,
+        ev_r=ev_r,
         time_penalty_pts=penalty,
     )
 
@@ -141,6 +187,6 @@ def pass_thresholds(setup: SetupInfo, ev: EVInfo) -> Tuple[bool, str]:
         return False, "RR"
     if ev.rday < ev.rday_min:
         return False, "RDAY"
-    if ev.adj_ev < 0.50:
-        return False, "ADJEV"
+    if ev.ev_r < 0.10:
+        return False, "EVR"
     return True, "OK"
