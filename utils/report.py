@@ -94,6 +94,9 @@ def build_report(
             sl = safe_float(c.get('sl'), 0.0)
             close_last = safe_float(c.get('close_last'), 0.0)
             risk_pct = safe_float(c.get('risk_pct'), 0.0)
+            risk_low = safe_float(c.get('risk_pct_low'), float('nan'))
+            risk_high = safe_float(c.get('risk_pct_high'), float('nan'))
+            risk_now = safe_float(c.get('risk_now'), float('nan'))
             rr0 = safe_float(c.get('rr'), 0.0)
             p_hit0 = safe_float(c.get('p_hit'), 0.0)
             p_be0 = (1.0 / (rr0 + 1.0)) if rr0 > 0 else 1.0
@@ -115,6 +118,14 @@ def build_report(
                 # Distance to entry band (readability-first).
                 # IMPORTANT: use the same tolerance as the screener's entry_mode (band_tol),
                 # so the report and the decision logic never diverge.
+                # Extra safety: when price is ABOVE the entry band, show the *current* risk
+                # (if the user were to chase at current) to prevent accidental rule-violations.
+                cur_risk_pct = float("nan")
+                if close_last > 0 and sl > 0:
+                    try:
+                        cur_risk_pct = float((close_last - sl) / close_last * 100.0)
+                    except Exception:
+                        cur_risk_pct = float("nan")
                 if in_band_tol:
                     dist_txt = "（帯内）"
                 elif close_last < entry_low:
@@ -122,7 +133,13 @@ def build_report(
                     dist_txt = f"（帯まで +{need:.1f}%）"
                 else:
                     need = (close_last / entry_high - 1.0) * 100.0
-                    dist_txt = f"（帯まで -{need:.1f}%）"
+                    extra = ""
+                    if np.isfinite(cur_risk_pct):
+                        if cur_risk_pct > 8.0:
+                            extra = f" / 現値リスク {cur_risk_pct:.1f}%（上限超）"
+                        else:
+                            extra = f" / 現値リスク {cur_risk_pct:.1f}%"
+                    dist_txt = f"（帯まで -{need:.1f}%{extra}）"
                 lines.append(f"・現値（終値）：{_fmt_yen(close_last)} 円{dist_txt}")
 
             if bool(c.get('gu', False)):
@@ -142,8 +159,29 @@ def build_report(
                     reason = "現値がエントリー帯より下（待ち）"
                 elif close_last > 0 and entry_high > 0 and close_last > entry_high * (1.0 + band_tol):
                     reason = "現値がエントリー帯より上（押し待ち/指値）"
-                elif (in_band_tol and risk_pct >= 8.0):
-                    reason = f"リスク幅大（{risk_pct:.1f}%）"
+                elif in_band_tol:
+                    # in-band なのに現値IN不可のケースは「なぜ不可か」を明示する
+                    q0 = safe_float(c.get('quality'), np.nan)
+                    vr0 = safe_float(c.get('vol_ratio'), np.nan)
+                    ac0 = safe_float(c.get('atr_contr'), np.nan)
+                    gf0 = safe_float(c.get('gap_freq'), np.nan)
+                    ns0 = safe_float(c.get('noise_score'), np.nan)
+                    rn0 = risk_now
+
+                    if np.isfinite(rn0) and rn0 > 6.0:
+                        reason = f"現値リスク大（{rn0:.1f}%）"
+                    elif np.isfinite(ns0) and ns0 > 1:
+                        reason = f"ノイズ多（{int(ns0)}）"
+                    elif np.isfinite(vr0) and vr0 > 1.35:
+                        reason = f"出来高拡大（5/20={vr0:.2f}x）"
+                    elif np.isfinite(ac0) and ac0 > 1.15:
+                        reason = f"ボラ拡大（5/20={ac0:.2f}x）"
+                    elif np.isfinite(gf0) and gf0 > 0.25:
+                        reason = f"Gap頻度高（{gf0*100:.0f}%）"
+                    elif np.isfinite(q0) and q0 < -0.05:
+                        reason = f"品質不足（q={q0:+.2f}）"
+                    elif risk_pct >= 8.0:
+                        reason = f"リスク幅大（{risk_pct:.1f}%）"
                 elif (in_band_tol and (p_hit0 < (p_be0 + 0.10))):
                     reason = f"到達確率が損益分岐を十分上回らない（p={p_hit0:.3f} / p_be={p_be0:.3f}）"
                 elif mkt_score < 60:
@@ -153,9 +191,14 @@ def build_report(
                 lines.append(f"・NG理由：{reason}")
             
             lines.append(f"・損切り：{_fmt_yen(sl)} 円")
-            warn = " ⚠" if risk_pct >= 8.0 else ""
-            if risk_pct > 0:
-                lines.append(f"・リスク幅：{risk_pct:.1f}%{warn}")
+            # リスク幅は band があるならレンジ表示（実運用の安全側）
+            if np.isfinite(risk_low) and np.isfinite(risk_high) and risk_high > 0 and (abs(risk_high - risk_low) >= 0.05):
+                warn = " ⚠" if risk_high >= 8.0 else ""
+                lines.append(f"・リスク幅：{risk_low:.1f}〜{risk_high:.1f}%{warn}")
+            else:
+                warn = " ⚠" if risk_pct >= 8.0 else ""
+                if risk_pct > 0:
+                    lines.append(f"・リスク幅：{risk_pct:.1f}%{warn}")
             lines.append("")
             # Targets (single line)
             lines.append("【利確目標】")
@@ -181,6 +224,7 @@ def build_report(
             ac = safe_float(c.get("atr_contr"), np.nan)
             gf = safe_float(c.get("gap_freq"), np.nan)
             r20 = safe_float(c.get("ret20"), np.nan)
+            noise = safe_float(c.get("noise_score"), np.nan)
 
             extras = []
             if np.isfinite(q):
@@ -193,6 +237,8 @@ def build_report(
                 extras.append(f"ボラ5/20:{ac:.2f}x")
             if np.isfinite(gf):
                 extras.append(f"Gap頻度:{gf*100:.0f}%")
+            if np.isfinite(noise):
+                extras.append(f"ノイズ:{int(noise)}")
             if extras:
                 lines.append("・" + " / ".join(extras))
 
