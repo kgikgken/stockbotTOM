@@ -263,74 +263,41 @@ def analyze_positions(
         elif np.isfinite(r_now) and r_now <= -0.5:
             action = "含み損（SL監視）"
 
-        # Header
-        lines.append(f"■ {ticker}")
-        state_note = "保有中"
-        if ticker in new_set:
-            state_note += "（本日追加）"
-        lines.append(f"・状態：{state_note}")
+        # Header (compact)
+        header = f"■ {ticker}" + ("（本日追加）" if ticker in new_set else "")
+        lines.append(header)
 
-        # Prices
-        if np.isfinite(entry_price) and entry_price > 0 and np.isfinite(cur) and cur > 0:
-            lines.append(f"・取得単価：{_fmt_yen(entry_price)} 円 / 現値：{_fmt_yen(cur)} 円")
-        elif np.isfinite(entry_price) and entry_price > 0:
-            lines.append(f"・取得単価：{_fmt_yen(entry_price)} 円 / 現値：-")
-        elif np.isfinite(cur) and cur > 0:
-            lines.append(f"・取得単価：- / 現値：{_fmt_yen(cur)} 円")
-        else:
-            lines.append("・取得単価：- / 現値：-")
+        entry_txt = _fmt_yen(entry_price) if (np.isfinite(entry_price) and entry_price > 0) else "-"
+        cur_txt = _fmt_yen(cur) if (np.isfinite(cur) and cur > 0) else "-"
 
-        # Size/valuation (optional)
-        if np.isfinite(qty) and qty > 0:
-            if np.isfinite(value) and value > 0:
-                lines.append(f"・数量：{qty:g} / 評価額：約{_fmt_yen(value)} 円")
-            else:
-                lines.append(f"・数量：{qty:g}")
+        parts: List[str] = [f"Entry {entry_txt}", f"Now {cur_txt}"]
 
-        # PnL and R
         if np.isfinite(pnl_pct):
+            pnl_s = f"{pnl_pct:+.2f}%"
             if np.isfinite(r_now):
-                lines.append(f"・損益：{pnl_pct:+.2f}%（含み {r_now:+.2f}R）")
-            else:
-                lines.append(f"・損益：{pnl_pct:+.2f}%")
-        else:
-            lines.append("・損益：—")
+                pnl_s += f" ({r_now:+.2f}R)"
+            parts.append(f"PnL {pnl_s}")
 
-        # SL / TP distances
-        if np.isfinite(cur) and cur > 0 and np.isfinite(sl) and sl > 0:
-            sl_need = (sl / cur - 1.0) * 100.0  # negative if above SL
-            lines.append(f"・想定SL：{_fmt_yen(sl)} 円（SLまで {sl_need:+.1f}%）")
-        elif np.isfinite(sl) and sl > 0:
-            lines.append(f"・想定SL：{_fmt_yen(sl)} 円")
+        if np.isfinite(sl) and sl > 0:
+            sl_part = f"SL {_fmt_yen(sl)}"
+            if np.isfinite(cur) and cur > 0:
+                sl_need = (sl / cur - 1.0) * 100.0
+                sl_part += f" ({sl_need:+.1f}%)"
+            parts.append(sl_part)
 
-        if np.isfinite(cur) and cur > 0 and np.isfinite(tp1) and tp1 > 0:
-            tp_need = (tp1 / cur - 1.0) * 100.0
-            lines.append(f"・想定TP1：{_fmt_yen(tp1)} 円（TP1まで {tp_need:+.1f}%）")
-        elif np.isfinite(tp1) and tp1 > 0:
-            lines.append(f"・想定TP1：{_fmt_yen(tp1)} 円")
-
-        if np.isfinite(tp2) and tp2 > 0:
-            lines.append(f"・想定TP2：{_fmt_yen(tp2)} 円")
+        if np.isfinite(tp1) and tp1 > 0:
+            tp_part = f"TP1 {_fmt_yen(tp1)}"
+            if np.isfinite(cur) and cur > 0:
+                tp_need = (tp1 / cur - 1.0) * 100.0
+                tp_part += f" ({tp_need:+.1f}%)"
+            parts.append(tp_part)
 
         if setup_used:
-            lines.append(f"・セットアップ：{setup_used}")
+            parts.append(f"Setup {setup_used}")
 
-        lines.append(f"・次アクション：{action}")
+        parts.append(f"次:{action}")
 
-        # Audit metrics (only if available)
-        if np.isfinite(rr) and np.isfinite(p_hit):
-            p_be = (1.0 / (rr + 1.0)) if rr > 0 else 1.0
-            ev_r = (p_hit * rr) - ((1.0 - p_hit) * 1.0)
-            lines.append(f"・到達確率（目安）：{p_hit:.3f}（損益分岐 p={p_be:.3f}）")
-            lines.append(f"・期待値（R）：{ev_r:.2f}R")
-        if np.isfinite(cagr):
-            warn = "（要注意）" if cagr < 0.50 else ""
-            lines.append(f"・CAGR寄与度（/日）：{cagr:.2f}{warn}")
-        if np.isfinite(rr):
-            lines.append(f"・RR（TP1基準）：{rr:.2f}")
-        if np.isfinite(exp_days):
-            lines.append(f"・想定日数（中央値）：{exp_days:.1f}日")
-
+        lines.append("・" + " / ".join(parts))
         lines.append("")
 
     if not lines:
