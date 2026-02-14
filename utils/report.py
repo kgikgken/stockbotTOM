@@ -732,8 +732,11 @@ def build_report(
             except Exception as e:
                 if note_enabled:
                     lines.append(f"🧾 表SVG: 生成失敗（{e}）")
+            require_png = _env_truthy("REQUIRE_REPORT_PNG", default=False)
 
-            # PNG is best-effort (Pillow/matplotlib/外部変換ツールがあれば生成)
+            # PNG is best-effort by default (Pillow/matplotlib/外部変換ツールがあれば生成)
+            # If you want CI to FAIL when PNG cannot be produced, set:
+            #   REQUIRE_REPORT_PNG=1
             try:
                 render_table_png(title, table_headers, table_rows, png_path, style=TableImageStyle())
                 if note_enabled:
@@ -741,5 +744,26 @@ def build_report(
             except Exception as e:
                 if note_enabled:
                     lines.append(f"🖼 表画像: 生成失敗（{e}）")
+                if require_png:
+                    raise
+
+
+
+    # Debug footer (helps confirm which commit/version actually ran in GitHub Actions)
+    if _env_truthy("REPORT_DEBUG", default=False):
+        try:
+            import sys
+            build = os.environ.get("GITHUB_SHA", "")
+            build = build[:7] if build else "-"
+            pyver = sys.version.split()[0]
+            try:
+                import PIL  # type: ignore
+                pillow = getattr(PIL, "__version__", "?")
+            except Exception:
+                pillow = "-"
+            lines.append("")
+            lines.append(f"🔧 build:{build} / py:{pyver} / pillow:{pillow}")
+        except Exception:
+            pass
 
     return "\n".join(lines).rstrip() + "\n"
