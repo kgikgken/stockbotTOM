@@ -14,9 +14,22 @@ def _fmt_yen(x: float) -> str:
         return "-"
 
 
-def _env_truthy(name: str) -> bool:
-    v = str(os.getenv(name, "")).strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
+def _env_truthy(name: str, default: bool = False) -> bool:
+    """Parse a boolean-like environment variable.
+
+    - If the variable is not set, returns `default`.
+    - Accepts common truthy/falsy strings.
+    """
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    v = str(raw).strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
 
 
 def _strip_icons(s: str) -> str:
@@ -673,25 +686,50 @@ def build_report(
                 )
                 if idx != len(items):
                     lines.append("")
-    # Optional: export a shareable PNG table.
-    # Enable by setting REPORT_IMAGE=1 or REPORT_TABLE_IMAGE=1.
-    if table_rows and (_env_truthy("REPORT_IMAGE") or _env_truthy("REPORT_TABLE_IMAGE")):
+    # Optional: export a shareable PNG/CSV table.
+    #
+    # NOTE:
+    #   Users often expect "it changed" without setting env vars, so we default
+    #   this ON when table_rows exist.
+    #
+    # Disable explicitly with:
+    #   REPORT_TABLE_IMAGE=0   (or REPORT_IMAGE=0)
+    img_enabled = _env_truthy("REPORT_TABLE_IMAGE", default=_env_truthy("REPORT_IMAGE", default=True))
+    note_enabled = _env_truthy("REPORT_IMAGE_NOTE", default=True)
+
+    if table_rows and img_enabled:
+        outdir = os.getenv("REPORT_OUTDIR", "out")
+        os.makedirs(outdir, exist_ok=True)
+        png_path = os.path.join(outdir, f"report_table_{today_str}.png")
+        csv_path = os.path.join(outdir, f"report_table_{today_str}.csv")
+        title = f"stockbotTOM {today_str} 注文サマリ"
+
         try:
-            from utils.table_image import TableImageStyle, render_table_png
-
-            outdir = os.getenv("REPORT_OUTDIR", "out")
-            os.makedirs(outdir, exist_ok=True)
-            out_path = os.path.join(outdir, f"report_table_{today_str}.png")
-            title = f"stockbotTOM {today_str} 注文サマリ"
-            render_table_png(title, table_headers, table_rows, out_path, style=TableImageStyle())
-
-            # Keep the text output clean unless explicitly requested.
-            if _env_truthy("REPORT_IMAGE_NOTE"):
-                lines.append("")
-                lines.append(f"🖼 表画像: {out_path}")
+            from utils.table_image import TableImageStyle, render_table_csv, render_table_png
         except Exception as e:
-            if _env_truthy("REPORT_IMAGE_NOTE"):
+            # Should be rare; keep it visible.
+            if note_enabled:
                 lines.append("")
-                lines.append(f"🖼 表画像生成に失敗: {e}")
+                lines.append(f"🖼 表画像: 生成不可（table_image import失敗: {e}）")
+        else:
+            # Always export CSV (no heavy dependencies).
+            try:
+                render_table_csv(title, table_headers, table_rows, csv_path)
+                if note_enabled:
+                    lines.append("")
+                    lines.append(f"🗒 注文サマリCSV: {csv_path}")
+            except Exception as e:
+                if note_enabled:
+                    lines.append("")
+                    lines.append(f"🗒 注文サマリCSV: 生成失敗（{e}）")
+
+            # PNG is best-effort (may require Pillow).
+            try:
+                render_table_png(title, table_headers, table_rows, png_path, style=TableImageStyle())
+                if note_enabled:
+                    lines.append(f"🖼 表画像: {png_path}")
+            except Exception as e:
+                if note_enabled:
+                    lines.append(f"🖼 表画像: 生成失敗（{e}）")
 
     return "\n".join(lines).rstrip() + "\n"
