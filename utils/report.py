@@ -701,11 +701,12 @@ def build_report(
         outdir = os.getenv("REPORT_OUTDIR", "out")
         os.makedirs(outdir, exist_ok=True)
         png_path = os.path.join(outdir, f"report_table_{today_str}.png")
+        svg_path = os.path.join(outdir, f"report_table_{today_str}.svg")
         csv_path = os.path.join(outdir, f"report_table_{today_str}.csv")
         title = f"stockbotTOM {today_str} 注文サマリ"
 
         try:
-            from utils.table_image import TableImageStyle, render_table_csv, render_table_png
+            from utils.table_image import TableImageStyle, render_table_csv, render_table_png, render_table_svg
         except Exception as e:
             # Should be rare; keep it visible.
             if note_enabled:
@@ -731,5 +732,14 @@ def build_report(
             except Exception as e:
                 if note_enabled:
                     lines.append(f"🖼 表画像: 生成失敗（{e}）")
+
+                # SVG fallback (no external deps).
+                try:
+                    render_table_svg(title, table_headers, table_rows, svg_path, style=TableImageStyle())
+                    if note_enabled:
+                        lines.append(f"🧾 表SVG: {svg_path}")
+                except Exception as e2:
+                    if note_enabled:
+                        lines.append(f"🧾 表SVG: 生成失敗（{e2}）")
 
     return "\n".join(lines).rstrip() + "\n"
