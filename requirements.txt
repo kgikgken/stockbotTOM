@@ -2,3 +2,5 @@ requests
 pandas
 numpy
 yfinance
+# Minimal deps for optional report table PNG rendering (Pillow)
+Pillow>=10.0.0
