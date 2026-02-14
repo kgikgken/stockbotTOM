@@ -12,6 +12,23 @@ def _fmt_yen(x: float) -> str:
     except Exception:
         return "-"
 
+
+def _fmt_oku(yen: float) -> str:
+    """Format yen value as Japanese "億" unit (1億=1e8円).
+
+    Used as a liquidity proxy (ADV20 / median traded value).
+    """
+    try:
+        y = float(yen)
+    except Exception:
+        return "-"
+    if not (y > 0) or not (y == y):
+        return "-"
+    oku = y / 1e8
+    if oku < 10:
+        return f"{oku:.1f}億"
+    return f"{oku:.0f}億"
+
 def build_report(
     today_str: str,
     market: Dict,
@@ -229,6 +246,10 @@ def build_report(
             pb_atr = safe_float(c.get("pb_atr"), np.nan)
             weekly_ok = c.get("weekly_ok", None)
 
+            adv20 = safe_float(c.get("adv20"), np.nan)
+            mdv20 = safe_float(c.get("mdv20"), np.nan)
+            impact = safe_float(c.get("amihud_bps100m"), np.nan)
+
             extras = []
             if np.isfinite(q):
                 extras.append(f"品質:{q:+.2f}")
@@ -240,8 +261,18 @@ def build_report(
                 extras.append(f"出来高5/20:{vr:.2f}x")
             if np.isfinite(ac):
                 extras.append(f"ボラ5/20:{ac:.2f}x")
+
             if np.isfinite(gf):
                 extras.append(f"Gap頻度:{gf*100:.0f}%")
+            # Liquidity display (board-thin proxy)
+            if np.isfinite(adv20):
+                warn = ' ⚠' if adv20 < 5e8 else ''
+                extras.append(f"ADV20:{_fmt_oku(adv20)}{warn}")
+            if np.isfinite(mdv20):
+                extras.append(f"MED20:{_fmt_oku(mdv20)}")
+            if np.isfinite(impact):
+                warn_i = " ⚠" if impact >= 90.0 else ""
+                extras.append(f"インパクト:{impact:.0f}bps/1億{warn_i}")
             if np.isfinite(pb_atr):
                 extras.append(f"PB距離:{pb_atr:.1f}ATR")
             if weekly_ok is True:
