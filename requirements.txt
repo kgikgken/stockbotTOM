@@ -1,6 +1,9 @@
-requests
-pandas
-numpy
-yfinance
-# Minimal deps for optional report table PNG rendering (Pillow)
-Pillow>=10.0.0
+# Core runtime dependencies
+numpy>=1.26
+pandas>=2.1
+requests>=2.31
+
+yfinance>=0.2.40
+
+# Optional but recommended: render report table to PNG (supports Japanese if fonts are installed)
+Pillow>=10.0
