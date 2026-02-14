@@ -724,7 +724,16 @@ def build_report(
                     lines.append("")
                     lines.append(f"🗒 注文サマリCSV: 生成失敗（{e}）")
 
-            # PNG is best-effort (may require Pillow).
+            # SVG first (dependency-free; useful even if PNG fails)
+            try:
+                render_table_svg(title, table_headers, table_rows, svg_path, style=TableImageStyle())
+                if note_enabled:
+                    lines.append(f"🧾 表SVG: {svg_path}")
+            except Exception as e:
+                if note_enabled:
+                    lines.append(f"🧾 表SVG: 生成失敗（{e}）")
+
+            # PNG is best-effort (Pillow/matplotlib/外部変換ツールがあれば生成)
             try:
                 render_table_png(title, table_headers, table_rows, png_path, style=TableImageStyle())
                 if note_enabled:
@@ -732,14 +741,5 @@ def build_report(
             except Exception as e:
                 if note_enabled:
                     lines.append(f"🖼 表画像: 生成失敗（{e}）")
-
-                # SVG fallback (no external deps).
-                try:
-                    render_table_svg(title, table_headers, table_rows, svg_path, style=TableImageStyle())
-                    if note_enabled:
-                        lines.append(f"🧾 表SVG: {svg_path}")
-                except Exception as e2:
-                    if note_enabled:
-                        lines.append(f"🧾 表SVG: 生成失敗（{e2}）")
 
     return "\n".join(lines).rstrip() + "\n"
