@@ -174,6 +174,28 @@ def build_report(
             lines.append(f"・期待R×到達確率（参考）：{exp_r_hit:.2f}")
             lines.append(f"・RR（TP1基準）：{rr:.2f}")
             lines.append(f"・想定日数（中央値）：{safe_float(c.get('expected_days'), 0.0):.1f}日")
+
+            # 品質補助情報（スクリーニングの透明性）
+            q = safe_float(c.get("quality"), np.nan)
+            vr = safe_float(c.get("vol_ratio"), np.nan)
+            ac = safe_float(c.get("atr_contr"), np.nan)
+            gf = safe_float(c.get("gap_freq"), np.nan)
+            r20 = safe_float(c.get("ret20"), np.nan)
+
+            extras = []
+            if np.isfinite(q):
+                extras.append(f"品質:{q:+.2f}")
+            if np.isfinite(r20):
+                extras.append(f"20日騰落:{r20:+.1f}%")
+            if np.isfinite(vr):
+                extras.append(f"出来高5/20:{vr:.2f}x")
+            if np.isfinite(ac):
+                extras.append(f"ボラ5/20:{ac:.2f}x")
+            if np.isfinite(gf):
+                extras.append(f"Gap頻度:{gf*100:.0f}%")
+            if extras:
+                lines.append("・" + " / ".join(extras))
+
             lines.append("")
     else:
         lines.append("🏆 狙える形（1〜7営業日 / 最大5）")
