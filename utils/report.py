@@ -266,8 +266,21 @@ def build_report(
         if skip_items:
             lines.append("")
             lines.append("🚫 見送り")
-            for n, (_rank, txt) in enumerate(sorted(skip_items, key=lambda x: x[0]), 1):
-                lines.append(f"{n}. {txt}")
+            _skips = sorted(skip_items, key=lambda x: x[0])
+            for n, (_rank, txt) in enumerate(_skips, 1):
+                # Split into 2 lines to improve readability.
+                # Example: "🔴 2986.T ... 見送り（ノイズ2）"
+                head = txt
+                reason = ""
+                if " 見送り" in txt:
+                    head, tail = txt.split(" 見送り", 1)
+                    head = head.strip()
+                    reason = ("見送り" + tail).strip()
+                lines.append(f"{n}. {head}")
+                if reason:
+                    lines.append(f"   {reason}")
+                if n != len(_skips):
+                    lines.append("")
 
         lines.append("")
     else:
@@ -512,11 +525,11 @@ def build_report(
                 if last_f > 0:
                     if last_f < zone_low * (1.0 - tol_zone):
                         to_zone = (zone_low / last_f - 1.0) * 100.0
-                        now_note = f"今：下（ゾーンまで +{to_zone:.1f}%待ち）"
+                        now_note = f"今：下 / ゾーンまで +{to_zone:.1f}%待ち"
                     elif last_f > zone_high * (1.0 + tol_zone):
                         over = (last_f / zone_high - 1.0) * 100.0
                         risk_last = (last_f - sl_s) / last_f * 100.0
-                        now_note = f"今：上（上 +{over:.1f}%）"
+                        now_note = f"今：上 / 上 +{over:.1f}%"
                         if np.isfinite(risk_last):
                             now_note += f" / r_now {risk_last:.1f}%"
                             if risk_last > 8.0:
@@ -541,10 +554,10 @@ def build_report(
                 # Beginner-first: use 2 lines per symbol.
                 # (Progress/length are kept in data but hidden to reduce noise.)
                 lines.append(f"{idx}. 🟢 {ticker} {name}{tier_tag}{warn}")
-                line2 = f"{ord_txt} / SL {_fmt_yen(sl_s)} / Risk {risk_txt}"
+                # Split into 2 lines: order plan + current location.
+                lines.append("   " + f"{ord_txt} / SL {_fmt_yen(sl_s)} / Risk {risk_txt}")
                 if now_note:
-                    line2 += f" / {now_note}"
-                lines.append("   " + line2)
+                    lines.append("   " + now_note)
                 if idx != len(items):
                     lines.append("")
     return "\n".join(lines).rstrip() + "\n"
