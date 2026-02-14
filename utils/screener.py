@@ -148,6 +148,17 @@ def run_screen(
         info.adv20 = float(adv)
         info.atrp = float(atrp)
 
+        # Hard quality exclusions (avoid event-driven gap mines / unstable expansion)
+        vr_q = float(info.vol_ratio) if getattr(info, "vol_ratio", None) is not None else np.nan
+        gf_q = float(info.gap_freq) if getattr(info, "gap_freq", None) is not None else np.nan
+        ac_q = float(info.atr_contr) if getattr(info, "atr_contr", None) is not None else np.nan
+        if np.isfinite(gf_q) and gf_q >= 0.30:
+            continue
+        if np.isfinite(vr_q) and vr_q >= 2.50:
+            continue
+        if np.isfinite(ac_q) and ac_q >= 1.80:
+            continue
+
         ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on)
         ok, _ = pass_thresholds(info, ev)
         if not ok:
@@ -168,6 +179,77 @@ def run_screen(
         if risk_pct >= MAX_RISK_PCT:
             continue
 
+
+
+        # エントリー帯までの距離（%）：実行可能性（fillability）を優先するための補助指標
+        band_dist_pct = 0.0
+        if close_last > entry_high and close_last > 0:
+            band_dist_pct = float((close_last - entry_high) / close_last * 100.0)
+        elif close_last < entry_low and close_last > 0:
+            band_dist_pct = float((entry_low - close_last) / close_last * 100.0)
+
+        # 品質スコア（過剰最適化を避けつつ、偽物を落とすための軽い補正）
+        #  - 出来高: pullback/base では「減っている」方が綺麗（=売り圧が枯れやすい）
+        #  - ボラ: 収縮している方が、ブレイク後の伸びが出やすい
+        #  - ギャップ: 多い銘柄は滑り/イベント起因が多く事故りやすい
+        #  - 20日騰落: 上位足の勢いがある方を優先（短期の1〜7日想定）
+        quality = 0.0
+        vr = float(info.vol_ratio) if getattr(info, "vol_ratio", None) is not None else np.nan
+        ac = float(info.atr_contr) if getattr(info, "atr_contr", None) is not None else np.nan
+        gf = float(info.gap_freq) if getattr(info, "gap_freq", None) is not None else np.nan
+        r20 = float(info.ret20) if getattr(info, "ret20", None) is not None else np.nan
+        rc = float(info.range_contr) if getattr(info, "range_contr", None) is not None else np.nan
+
+        if np.isfinite(vr):
+            if vr <= 0.85:
+                quality += 0.05
+            elif vr <= 0.95:
+                quality += 0.03
+            elif vr >= 1.60:
+                quality -= 0.08
+            elif vr >= 1.30:
+                quality -= 0.05
+
+        if np.isfinite(ac):
+            if ac <= 0.90:
+                quality += 0.05
+            elif ac <= 0.98:
+                quality += 0.03
+            elif ac >= 1.35:
+                quality -= 0.08
+            elif ac >= 1.15:
+                quality -= 0.05
+
+        if np.isfinite(rc):
+            # rc>1.0 は直近レンジ拡大。ハンドル/押しが荒い可能性があるので軽く減点。
+            if rc >= 1.40:
+                quality -= 0.05
+            elif rc <= 0.90:
+                quality += 0.02
+
+        if np.isfinite(gf):
+            if gf >= 0.20:
+                quality -= 0.08
+            elif gf >= 0.12:
+                quality -= 0.05
+
+        if np.isfinite(r20):
+            if r20 >= 8.0:
+                quality += 0.06
+            elif r20 >= 4.0:
+                quality += 0.04
+            elif r20 >= 0.0:
+                quality += 0.02
+            elif r20 <= -4.0:
+                quality -= 0.05
+
+        # 実行可能性が低い（帯から遠い）ものは、期待値に対して機会損失が出やすい
+        if band_dist_pct >= 5.0:
+            quality -= 0.04
+        elif band_dist_pct >= 3.0:
+            quality -= 0.02
+
+        quality = float(np.clip(quality, -0.25, 0.25))
 
         # 現値IN判定（運用ルールに沿って“現実的にOK”な条件に限定）
         # - エントリー帯内（微小誤差は許容）
@@ -219,19 +301,35 @@ def run_screen(
                 "entry_mode": str(entry_mode),
                 "close_last": float(close_last),
                 "risk_pct": float(risk_pct),
+                "band_dist": float(band_dist_pct),
+                "quality": float(quality),
+                "vol_ratio": float(vr) if np.isfinite(vr) else float("nan"),
+                "atr_contr": float(ac) if np.isfinite(ac) else float("nan"),
+                "gap_freq": float(gf) if np.isfinite(gf) else float("nan"),
+                "ret20": float(r20) if np.isfinite(r20) else float("nan"),
+                "range_contr": float(rc) if np.isfinite(rc) else float("nan"),
+                "ev_r": float(ev.ev_r),
+                "ev_r_day": float(ev.ev_r / max(ev.expected_days, 1e-6)),
             }
         )
 
     # Latest spec: primary sort is CAGR寄与度（期待R×到達確率）÷想定日数
+    # Quality improvements:
+    #   - EV_R/day: 損益の符号も含めた期待値効率
+    #   - quality: 出来高/ボラ/ギャップ/勢いの軽い補正
+    #   - band_dist: エントリー帯から近いほど実行可能性が高い
     cands.sort(
         key=lambda x: (
-            float(x.get("cagr", 0.0)),          # 1) CAGR寄与度(/日)
-            float(x.get("p_hit", 0.0)),         # 2) 到達確率
-            float(x.get("rr", 0.0)),            # 3) RR(TP1)
-            -float(x.get("expected_days", 9.9)),# 4) 想定日数(短いほど)
-            -float(x.get("risk_pct", 0.0)),   # 5) リスク幅(小さいほど)
-            float(x.get("adv20", 0.0)),         # 6) 流動性
-            str(x.get("ticker", "")),           # 7) 安定化
+            float(x.get("cagr", 0.0)),           # 1) CAGR寄与度(/日)
+            float(x.get("ev_r_day", 0.0)),       # 2) 期待値(EV_R)/日
+            float(x.get("quality", 0.0)),        # 3) 品質
+            -float(x.get("band_dist", 9.9)),     # 4) 帯まで距離(小さいほど)
+            float(x.get("p_hit", 0.0)),          # 5) 到達確率
+            float(x.get("rr", 0.0)),             # 6) RR(TP1)
+            -float(x.get("expected_days", 9.9)), # 7) 想定日数(短いほど)
+            -float(x.get("risk_pct", 0.0)),      # 8) リスク幅(小さいほど)
+            float(x.get("adv20", 0.0)),          # 9) 流動性
+            str(x.get("ticker", "")),            # 10) 安定化
         ),
         reverse=True,
     )
