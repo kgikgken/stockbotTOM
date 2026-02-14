@@ -41,14 +41,28 @@ WEEKLY_STRICT_SETUPS = ("A1-Strong", "A1")
 
 # Liquidity / board-thin guardrails for "狙える形"
 # NOTE: We cannot observe order book directly from daily OHLCV, so we proxy it with traded value (Close*Volume).
+# The user's feedback indicates "板が薄い" even when ADV is ~5億. Therefore we introduce *tiered* liquidity
+# and default to showing only the "板厚" tier when available.
+#
 # - adv20: mean traded value over last 20 sessions (¥)
 # - mdv20: median traded value over last 20 sessions (¥) to avoid spike-driven illusions
-# Primary intent: avoid slippage/partial fills on thin boards.
-ADV_MIN_MAIN = 500e6          # default minimum ADV for main candidates (¥/day)
-ADV_MIN_A1_STRONG = 350e6     # allow slightly lower ADV for top-tier setups
-MDV_FACTOR = 0.70             # mdv20 must be at least adv_min * factor
-DV_CV_MAX = 2.0               # if traded value CV is too large (spiky), exclude (unless very liquid)
-AMIHUD_MAX_BPS100M = 120.0     # Amihud proxy threshold (bps per 1億円 of traded value)
+# - dv_cv20: coefficient of variation of traded value (spike detector)
+# - amihud_bps100m: Amihud illiquidity scaled to bps per 1億円 (impact proxy)
+#
+# Tiers:
+#   grade=2 (板厚): strict thresholds
+#   grade=1 (準):   relaxed thresholds (used only when no grade=2 exists)
+LIQ_STRICT_ADV_MIN = 800e6           # 8.0億/日
+LIQ_RELAX_ADV_MIN = 500e6            # 5.0億/日
+LIQ_STRICT_MDV_FACTOR = 0.75
+LIQ_RELAX_MDV_FACTOR = 0.70
+LIQ_STRICT_DV_CV_MAX = 1.8
+LIQ_RELAX_DV_CV_MAX = 2.0
+LIQ_STRICT_AMIHUD_MAX_BPS100M = 100.0
+LIQ_RELAX_AMIHUD_MAX_BPS100M = 120.0
+
+# If any strict-liquidity candidates exist, display only those to avoid "板薄" lists.
+LIQ_STRICT_ONLY_IF_EXISTS = True
 
 
 def _ret_n(close: pd.Series, n: int) -> float:
@@ -92,6 +106,54 @@ def _weekly_trend_ok(df: pd.DataFrame) -> bool | None:
         return None
     ok = bool((last > m10 > m20) and (m10 >= m10_4))
     return ok
+
+
+def _liquidity_grade(
+    adv20_yen: float,
+    mdv20_yen: float,
+    dv_cv20: float,
+    amihud_bps100m: float,
+) -> Tuple[int, float]:
+    """Liquidity tiering for board-thin avoidance.
+
+    Returns:
+      (grade, adv_min_used)
+        grade=2: strict (板厚)
+        grade=1: relaxed (準)
+        grade=0: fail
+    """
+    adv = float(adv20_yen) if np.isfinite(adv20_yen) else float("nan")
+    mdv = float(mdv20_yen) if np.isfinite(mdv20_yen) else float("nan")
+    cv = float(dv_cv20) if np.isfinite(dv_cv20) else float("nan")
+    imp = float(amihud_bps100m) if np.isfinite(amihud_bps100m) else float("nan")
+
+    def _pass(adv_min: float, mdv_factor: float, cv_max: float, imp_max: float) -> bool:
+        if not (np.isfinite(adv) and adv >= float(adv_min)):
+            return False
+        if not (np.isfinite(mdv) and mdv >= float(adv_min) * float(mdv_factor)):
+            return False
+        # Spiky traded value is unreliable liquidity unless the name is very liquid.
+        if np.isfinite(cv) and cv > float(cv_max) and adv < float(adv_min) * 2.0:
+            return False
+        if np.isfinite(imp) and imp > float(imp_max):
+            return False
+        return True
+
+    if _pass(
+        LIQ_STRICT_ADV_MIN,
+        LIQ_STRICT_MDV_FACTOR,
+        LIQ_STRICT_DV_CV_MAX,
+        LIQ_STRICT_AMIHUD_MAX_BPS100M,
+    ):
+        return 2, float(LIQ_STRICT_ADV_MIN)
+    if _pass(
+        LIQ_RELAX_ADV_MIN,
+        LIQ_RELAX_MDV_FACTOR,
+        LIQ_RELAX_DV_CV_MAX,
+        LIQ_RELAX_AMIHUD_MAX_BPS100M,
+    ):
+        return 1, float(LIQ_RELAX_ADV_MIN)
+    return 0, float(LIQ_RELAX_ADV_MIN)
 
 def _apply_setup_mix(cands: List[Dict], max_n: int) -> List[Dict]:
     """Enforce strategy mix per spec (when alternatives exist).
@@ -234,32 +296,25 @@ def run_screen(
 
         # Liquidity refinement (board-thin proxy)
         # Even if a stock passes the base liquidity_filters, it can still have a thin order book.
-        # Use traded value (Close*Volume) statistics to avoid slippage mines.
-        adv_min = float(ADV_MIN_A1_STRONG if info.setup == "A1-Strong" else ADV_MIN_MAIN)
-        if not (np.isfinite(adv) and float(adv) >= adv_min):
-            continue
-
+        # Use traded value (Close*Volume) statistics + Amihud impact to tier liquidity.
         dv20 = (df["Close"].astype(float) * df["Volume"].astype(float)).tail(20).dropna()
         mdv20 = safe_float(dv20.median(), np.nan)
         dv_cv20 = safe_float((dv20.std() / (dv20.mean() + 1e-9)), np.nan)
-        if not (np.isfinite(mdv20) and float(mdv20) >= (adv_min * MDV_FACTOR)):
-            continue
-        # If traded value is extremely spiky, treat it as unreliable liquidity unless it is very liquid.
-        if np.isfinite(dv_cv20) and float(dv_cv20) > DV_CV_MAX and float(adv) < (adv_min * 2.0):
-            continue
 
         # Price impact proxy (Amihud illiquidity)
         # approx: mean(|ret| / traded_value). We scale it into bps per 1億円 so it's interpretable.
-        amihud_bps100m = float('nan')
+        amihud_bps100m = float("nan")
         try:
-            ret_abs20 = df['Close'].astype(float).pct_change(fill_method=None).tail(20).abs()
+            ret_abs20 = df["Close"].astype(float).pct_change(fill_method=None).tail(20).abs()
             ill = (ret_abs20 / (dv20 + 1e-9)).replace([np.inf, -np.inf], np.nan)
             amihud = safe_float(ill.mean(), np.nan)
             if np.isfinite(amihud):
                 amihud_bps100m = float(amihud * 1e8 * 10000.0)
         except Exception:
-            amihud_bps100m = float('nan')
-        if np.isfinite(amihud_bps100m) and float(amihud_bps100m) > AMIHUD_MAX_BPS100M:
+            amihud_bps100m = float("nan")
+
+        liq_grade, liq_adv_min = _liquidity_grade(adv, mdv20, dv_cv20, amihud_bps100m)
+        if int(liq_grade) <= 0:
             continue
 
         # Hard quality exclusions (avoid event-driven gap mines / unstable expansion)
@@ -517,6 +572,8 @@ def run_screen(
                 "rday": float(ev.rday),
                 "gu": bool(info.gu),
                 "adv20": float(adv),
+                "liq_grade": int(liq_grade),
+                "liq_adv_min": float(liq_adv_min),
                 "mdv20": float(mdv20) if np.isfinite(mdv20) else float("nan"),
                 "dv_cv20": float(dv_cv20) if np.isfinite(dv_cv20) else float("nan"),
                 "amihud_bps100m": float(amihud_bps100m) if np.isfinite(amihud_bps100m) else float("nan"),
@@ -543,6 +600,13 @@ def run_screen(
                 "score": float(ev.cagr_score + (QUALITY_WEIGHT * quality)),
             }
         )
+
+    # --- Liquidity display policy (board-thin avoidance)
+    # If any strict-liquidity candidates exist, show only those. This matches the user's preference
+    # for thicker boards, even if the list becomes shorter.
+    if LIQ_STRICT_ONLY_IF_EXISTS:
+        if any(int(c.get("liq_grade", 0)) >= 2 for c in cands):
+            cands = [c for c in cands if int(c.get("liq_grade", 0)) >= 2]
 
     # Latest spec: primary sort is CAGR寄与度（期待R×到達確率）÷想定日数
     # Quality improvements:
