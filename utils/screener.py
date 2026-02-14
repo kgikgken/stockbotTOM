@@ -39,6 +39,18 @@ MAX_PULLBACK_ATR = 2.5      # エントリー帯までの距離が ATR の何倍
 WEEKLY_STRICT_SETUPS = ("A1-Strong", "A1")
 
 
+# Liquidity / board-thin guardrails for "狙える形"
+# NOTE: We cannot observe order book directly from daily OHLCV, so we proxy it with traded value (Close*Volume).
+# - adv20: mean traded value over last 20 sessions (¥)
+# - mdv20: median traded value over last 20 sessions (¥) to avoid spike-driven illusions
+# Primary intent: avoid slippage/partial fills on thin boards.
+ADV_MIN_MAIN = 500e6          # default minimum ADV for main candidates (¥/day)
+ADV_MIN_A1_STRONG = 350e6     # allow slightly lower ADV for top-tier setups
+MDV_FACTOR = 0.70             # mdv20 must be at least adv_min * factor
+DV_CV_MAX = 2.0               # if traded value CV is too large (spiky), exclude (unless very liquid)
+AMIHUD_MAX_BPS100M = 120.0     # Amihud proxy threshold (bps per 1億円 of traded value)
+
+
 def _ret_n(close: pd.Series, n: int) -> float:
     """n本騰落（%）"""
     try:
@@ -220,6 +232,36 @@ def run_screen(
         info.adv20 = float(adv)
         info.atrp = float(atrp)
 
+        # Liquidity refinement (board-thin proxy)
+        # Even if a stock passes the base liquidity_filters, it can still have a thin order book.
+        # Use traded value (Close*Volume) statistics to avoid slippage mines.
+        adv_min = float(ADV_MIN_A1_STRONG if info.setup == "A1-Strong" else ADV_MIN_MAIN)
+        if not (np.isfinite(adv) and float(adv) >= adv_min):
+            continue
+
+        dv20 = (df["Close"].astype(float) * df["Volume"].astype(float)).tail(20).dropna()
+        mdv20 = safe_float(dv20.median(), np.nan)
+        dv_cv20 = safe_float((dv20.std() / (dv20.mean() + 1e-9)), np.nan)
+        if not (np.isfinite(mdv20) and float(mdv20) >= (adv_min * MDV_FACTOR)):
+            continue
+        # If traded value is extremely spiky, treat it as unreliable liquidity unless it is very liquid.
+        if np.isfinite(dv_cv20) and float(dv_cv20) > DV_CV_MAX and float(adv) < (adv_min * 2.0):
+            continue
+
+        # Price impact proxy (Amihud illiquidity)
+        # approx: mean(|ret| / traded_value). We scale it into bps per 1億円 so it's interpretable.
+        amihud_bps100m = float('nan')
+        try:
+            ret_abs20 = df['Close'].astype(float).pct_change(fill_method=None).tail(20).abs()
+            ill = (ret_abs20 / (dv20 + 1e-9)).replace([np.inf, -np.inf], np.nan)
+            amihud = safe_float(ill.mean(), np.nan)
+            if np.isfinite(amihud):
+                amihud_bps100m = float(amihud * 1e8 * 10000.0)
+        except Exception:
+            amihud_bps100m = float('nan')
+        if np.isfinite(amihud_bps100m) and float(amihud_bps100m) > AMIHUD_MAX_BPS100M:
+            continue
+
         # Hard quality exclusions (avoid event-driven gap mines / unstable expansion)
         vr_q = float(info.vol_ratio) if getattr(info, "vol_ratio", None) is not None else np.nan
         gf_q = float(info.gap_freq) if getattr(info, "gap_freq", None) is not None else np.nan
@@ -398,6 +440,15 @@ def run_screen(
             elif pb_atr >= 1.2:
                 quality -= 0.02
 
+        # Price impact (Amihud) - penalize thin/impactful names even if ADV is OK
+        if np.isfinite(amihud_bps100m):
+            if amihud_bps100m <= 25.0:
+                quality += 0.02
+            elif amihud_bps100m >= 90.0:
+                quality -= 0.05
+            elif amihud_bps100m >= 60.0:
+                quality -= 0.03
+
         quality = float(np.clip(quality, -0.25, 0.25))
 
         # 現値IN判定（運用ルールに沿って“現実的にOK”な条件に限定）
@@ -466,6 +517,9 @@ def run_screen(
                 "rday": float(ev.rday),
                 "gu": bool(info.gu),
                 "adv20": float(adv),
+                "mdv20": float(mdv20) if np.isfinite(mdv20) else float("nan"),
+                "dv_cv20": float(dv_cv20) if np.isfinite(dv_cv20) else float("nan"),
+                "amihud_bps100m": float(amihud_bps100m) if np.isfinite(amihud_bps100m) else float("nan"),
                 "atrp": float(atrp),
                 "entry_mode": str(entry_mode),
                 "close_last": float(close_last),
