@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class TableImageStyle:
-    """Styling knobs for PNG table rendering."""
+    """Styling knobs for table rendering (PNG/SVG)."""
 
     font_size: int = 22
     title_font_size: int = 28
@@ -41,15 +41,37 @@ def _first_existing(paths: Sequence[str]) -> Optional[str]:
     return None
 
 
-def _load_font(size: int, bold: bool = False):
-    """Load a Japanese-capable font.
+def _find_japanese_font_path() -> Optional[str]:
+    """Best-effort find a Japanese-capable font path.
 
-    Prefer Noto Sans CJK on Linux if present.
+    - Prefers Noto Sans CJK if present.
+    - Falls back to DejaVu Sans.
+
+    This is used by both PIL and matplotlib renderers.
     """
+
+    reg = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    bld = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    return _first_existing(bld) or _first_existing(reg)
+
+
+def _load_font(size: int, bold: bool = False):
+    """Load a Japanese-capable font with Pillow."""
 
     if not _HAVE_PIL:
         raise RuntimeError("Pillow (PIL) is not installed")
 
+    # Prefer bold font path when requested.
     reg = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
@@ -111,19 +133,41 @@ def _truncate_to_px(draw, text: str, font, max_px: int, ellipsis: str = "…") -
     return best or ellipsis
 
 
-def render_table_png(
+def _mpl_modules():
+    """Lazy-import matplotlib (optional dependency).
+
+    Returns (plt, font_manager) or None if matplotlib is unavailable.
+    """
+
+    try:
+        import matplotlib
+
+        # Use a non-GUI backend.
+        try:
+            matplotlib.use("Agg", force=True)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        import matplotlib.pyplot as plt  # type: ignore
+        from matplotlib import font_manager  # type: ignore
+
+        return plt, font_manager
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _render_table_png_pil(
     title: str,
     headers: Sequence[str],
     rows: Sequence[Sequence[str]],
     out_path: str,
-    style: TableImageStyle | None = None,
+    style: TableImageStyle,
 ) -> str:
-    """Render a simple table to a PNG image."""
+    """Render a simple table to a PNG image using Pillow."""
 
     if not _HAVE_PIL:
         raise RuntimeError("Pillow (PIL) is not installed; cannot render PNG")
 
-    style = style or TableImageStyle()
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
     title_font = _load_font(style.title_font_size, bold=True)
@@ -246,6 +290,265 @@ def render_table_png(
             x += col_px[j]
 
     img.save(out_path)
+    return out_path
+
+
+def _render_table_png_mpl(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    out_path: str,
+    style: TableImageStyle,
+) -> str:
+    """Render table as PNG using matplotlib (no Pillow required).
+
+    This is a fallback for environments where Pillow isn't installed.
+    """
+
+    mods = _mpl_modules()
+    if mods is None:
+        raise RuntimeError("matplotlib is not installed; cannot render PNG")
+
+    plt, font_manager = mods
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # Normalize table cells to strings.
+    headers_s = ["" if h is None else str(h) for h in headers]
+    n_cols = len(headers_s)
+    if n_cols == 0:
+        raise ValueError("headers must not be empty")
+
+    norm_rows: List[List[str]] = []
+    for r in rows:
+        rr = [("" if c is None else str(c)) for c in r]
+        rr = list(rr[:n_cols]) + [""] * max(0, n_cols - len(rr))
+        norm_rows.append(rr)
+
+    # Rough truncation to keep images reasonably sized.
+    # Pixel-accurate truncation requires PIL, so we go by character count.
+    # (Font size ~22 -> ~12px per ASCII char; Japanese tends to be wider.)
+    est_char_px = max(8.0, style.font_size * 0.55)
+    max_chars = max(8, int(style.max_col_px / est_char_px))
+
+    def _trunc(s: str, n: int) -> str:
+        if n <= 0:
+            return s
+        if len(s) <= n:
+            return s
+        if n <= 1:
+            return "…"
+        return s[: n - 1] + "…"
+
+    # Per-column caps
+    col_caps: List[int] = []
+    for j in range(n_cols):
+        mx = len(headers_s[j])
+        for r in norm_rows:
+            mx = max(mx, len(r[j]))
+        col_caps.append(min(mx, max_chars))
+
+    headers_fit = [_trunc(headers_s[j], col_caps[j]) for j in range(n_cols)]
+    rows_fit = [[_trunc(r[j], col_caps[j]) for j in range(n_cols)] for r in norm_rows]
+
+    # Figure sizing (approx; DPI-based cap).
+    dpi = 150
+    px_est_w = (
+        sum((c + 2) for c in col_caps) * est_char_px
+        + n_cols * style.pad_x * 2
+        + style.margin * 2
+    )
+    fig_w = max(6.0, min(style.max_total_px / dpi, px_est_w / dpi))
+
+    row_px = style.font_size * 1.8 + style.pad_y * 2
+    px_est_h = (len(rows_fit) + 2) * row_px + style.title_font_size * 2.0 + style.margin * 2
+    fig_h = max(2.8, min(40.0, px_est_h / dpi))
+
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
+    ax = fig.add_subplot(111)
+    ax.axis("off")
+
+    # Font (best-effort)
+    fp = None
+    font_path = _find_japanese_font_path()
+    if font_path:
+        try:
+            fp = font_manager.FontProperties(fname=font_path)
+        except Exception:
+            fp = None
+
+    # Title
+    if fp is not None:
+        ax.set_title(title, fontproperties=fp, fontsize=style.title_font_size, loc="left", pad=12)
+    else:
+        ax.set_title(title, fontsize=style.title_font_size, loc="left", pad=12)
+
+    tbl = ax.table(cellText=rows_fit, colLabels=headers_fit, cellLoc="left", loc="upper left")
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(style.font_size)
+
+    # Mild vertical scaling for readability
+    tbl.scale(1.0, 1.35)
+
+    # Apply per-cell styling
+    for (r, c), cell in tbl.get_celld().items():
+        cell.set_linewidth(0.8)
+        if r == 0:
+            cell.set_facecolor("#F0F0F0")
+            cell.get_text().set_weight("bold")
+        if fp is not None:
+            cell.get_text().set_fontproperties(fp)
+
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.2)
+    plt.close(fig)
+    return out_path
+
+
+def render_table_png(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    out_path: str,
+    style: TableImageStyle | None = None,
+) -> str:
+    """Render a simple table to a PNG image.
+
+    Priority:
+      1) Pillow (best typography / pixel truncation)
+      2) matplotlib fallback (works even when Pillow isn't installed)
+
+    If neither is available, raises RuntimeError.
+    """
+
+    style = style or TableImageStyle()
+
+    if _HAVE_PIL:
+        return _render_table_png_pil(title, headers, rows, out_path, style)
+
+    # Fallback: matplotlib
+    return _render_table_png_mpl(title, headers, rows, out_path, style)
+
+
+def render_table_svg(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    out_path: str,
+    style: TableImageStyle | None = None,
+) -> str:
+    """Render a table as SVG (no external dependencies).
+
+    This is a fallback when PNG rendering isn't possible.
+    """
+
+    from xml.sax.saxutils import escape
+
+    style = style or TableImageStyle()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    headers_s = ["" if h is None else str(h) for h in headers]
+    n_cols = len(headers_s)
+    if n_cols == 0:
+        raise ValueError("headers must not be empty")
+
+    norm_rows: List[List[str]] = []
+    for r in rows:
+        rr = [("" if c is None else str(c)) for c in r]
+        rr = list(rr[:n_cols]) + [""] * max(0, n_cols - len(rr))
+        norm_rows.append(rr)
+
+    # Approximate text metrics
+    char_px = max(8.0, style.font_size * 0.60)
+
+    # Column widths
+    col_px: List[int] = []
+    for j in range(n_cols):
+        mx = len(headers_s[j])
+        for r in norm_rows:
+            mx = max(mx, len(r[j]))
+        w = int(min(style.max_col_px, mx * char_px + style.pad_x * 2))
+        col_px.append(w)
+
+    total_w = int(min(style.max_total_px, sum(col_px) + style.margin * 2))
+
+    # Heights
+    title_h = int(style.title_font_size * 1.6)
+    head_h = int(style.font_size * 1.8 + style.pad_y * 2)
+    row_h = int(style.font_size * 1.8 + style.pad_y * 2)
+
+    n_rows = max(1, len(norm_rows))
+    table_h = head_h + row_h * n_rows
+    total_h = int(style.margin * 2 + title_h + 12 + table_h)
+
+    # If total_w is capped, proportionally shrink columns.
+    raw_w = sum(col_px) + style.margin * 2
+    if raw_w > total_w and sum(col_px) > 0:
+        scale = (total_w - style.margin * 2) / float(sum(col_px))
+        col_px = [max(60, int(w * scale)) for w in col_px]
+
+    # SVG build
+    # Font stack: prefer Noto (if installed) but allow system fallback.
+    font_stack = "'Noto Sans CJK JP','Noto Sans CJK','Noto Sans','DejaVu Sans',sans-serif"
+
+    def _rect(x, y, w, h, fill="white", stroke="#202020", sw=1):
+        return f"<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{sw}\" />"
+
+    def _text(x, y, s, size, weight="normal"):
+        s2 = escape(s)
+        return (
+            f"<text x=\"{x}\" y=\"{y}\" font-family=\"{font_stack}\" font-size=\"{size}\" font-weight=\"{weight}\" "
+            f"dominant-baseline=\"hanging\" fill=\"#000\">{s2}</text>"
+        )
+
+    parts: List[str] = []
+    parts.append(f"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_w}\" height=\"{total_h}\" viewBox=\"0 0 {total_w} {total_h}\">")
+    parts.append(_rect(0, 0, total_w, total_h, fill="white", stroke="none", sw=0))
+
+    # Title
+    tx = style.margin
+    ty = style.margin
+    parts.append(_text(tx, ty, title, style.title_font_size, weight="bold"))
+
+    # Table origin
+    x0 = style.margin
+    y0 = ty + title_h + 12
+
+    # Header background
+    parts.append(_rect(x0, y0, total_w - style.margin * 2, head_h, fill="#F0F0F0", stroke="#202020", sw=1))
+
+    # Outer table border
+    parts.append(_rect(x0, y0, total_w - style.margin * 2, table_h, fill="none", stroke="#202020", sw=1))
+
+    # Vertical lines + header text
+    x = x0
+    for j in range(n_cols):
+        w = col_px[j]
+        # Header text
+        parts.append(_text(x + style.pad_x, y0 + style.pad_y, headers_s[j], style.font_size, weight="bold"))
+        x += w
+        # Vertical grid
+        parts.append(f"<line x1=\"{x}\" y1=\"{y0}\" x2=\"{x}\" y2=\"{y0 + table_h}\" stroke=\"#202020\" stroke-width=\"1\" />")
+
+    # Horizontal lines
+    parts.append(f"<line x1=\"{x0}\" y1=\"{y0 + head_h}\" x2=\"{x0 + sum(col_px)}\" y2=\"{y0 + head_h}\" stroke=\"#202020\" stroke-width=\"1\" />")
+    for i in range(n_rows):
+        y = y0 + head_h + i * row_h
+        parts.append(f"<line x1=\"{x0}\" y1=\"{y + row_h}\" x2=\"{x0 + sum(col_px)}\" y2=\"{y + row_h}\" stroke=\"#202020\" stroke-width=\"1\" />")
+
+    # Body cells text
+    for i in range(n_rows):
+        rr = norm_rows[i] if i < len(norm_rows) else [""] * n_cols
+        y = y0 + head_h + i * row_h
+        x = x0
+        for j in range(n_cols):
+            parts.append(_text(x + style.pad_x, y + style.pad_y, rr[j], style.font_size, weight="normal"))
+            x += col_px[j]
+
+    parts.append("</svg>")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
+
     return out_path
 
 
