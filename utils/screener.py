@@ -30,6 +30,57 @@ MAX_RISK_PCT = 8.0  # リスク幅（%）がこの値以上の候補は除外（
 QUALITY_WEIGHT = 0.60
 NOISE_EXCLUDE_SCORE = 3  # 3以上は「地雷」寄りとして除外
 
+# 上質化（狙える形）追加：
+# - RS（市場に対する相対強度）：指数を上回る銘柄を優先
+# - 週足トレンド整合：日足だけ良く見えても、上位足が崩れている銘柄を落とす
+# - 実行可能性：現値からエントリー帯までの距離が遠すぎる候補を落とす（機会損失を抑える）
+RS20_EXCLUDE = -6.0          # RS20 がこれ未満なら基本除外（市場に負けている）
+MAX_PULLBACK_ATR = 2.5      # エントリー帯までの距離が ATR の何倍まで許容するか
+WEEKLY_STRICT_SETUPS = ("A1-Strong", "A1")
+
+
+def _ret_n(close: pd.Series, n: int) -> float:
+    """n本騰落（%）"""
+    try:
+        n = int(n)
+    except Exception:
+        n = 20
+    if close is None or len(close) < n + 1:
+        return float("nan")
+    base = safe_float(close.iloc[-(n + 1)], np.nan)
+    last = safe_float(close.iloc[-1], np.nan)
+    if not (np.isfinite(base) and np.isfinite(last) and base > 0):
+        return float("nan")
+    return float((last / base - 1.0) * 100.0)
+
+
+def _weekly_trend_ok(df: pd.DataFrame) -> bool | None:
+    """週足トレンドの整合（軽量）
+
+    True/False/None(None=データ不足)
+    - 週足終値 > 週MA10 > 週MA20
+    - 週MA10 が4週前より上（緩い上向き）
+    """
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    try:
+        c = df["Close"].astype(float)
+        wc = c.resample("W-FRI").last().dropna()
+    except Exception:
+        return None
+    if wc is None or wc.empty or len(wc) < 30:
+        return None
+    ma10 = wc.rolling(10).mean()
+    ma20 = wc.rolling(20).mean()
+    last = safe_float(wc.iloc[-1], np.nan)
+    m10 = safe_float(ma10.iloc[-1], np.nan)
+    m20 = safe_float(ma20.iloc[-1], np.nan)
+    m10_4 = safe_float(ma10.shift(4).iloc[-1], np.nan)
+    if not (np.isfinite(last) and np.isfinite(m10) and np.isfinite(m20) and np.isfinite(m10_4)):
+        return None
+    ok = bool((last > m10 > m20) and (m10 >= m10_4))
+    return ok
+
 def _apply_setup_mix(cands: List[Dict], max_n: int) -> List[Dict]:
     """Enforce strategy mix per spec (when alternatives exist).
 
@@ -111,6 +162,21 @@ def run_screen(
     uni = _filter_earnings(uni, today_date)
     tickers = uni[tcol].astype(str).tolist()
     ohlc_map = download_history_bulk(tickers, period="780d", auto_adjust=True, group_size=200)
+
+    # --- Index telemetry (for relative strength / RS)
+    # Keep it lightweight: one index series, 20/60d relative strength.
+    topx_ret20 = float("nan")
+    topx_ret60 = float("nan")
+    try:
+        idx_map = download_history_bulk(["^TOPX"], period="260d", auto_adjust=True, group_size=1)
+        topx = idx_map.get("^TOPX")
+        if topx is not None and not topx.empty and "Close" in topx.columns:
+            topx_ret20 = _ret_n(topx["Close"].astype(float), 20)
+            topx_ret60 = _ret_n(topx["Close"].astype(float), 60)
+    except Exception:
+        # if index fetch fails, RS features are simply disabled
+        topx_ret20 = float("nan")
+        topx_ret60 = float("nan")
 
     # paper trade update
     update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
@@ -201,6 +267,28 @@ def run_screen(
         elif close_last < entry_low and close_last > 0:
             band_dist_pct = float((entry_low - close_last) / close_last * 100.0)
 
+        # --- 実行可能性（距離を ATR で評価）
+        # band_dist_pct だけだと銘柄ごとのボラ差が吸収できない。
+        # 「エントリー帯まで何ATR動く必要があるか」を見て、遠すぎる候補を落とす。
+        pb_atr = float("nan")
+        atr_abs = float(0.0)
+        if close_last > 0 and np.isfinite(atrp) and float(atrp) > 0:
+            atr_abs = float(close_last * float(atrp) / 100.0)
+        if atr_abs > 0 and entry_low > 0 and entry_high > 0:
+            diff = 0.0
+            if close_last > entry_high:
+                diff = float(close_last - entry_high)
+            elif close_last < entry_low:
+                diff = float(entry_low - close_last)
+            pb_atr = float(diff / atr_abs)
+            if np.isfinite(pb_atr) and pb_atr > MAX_PULLBACK_ATR:
+                continue
+
+        # --- 週足整合（上位足が崩れているものを落とす）
+        weekly_ok = _weekly_trend_ok(df)
+        if weekly_ok is False and info.setup in WEEKLY_STRICT_SETUPS:
+            continue
+
         # 品質スコア（過剰最適化を避けつつ、偽物を落とすための軽い補正）
         #  - 出来高: pullback/base では「減っている」方が綺麗（=売り圧が枯れやすい）
         #  - ボラ: 収縮している方が、ブレイク後の伸びが出やすい
@@ -212,6 +300,13 @@ def run_screen(
         gf = float(info.gap_freq) if getattr(info, "gap_freq", None) is not None else np.nan
         r20 = float(info.ret20) if getattr(info, "ret20", None) is not None else np.nan
         rc = float(info.range_contr) if getattr(info, "range_contr", None) is not None else np.nan
+
+        # RS20（TOPIX比）：指数より強いものを上に。
+        rs20 = float("nan")
+        if np.isfinite(r20) and np.isfinite(topx_ret20):
+            rs20 = float(r20 - float(topx_ret20))
+            if rs20 <= RS20_EXCLUDE:
+                continue
 
         # ノイズスコア（イベント起因・滑り地雷の検知）
         #  - 出来高拡大 + ギャップ多発 + ボラ拡大 は「狙える形」(押し目)の期待値を大きく毀損しやすい
@@ -277,6 +372,31 @@ def run_screen(
             quality -= 0.04
         elif band_dist_pct >= 3.0:
             quality -= 0.02
+
+        # RS20（TOPIX比）: 「指数に勝つ」銘柄を優先
+        #  - r20 だけだと相場全体が上げている局面で見誤るので、相対で補正
+        if np.isfinite(rs20):
+            if rs20 >= 10.0:
+                quality += 0.05
+            elif rs20 >= 6.0:
+                quality += 0.04
+            elif rs20 >= 2.0:
+                quality += 0.02
+            elif rs20 <= -4.0:
+                quality -= 0.05
+
+        # 週足整合（Trueなら加点。Falseはsetup次第で軽い減点）
+        if weekly_ok is True:
+            quality += 0.03
+        elif weekly_ok is False and info.setup not in WEEKLY_STRICT_SETUPS:
+            quality -= 0.03
+
+        # band までの距離を ATR で評価（...)
+        if np.isfinite(pb_atr):
+            if pb_atr >= 1.8:
+                quality -= 0.04
+            elif pb_atr >= 1.2:
+                quality -= 0.02
 
         quality = float(np.clip(quality, -0.25, 0.25))
 
@@ -354,12 +474,15 @@ def run_screen(
                 "risk_pct_high": float(risk_pct_high),
                 "risk_now": float(risk_now),
                 "band_dist": float(band_dist_pct),
+                "pb_atr": float(pb_atr) if np.isfinite(pb_atr) else float("nan"),
+                "weekly_ok": (None if weekly_ok is None else bool(weekly_ok)),
                 "quality": float(quality),
                 "vol_ratio": float(vr) if np.isfinite(vr) else float("nan"),
                 "atr_contr": float(ac) if np.isfinite(ac) else float("nan"),
                 "gap_freq": float(gf) if np.isfinite(gf) else float("nan"),
                 "ret20": float(r20) if np.isfinite(r20) else float("nan"),
                 "range_contr": float(rc) if np.isfinite(rc) else float("nan"),
+                "rs20": float(rs20) if np.isfinite(rs20) else float("nan"),
                 "noise_score": int(noise_score),
                 "ev_r": float(ev.ev_r),
                 "ev_r_day": float(ev.ev_r / max(ev.expected_days, 1e-6)),
