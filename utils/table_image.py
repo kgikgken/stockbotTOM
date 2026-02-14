@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple, Optional
 
@@ -154,6 +156,76 @@ def _mpl_modules():
         return plt, font_manager
     except Exception:  # pragma: no cover
         return None
+
+
+def _which(cmd: str) -> Optional[str]:
+    """shutil.which wrapper (safe)."""
+
+    try:
+        return shutil.which(cmd)
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _run_quiet(cmd: Sequence[str]) -> bool:
+    """Run a command quietly, returning True if it succeeded."""
+
+    try:
+        subprocess.run(
+            list(cmd),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _svg_to_png(svg_path: str, png_path: str) -> bool:
+    """Convert SVG to PNG via optional Python deps or external tools.
+
+    This allows the bot to output a PNG even when Pillow/matplotlib are missing.
+    Best-effort: returns False if conversion is not possible.
+    """
+
+    # 1) CairoSVG (if installed)
+    try:
+        import cairosvg  # type: ignore
+
+        cairosvg.svg2png(url=svg_path, write_to=png_path)
+        return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+    except Exception:
+        pass
+
+    # 2) Inkscape (preferred)
+    if _which("inkscape"):
+        # Inkscape 1.0+ syntax
+        if _run_quiet(["inkscape", svg_path, "--export-type=png", f"--export-filename={png_path}"]):
+            return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+        # Older syntax
+        if _run_quiet(["inkscape", svg_path, "--export-png", png_path]):
+            return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+
+    # 3) librsvg
+    if _which("rsvg-convert"):
+        if _run_quiet(["rsvg-convert", "-o", png_path, svg_path]):
+            return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+
+    # 4) resvg
+    if _which("resvg"):
+        if _run_quiet(["resvg", svg_path, png_path]):
+            return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+
+    # 5) ImageMagick
+    if _which("magick"):
+        if _run_quiet(["magick", svg_path, png_path]):
+            return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+    if _which("convert"):
+        if _run_quiet(["convert", svg_path, png_path]):
+            return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+
+    return False
 
 
 def _render_table_png_pil(
@@ -417,6 +489,10 @@ def render_table_png(
       1) Pillow (best typography / pixel truncation)
       2) matplotlib fallback (works even when Pillow isn't installed)
 
+    If neither is available, try to render SVG and convert it to PNG via
+    external tools (inkscape / rsvg-convert / resvg / ImageMagick) or
+    optional CairoSVG.
+
     If neither is available, raises RuntimeError.
     """
 
@@ -425,8 +501,26 @@ def render_table_png(
     if _HAVE_PIL:
         return _render_table_png_pil(title, headers, rows, out_path, style)
 
-    # Fallback: matplotlib
-    return _render_table_png_mpl(title, headers, rows, out_path, style)
+    # Fallback: matplotlib (if installed)
+    try:
+        return _render_table_png_mpl(title, headers, rows, out_path, style)
+    except Exception:
+        pass
+
+    # Fallback: SVG -> PNG (via external tools)
+    svg_path = os.path.splitext(out_path)[0] + ".svg"
+    try:
+        render_table_svg(title, headers, rows, svg_path, style)
+        if _svg_to_png(svg_path, out_path):
+            return out_path
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "matplotlib/Pillowが無くPNGを作れません。pip install pillow または pip install matplotlib、"
+        "もしくは inkscape / rsvg-convert / resvg / ImageMagick(convert) のいずれかを用意してください。"
+        "（SVGは out/report_table_*.svg として出力可能です）"
+    )
 
 
 def render_table_svg(
