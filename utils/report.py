@@ -129,10 +129,9 @@ def build_report(
             )
             market_in_ok = bool(entry_mode == "MARKET_OK" and in_band and (not macro_on) and (not no_trade))
 
-            # Liquidity summary tags (keep only what matters for execution)
+            # Liquidity summary tags (beginner-first): keep only categorical info.
+            # We intentionally hide numeric liquidity metrics (ADV/Impact) to avoid clutter.
             liq_grade = int(safe_float(c.get("liq_grade"), 0.0)) if c.get("liq_grade") is not None else 0
-            adv20 = safe_float(c.get("adv20"), float("nan"))
-            impact = safe_float(c.get("amihud_bps100m"), float("nan"))
             weekly_ok = c.get("weekly_ok", None)
 
             tags: List[str] = []
@@ -142,10 +141,6 @@ def build_report(
                 tags.append("板厚◎")
             elif liq_grade == 1:
                 tags.append("板厚○")
-            if np.isfinite(adv20):
-                tags.append(f"ADV{_fmt_oku(adv20)}")
-            if np.isfinite(impact):
-                tags.append(f"Imp{impact:.0f}")
             if weekly_ok is True:
                 tags.append("週足OK")
             elif weekly_ok is False:
@@ -266,7 +261,7 @@ def build_report(
         import re
 
         def _pick_num(line: str) -> str:
-            m = re.search(r"([0-9]{1,3}(?:,[0-9]{3})*)", line)
+            m = re.search(r"([0-9]{1,3}(?:,[0-9]{3})*)", str(line or ""))
             return m.group(1) if m else ""
 
         def _cut_tail(s: str) -> str:
@@ -296,11 +291,42 @@ def build_report(
             pnl = ""
             sl = ""
             tp1 = ""
+            setup_used = ""
             for ln in b[1:]:
+                # New compact position format (utils/position.py): one bullet line with '/' separated segments.
+                ln_clean = str(ln or "").strip()
+                if ln_clean.startswith("・"):
+                    ln_clean = ln_clean.lstrip("・").strip()
+                    segs = [s.strip() for s in ln_clean.split("/") if s.strip()]
+                    for seg in segs:
+                        if seg.startswith("Entry ") and not entry:
+                            entry = _pick_num(seg)
+                            continue
+                        if seg.startswith("Now ") and not now:
+                            now = _pick_num(seg)
+                            continue
+                        if seg.startswith("PnL ") and not pnl:
+                            pnl = seg.replace("PnL", "", 1).strip()
+                            continue
+                        if seg.startswith("SL ") and not sl:
+                            sl = _pick_num(seg)
+                            continue
+                        if seg.startswith("TP1 ") and not tp1:
+                            tp1 = _pick_num(seg)
+                            continue
+                        if seg.startswith("Setup ") and not setup_used:
+                            setup_used = seg.replace("Setup", "", 1).strip()
+                            continue
+                        if seg.startswith("次:") and not next_act:
+                            next_act = seg.split("次:", 1)[1].strip()
+                            continue
+
                 if "状態：" in ln and not status:
                     status = _cut_tail(ln.split("状態：", 1)[1])
                 if "次アクション：" in ln and not next_act:
                     next_act = _cut_tail(ln.split("次アクション：", 1)[1])
+                if "次:" in ln and not next_act:
+                    next_act = _cut_tail(ln.split("次:", 1)[1])
                 if "取得単価：" in ln and not entry:
                     m1 = re.search(r"取得単価：\s*([0-9,]+)\s*円", ln)
                     if m1:
@@ -314,10 +340,14 @@ def build_report(
                     now = _pick_num(ln)
                 if "損益：" in ln and not pnl:
                     pnl = _cut_tail(ln.split("損益：", 1)[1])
-                if ("想定SL：" in ln or "SL：" in ln) and not sl:
+                if "PnL" in ln and not pnl:
+                    pnl = _cut_tail(ln.split("PnL", 1)[1])
+                if ("想定SL：" in ln or "SL：" in ln or "SL " in ln) and not sl:
                     sl = _pick_num(ln)
-                if ("想定TP1：" in ln or "TP1：" in ln) and not tp1:
+                if ("想定TP1：" in ln or "TP1：" in ln or "TP1 " in ln) and not tp1:
                     tp1 = _pick_num(ln)
+                if "Setup" in ln and not setup_used:
+                    setup_used = _cut_tail(ln.split("Setup", 1)[1])
 
             act = next_act or status or "保有"
             parts: List[str] = [f"■ {head}：{act}"]
@@ -331,6 +361,8 @@ def build_report(
                 parts.append(f"SL {sl}")
             if tp1:
                 parts.append(f"TP1 {tp1}")
+            if setup_used:
+                parts.append(f"Setup {setup_used}")
             lines.append(" / ".join(parts))
 
         lines.append("")
@@ -455,7 +487,9 @@ def build_report(
                     if order_tag == "押し待ち指値":
                         ord_txt = "指値（押し待ち）" + ord_txt.replace("指値 ", "")
 
+                # Beginner-first: show only what matters for execution + one short "now" note.
+                # (Progress/length are kept in data but hidden to reduce noise for beginners.)
                 lines.append(
-                    f"{idx}. 🟢 {ticker} {name}{tier_tag}{warn} {ord_txt} / SL {_fmt_yen(sl_s)} / Risk {risk_txt} / 進捗{prog_pct}% / 長さ{_len_label(key, cup_len)} {now_note}"
+                    f"{idx}. 🟢 {ticker} {name}{tier_tag}{warn} {ord_txt} / SL {_fmt_yen(sl_s)} / Risk {risk_txt} {now_note}"
                 )
     return "\n".join(lines).rstrip() + "\n"
