@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Tuple
 import numpy as np
 
@@ -11,6 +12,21 @@ def _fmt_yen(x: float) -> str:
         return f"{int(round(float(x))):,}"
     except Exception:
         return "-"
+
+
+def _env_truthy(name: str) -> bool:
+    v = str(os.getenv(name, "")).strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def _strip_icons(s: str) -> str:
+    """Best-effort removal of emoji markers for image/table rendering."""
+
+    if not s:
+        return ""
+    for ch in ("🟢", "🔴", "⚠", "✅", "🚫"):
+        s = s.replace(ch, "")
+    return " ".join(s.split())
 
 
 def _fmt_oku(yen: float) -> str:
@@ -50,6 +66,11 @@ def build_report(
     mkt_comment = str(market.get("comment", "中立"))
 
     lines: List[str] = []
+
+    # Optional: build a compact, structured summary for exporting as an image.
+    # The LINE text output stays beginner-friendly; the image is for at-a-glance sharing.
+    table_headers = ["区分", "#", "銘柄", "注文", "SL", "TP1/リム", "Risk", "メモ"]
+    table_rows: List[List[str]] = []
     lines.append(f"📅 {today_str} stockbotTOM 日報")
     lines.append("")
 
@@ -250,6 +271,32 @@ def build_report(
                 lines.append(f"{n}. {head}")
                 lines.append(f"   注文：{order_line}")
                 lines.append(f"   {risk_line}")
+
+                # Table row for optional image export
+                sl_txt, tp1_txt, risk_txt = "-", "-", "-"
+                try:
+                    parts = [p.strip() for p in str(risk_line).split("/")]
+                    if len(parts) >= 1 and parts[0].startswith("SL"):
+                        sl_txt = parts[0].replace("SL", "", 1).strip()
+                    if len(parts) >= 2 and parts[1].startswith("TP1"):
+                        tp1_txt = parts[1].replace("TP1", "", 1).strip()
+                    if len(parts) >= 3 and "Risk" in parts[2]:
+                        risk_txt = parts[2].replace("Risk", "", 1).strip()
+                except Exception:
+                    pass
+                table_rows.append(
+                    [
+                        "狙える",
+                        str(n),
+                        _strip_icons(head),
+                        _strip_icons(order_line),
+                        sl_txt,
+                        tp1_txt,
+                        risk_txt,
+                        "",
+                    ]
+                )
+
                 if n != len(_orders):
                     lines.append("")
         else:
@@ -283,6 +330,20 @@ def build_report(
                 lines.append(f"{n}. {head}")
                 if reason:
                     lines.append(f"   {reason}")
+
+                # Table row
+                table_rows.append(
+                    [
+                        "狙える",
+                        "-",
+                        _strip_icons(head),
+                        "見送り",
+                        "-",
+                        "-",
+                        "-",
+                        _strip_icons(reason) if reason else "",
+                    ]
+                )
                 if n != len(_skips):
                     lines.append("")
 
@@ -430,6 +491,27 @@ def build_report(
             if p2_parts:
                 lines.append("   " + " / ".join(p2_parts))
 
+            # Table row
+            memo_parts: List[str] = []
+            if entry or now:
+                e = entry or "-"
+                n = now or "-"
+                memo_parts.append(f"Entry {e}→{n}")
+            if setup_used:
+                memo_parts.append(f"Setup {setup_used}")
+            table_rows.append(
+                [
+                    "ポジ",
+                    "-",
+                    _strip_icons(head),
+                    _strip_icons(act),
+                    sl or "-",
+                    tp1 or "-",
+                    pnl or "-",
+                    " / ".join(memo_parts),
+                ]
+            )
+
             # Visual separator between multiple positions
             lines.append("")
         # (blank line already appended after each block)
@@ -531,15 +613,18 @@ def build_report(
                 if last_f > 0:
                     if last_f < zone_low * (1.0 - tol_zone):
                         to_zone = (zone_low / last_f - 1.0) * 100.0
-                        now_note = f"状態：下 / ゾーンまで +{to_zone:.1f}%待ち"
+                        # Beginner-first: make the action explicit.
+                        now_note = f"状態：下 / ゾーンまで +{to_zone:.1f}% / 逆指値待ち"
                     elif last_f > zone_high * (1.0 + tol_zone):
                         over = (last_f / zone_high - 1.0) * 100.0
                         risk_last = (last_f - sl_s) / last_f * 100.0
-                        now_note = f"状態：上 / 上 +{over:.1f}%"
+                        # Above zone: this is a pullback-limit idea. Explicitly ban market chasing.
+                        now_note = f"状態：上 / ゾーン上 +{over:.1f}%"
                         if np.isfinite(risk_last):
-                            now_note += f" / r_now {risk_last:.1f}%"
+                            now_note += f" / 成行Risk {risk_last:.1f}%"
                             if risk_last > 8.0:
-                                now_note += " / 今買うな"
+                                now_note += "（8%超）"
+                        now_note += " / 成行禁止（指値待ち）"
                     else:
                         now_note = "状態：ゾーン内（注文有効）"
 
@@ -564,6 +649,49 @@ def build_report(
                 lines.append("   " + f"SL {_fmt_yen(sl_s)} / Risk {risk_txt}")
                 if now_note:
                     lines.append("   " + now_note)
+
+                # Table row
+                memo_parts: List[str] = []
+                if tier_tag:
+                    memo_parts.append("準候補")
+                if warn:
+                    memo_parts.append("出来高⚠")
+                if now_note:
+                    # keep it short (just the first clause)
+                    memo_parts.append(now_note.replace("状態：", "").split("/")[0].strip())
+                table_rows.append(
+                    [
+                        f"ソーサー{_tf_title(key)}",
+                        str(idx),
+                        _strip_icons(f"{ticker} {name}{tier_tag}"),
+                        _strip_icons(ord_txt),
+                        _fmt_yen(sl_s),
+                        _fmt_yen(rim_f) if rim_f > 0 else "-",
+                        risk_txt,
+                        " / ".join(memo_parts),
+                    ]
+                )
                 if idx != len(items):
                     lines.append("")
+    # Optional: export a shareable PNG table.
+    # Enable by setting REPORT_IMAGE=1 or REPORT_TABLE_IMAGE=1.
+    if table_rows and (_env_truthy("REPORT_IMAGE") or _env_truthy("REPORT_TABLE_IMAGE")):
+        try:
+            from utils.table_image import TableImageStyle, render_table_png
+
+            outdir = os.getenv("REPORT_OUTDIR", "out")
+            os.makedirs(outdir, exist_ok=True)
+            out_path = os.path.join(outdir, f"report_table_{today_str}.png")
+            title = f"stockbotTOM {today_str} 注文サマリ"
+            render_table_png(title, table_headers, table_rows, out_path, style=TableImageStyle())
+
+            # Keep the text output clean unless explicitly requested.
+            if _env_truthy("REPORT_IMAGE_NOTE"):
+                lines.append("")
+                lines.append(f"🖼 表画像: {out_path}")
+        except Exception as e:
+            if _env_truthy("REPORT_IMAGE_NOTE"):
+                lines.append("")
+                lines.append(f"🖼 表画像生成に失敗: {e}")
+
     return "\n".join(lines).rstrip() + "\n"
