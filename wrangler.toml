@@ -1,3 +1,11 @@
 name = "stockbot-worker"
-main = "src/index.js"
+main = "src/worker.js"
 compatibility_date = "2025-12-07"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+PUBLIC_BASE_URL = "https://stockbot-worker.7mxhzzv8fd.workers.dev"
+
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "stockbot-reports"
