@@ -29,9 +29,9 @@ from utils.screen_logic import weekly_max_new, no_trade_conditions
 from utils.position import load_positions, analyze_positions
 from utils.report import build_report
 
-from typing import Callable
+from typing import Callable, Optional
 
-def _resolve_send_line() -> Callable[[str], None]:
+def _resolve_send_line() -> Callable[..., None]:
     """Resolve the LINE sender function.
 
     Prefer `utils.line.send_line` if available; otherwise, fall back to an
@@ -50,7 +50,7 @@ def _resolve_send_line() -> Callable[[str], None]:
                 return fn  # type: ignore[return-value]
 
     # 2) Fallback: send via WORKER_URL if possible, otherwise print.
-    def _fallback(text: str) -> None:
+    def _fallback(text: str, *_args, **_kwargs) -> None:
         import os
         import time
 
@@ -176,7 +176,24 @@ def main() -> None:
         saucers=meta.get("saucers"),
     )
 
-    send_line(report)
+    # Prefer sending the table image to LINE as well (worker must support multipart upload).
+    image_path: Optional[str] = None
+    try:
+        candidate = f"out/report_table_{today_str}.png"
+        if os.getenv("LINE_SEND_IMAGE", "1") != "0" and os.path.exists(candidate):
+            image_path = candidate
+    except Exception:
+        image_path = None
+
+    if image_path:
+        send_line(
+            report,
+            image_path=image_path,
+            image_caption=f"🖼 表画像: {os.path.basename(image_path)}",
+            image_key=os.path.basename(image_path),
+        )
+    else:
+        send_line(report)
     save_state(state)
 
 if __name__ == "__main__":
