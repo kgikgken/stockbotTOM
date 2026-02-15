@@ -4,7 +4,7 @@ import mimetypes
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any
 
 import requests
 
@@ -19,38 +19,56 @@ def _get_auth_headers() -> dict:
     If you set WORKER_AUTH_TOKEN (recommended), requests will include:
       Authorization: Bearer <token>
     """
-
-    token = (os.getenv("WORKER_AUTH_TOKEN") or os.getenv("WORKER_TOKEN") or "").strip()
+    # Support multiple env names across environments.
+    token = (
+        os.getenv("WORKER_AUTH_TOKEN")
+        or os.getenv("WORKER_TOKEN")
+        or os.getenv("WORKER_AUTH")
+        or os.getenv("AUTH_TOKEN")
+        or ""
+    ).strip()
     if not token:
         return {}
-    return {"Authorization": f"Bearer {token}"}
+    # Some worker versions check X-Auth-Token, others Authorization.
+    return {"Authorization": f"Bearer {token}", "X-Auth-Token": token}
 
 
-def send_line_text(text: str, *, chunk_size: int = 3800) -> None:
+def send_line_text(text: str, *, chunk_size: int = 3800) -> Tuple[bool, str]:
     """Send plain text to WORKER_URL.
 
-    WORKER_URL is expected to forward the message to LINE.
+    Returns:
+      (ok, detail) where detail is last status/err message.
     """
-
     url = _get_worker_url()
     if not url:
-        print("[LINE] WORKER_URL is not set; skip sending.")
-        return
+        return False, "WORKER_URL is not set"
 
     headers = {"Content-Type": "application/json", **_get_auth_headers()}
     chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+
+    last_detail = ""
+    ok_all = True
+
     for chunk in chunks:
-        # Retry a couple of times because GitHub Actions -> Worker can be flaky.
+        sent = False
         for attempt in range(3):
             try:
                 res = requests.post(url, json={"text": chunk}, headers=headers, timeout=30)
-                print("[LINE RESULT]", res.status_code, res.text[:200])
-                break
+                last_detail = f"HTTP {res.status_code}"
+                if 200 <= res.status_code < 300:
+                    sent = True
+                    break
+                # non-2xx
+                last_detail = f"HTTP {res.status_code}: {res.text[:200]}"
             except Exception as e:
-                if attempt < 2:
-                    time.sleep(1.0 + attempt)
-                else:
-                    print(f"[LINE ERROR] failed to send text: {e}")
+                last_detail = f"EXC: {repr(e)}"
+            if attempt < 2:
+                time.sleep(1.0 + attempt)
+        if not sent:
+            ok_all = False
+            break
+
+    return ok_all, last_detail or ("ok" if ok_all else "failed")
 
 
 def send_line_image(
@@ -58,29 +76,19 @@ def send_line_image(
     *,
     caption: str = "",
     key: str | None = None,
-) -> None:
+) -> Tuple[bool, str]:
     """Upload an image to WORKER_URL and let the worker push it to LINE as an image message.
 
-    The worker should accept multipart/form-data:
-      - text: optional caption
-      - key: optional storage key (e.g., "report_table_YYYY-MM-DD.png")
-      - image: file
-
-    Notes:
-      - LINE Messaging API requires https image URLs.
-        The worker is expected to upload the image (e.g. to R2) and send
-        the image message using that public URL.
+    Returns:
+      (ok, detail)
     """
-
     url = _get_worker_url()
     if not url:
-        print("[LINE] WORKER_URL is not set; skip sending image.")
-        return
+        return False, "WORKER_URL is not set"
 
     p = Path(image_path)
     if not p.exists():
-        print(f"[LINE] image not found: {p}")
-        return
+        return False, f"image not found: {p}"
 
     mime, _ = mimetypes.guess_type(str(p))
     mime = mime or "application/octet-stream"
@@ -92,19 +100,27 @@ def send_line_image(
         data["key"] = key
 
     headers = _get_auth_headers()
-    # NOTE: for retries, reopen the file each time so the stream position is always correct.
+    last_detail = ""
+
+    # Newer worker versions accept multipart POSTs to root.
+    # If you explicitly need /upload, set WORKER_UPLOAD_SUFFIX=/upload.
+    upload_suffix = (os.getenv("WORKER_UPLOAD_SUFFIX") or "").strip()
+    upload_url = url + upload_suffix
+
     for attempt in range(3):
         try:
             with p.open("rb") as f:
                 files = {"image": (p.name, f, mime)}
-                res = requests.post(url, data=data, files=files, headers=headers, timeout=60)
-            print("[LINE IMAGE RESULT]", res.status_code, res.text[:200])
-            break
+                res = requests.post(upload_url, data=data, files=files, headers=headers, timeout=60)
+            last_detail = f"HTTP {res.status_code}: {res.text[:200]}"
+            if 200 <= res.status_code < 300:
+                return True, last_detail
         except Exception as e:
-            if attempt < 2:
-                time.sleep(1.0 + attempt)
-            else:
-                print(f"[LINE IMAGE ERROR] failed to send image: {e}")
+            last_detail = f"EXC: {repr(e)}"
+        if attempt < 2:
+            time.sleep(1.0 + attempt)
+
+    return False, last_detail or "failed"
 
 
 def send_line(
@@ -113,13 +129,30 @@ def send_line(
     image_path: Optional[str] = None,
     image_caption: Optional[str] = None,
     image_key: Optional[str] = None,
-) -> None:
+) -> Dict[str, Any]:
     """Convenience wrapper.
 
-    - Always sends text.
+    - Always attempts to send text
     - If image_path is provided and exists, uploads the image too.
-    """
 
-    send_line_text(text)
+    Returns:
+      dict with keys: text_ok, text_detail, image_ok, image_detail
+    """
+    # Prefer image first so it appears at the top of the chat.
+    image_ok = None
+    image_detail = ""
     if image_path:
-        send_line_image(image_path, caption=image_caption or "", key=image_key)
+        print(f"[LINE] image: try upload ({image_path})")
+        image_ok, image_detail = send_line_image(image_path, caption=image_caption or "", key=image_key)
+        print(f"[LINE] image: {'OK' if image_ok else 'FAIL'} ({image_detail})")
+
+    print("[LINE] text: try send")
+    text_ok, text_detail = send_line_text(text)
+    print(f"[LINE] text: {'OK' if text_ok else 'FAIL'} ({text_detail})")
+
+    return {
+        "text_ok": bool(text_ok),
+        "text_detail": text_detail,
+        "image_ok": None if image_ok is None else bool(image_ok),
+        "image_detail": image_detail,
+    }
