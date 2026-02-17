@@ -29,21 +29,24 @@ class TableImageStyle:
     # Target width for mobile (LINE chat). Keep this modest so text stays large in the preview.
     max_total_px: int = 960
     # Per-column cap (before global scaling). Larger values help long text columns.
-    max_col_px: int = 520
+    max_col_px: int = 480
     margin: int = 20
-    pad_x: int = 16
-    pad_y: int = 12
-    font_size: int = 28
-    title_font_size: int = 40
-    section_font_size: int = 30
-    line_width: int = 2
-    line_spacing: int = 6  # between multiline lines
+    # Slightly larger padding improves legibility (touch/phone viewing).
+    pad_x: int = 18
+    pad_y: int = 14
+    # Bump base font sizes a bit; we prefer a slightly taller image to tiny text.
+    font_size: int = 30
+    title_font_size: int = 42
+    section_font_size: int = 32
+    # Thinner grid lines reduce visual noise.
+    line_width: int = 1
+    line_spacing: int = 8  # between multiline lines
     # Colors
     header_bg: str = "#F2F2F2"
-    zebra_bg: str = "#F7F7F7"
-    section_bg: str = "#E8F0FE"
+    zebra_bg: str = "#FAFAFA"
+    section_bg: str = "#DCEBFF"
     text_color: str = "#101010"
-    grid_color: str = "#202020"
+    grid_color: str = "#909090"
     # Text wrapping
     wrap_cells: bool = True
     max_lines: int = 5
@@ -279,10 +282,17 @@ def _render_table_png_pil(
         if len(norm) < n_cols:
             norm += [""] * (n_cols - len(norm))
         items.append(("data", norm))
-    # ---- Decide alignment (right-align common numeric columns)
+    # ---- Decide alignment
+    # - Center: row index column (#)
+    # - Right: pure numeric columns
     right_cols: set[int] = set()
+    center_cols: set[int] = set()
     for j, h in enumerate(headers_s):
-        if h.strip() in {"#", "SL", "TP1", "TP1/リム", "Risk", "R"}:
+        ht = h.strip().replace("\n", "")
+        if ht in {"#", "No", "№"}:
+            center_cols.add(j)
+            continue
+        if ht in {"SL", "TP1", "TP", "TP1/リム", "Risk", "R"}:
             right_cols.add(j)
     # ---- Compute column widths (content-aware, then clamp)
     col_content_px: list[int] = [0] * n_cols
@@ -415,12 +425,19 @@ def _render_table_png_pil(
             draw.rectangle([x0, y, x1, y + rh], fill=style.section_bg)
             draw_cell(int(x0), int(y), int(table_inner_w), int(rh), cells[0], section_font, align="left", fill=style.text_color)
             y += rh
+            # Reset zebra stripes at each section boundary (easier to scan on mobile).
+            data_row_index = 0
             continue
         if data_row_index % 2 == 1:
             draw.rectangle([x0, y, x1, y + rh], fill=style.zebra_bg)
         cx = x0
         for j, c in enumerate(cells):
-            align = "right" if j in right_cols else "left"
+            if j in center_cols:
+                align = "center"
+            elif j in right_cols:
+                align = "right"
+            else:
+                align = "left"
             draw_cell(int(cx), int(y), int(col_px[j]), int(rh), c, body_font, align=align, fill=style.text_color)
             cx += col_px[j]
         data_row_index += 1
