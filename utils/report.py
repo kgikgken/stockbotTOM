@@ -764,6 +764,8 @@ def build_report(
 
             img_headers = ["#", "銘柄", "注文", "SL/TP1/Risk", "メモ"]
             img_rows: list[list[str]] = []
+            import re
+
             last_group = None
             for r in table_rows:
                 if not r:
@@ -777,6 +779,35 @@ def build_report(
                 idx = str(r[1]) if len(r) > 1 else ""
                 sym = str(r[2]) if len(r) > 2 else ""
                 order = str(r[3]) if len(r) > 3 else ""
+
+                # --- Mobile readability tweaks ---
+                # 1) Avoid awkward mid-number wraps by inserting intentional newlines.
+                m = re.search(r"[0-9]", order)
+                if m and m.start() > 0:
+                    order = order[: m.start()].rstrip() + "\n" + order[m.start() :].lstrip()
+                order = order.replace(" / ", "\n")
+
+                # 2) Split 銘柄セルを (ティッカー / 銘柄名 / タグ) の3段にして、見出し性を上げる
+                sym_lines = sym.splitlines()
+                ticker = sym_lines[0].strip() if sym_lines else ""
+                rest = " ".join(s.strip() for s in sym_lines[1:]).strip()
+
+                name = rest
+                tags = ""
+                if "[" in rest and rest.endswith("]"):
+                    before, after = rest.split("[", 1)
+                    name = before.strip()
+                    tags = after[:-1].strip()
+                elif " [" in rest:
+                    before, after = rest.split(" [", 1)
+                    name = before.strip()
+                    tags = after.rstrip("]").strip()
+
+                if tags:
+                    tags = tags.replace("/", "・")
+
+                sym = "\n".join([p for p in [ticker, name, tags] if p])
+
                 sl = str(r[4]) if len(r) > 4 else ""
                 tp1 = str(r[5]) if len(r) > 5 else ""
                 risk = str(r[6]) if len(r) > 6 else ""
