@@ -717,8 +717,8 @@ def build_report(
         png_path = os.path.join(outdir, f"report_table_{today_str}.png")
         svg_path = os.path.join(outdir, f"report_table_{today_str}.svg")
         csv_path = os.path.join(outdir, f"report_table_{today_str}.csv")
-        new_str = "OK" if allow_new else "NG"
-        macro_str = "ON" if macro_warn else "OFF"
+        new_str = "OK" if (not no_trade) else "NG"
+        macro_str = "ON" if macro_on else "OFF"
         fut_str = f"{futures_change:+.2f}%" if futures_change is not None else "-"
         title = (
             f"stockbotTOM {today_str} 注文サマリ\n"
