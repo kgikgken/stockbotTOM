@@ -11,6 +11,8 @@ preserves the existing contract: `send_line(text: str) -> None`.
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 
 from utils.util import jst_today_str, jst_today_date
@@ -186,14 +188,30 @@ def main() -> None:
         image_path = None
 
     if image_path:
-        send_line(
+        result = send_line(
             report,
             image_path=image_path,
             image_caption=f"🖼 表画像: {os.path.basename(image_path)}",
             image_key=os.path.basename(image_path),
         )
     else:
-        send_line(report)
+        result = send_line(report)
+
+    # Print delivery status to logs (visible in GitHub Actions).
+    try:
+        print(f"[DELIVERY] text_ok={result.get('text_ok')} detail={result.get('text_detail')}")
+        if result.get("image_ok") is not None:
+            print(f"[DELIVERY] image_ok={result.get('image_ok')} detail={result.get('image_detail')}")
+    except Exception:
+        pass
+
+    # If required, fail the run when delivery did not succeed.
+    if os.getenv("REQUIRE_LINE_DELIVERY", "0") == "1":
+        if not result.get("text_ok"):
+            raise SystemExit(f"LINE text delivery failed: {result.get('text_detail')}")
+        if image_path and result.get("image_ok") is not True:
+            raise SystemExit(f"LINE image delivery failed: {result.get('image_detail')}")
+
     save_state(state)
 
 if __name__ == "__main__":
