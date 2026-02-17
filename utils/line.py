@@ -9,6 +9,19 @@ from typing import Optional, Tuple, Dict, Any
 import requests
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    v = v.strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off", ""):
+        return False
+    return default
+
+
+
 def _get_worker_url() -> str:
     return (os.getenv("WORKER_URL") or "").strip().rstrip("/")
 
@@ -148,29 +161,57 @@ def send_line(
     image_caption: Optional[str] = None,
     image_key: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Convenience wrapper.
+    """Convenience wrapper for LINE delivery.
 
-    - Always attempts to send text
-    - If image_path is provided and exists, uploads the image too.
+    Default behavior (beginner-friendly):
+    - If image_path is provided and upload succeeds, send *image only* (no long text).
+    - If image upload fails, fall back to text so you still receive something.
+    - If image_path is not provided, send text.
 
-    Returns:
-      dict with keys: text_ok, text_detail, image_ok, image_detail
+    You can override image-only behavior by setting:
+      LINE_IMAGE_ONLY=0
     """
-    # Prefer image first so it appears at the top of the chat.
-    image_ok = None
-    image_detail = ""
+
+    image_only = _env_truthy("LINE_IMAGE_ONLY", default=True)
+
+    result: Dict[str, Any] = {
+        "text_ok": False,
+        "text_detail": "",
+        "text_sent": False,
+        "text_skipped": False,
+        "image_ok": None,
+        "image_detail": "",
+        "image_sent": False,
+        "image_only": image_only,
+    }
+
+    # 1) Try image first (so it appears above other messages).
     if image_path:
         print(f"[LINE] image: try upload ({image_path})")
         image_ok, image_detail = send_line_image(image_path, caption=image_caption or "", key=image_key)
+        result["image_sent"] = True
+        result["image_ok"] = bool(image_ok)
+        result["image_detail"] = image_detail
         print(f"[LINE] image: {'OK' if image_ok else 'FAIL'} ({image_detail})")
 
+        # If image-only mode and upload succeeded -> done (no text).
+        if image_only and image_ok:
+            result["text_ok"] = True  # treat as success (text intentionally skipped)
+            result["text_skipped"] = True
+            result["text_detail"] = "skipped (image-only)"
+            return result
+
+        # If image-only mode but upload failed -> fall back to text.
+        # (So you still receive the daily report.)
+        if image_only and not image_ok:
+            print("[LINE] image failed; fallback to text")
+
+    # 2) Send text (either no image, or image-only disabled, or fallback).
     print("[LINE] text: try send")
     text_ok, text_detail = send_line_text(text)
+    result["text_sent"] = True
+    result["text_ok"] = bool(text_ok)
+    result["text_detail"] = text_detail
     print(f"[LINE] text: {'OK' if text_ok else 'FAIL'} ({text_detail})")
 
-    return {
-        "text_ok": bool(text_ok),
-        "text_detail": text_detail,
-        "image_ok": None if image_ok is None else bool(image_ok),
-        "image_detail": image_detail,
-    }
+    return result
