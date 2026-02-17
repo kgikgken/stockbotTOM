@@ -25,15 +25,16 @@ except Exception:  # pragma: no cover
 class TableImageStyle:
     """Styling knobs for table rendering (PNG/SVG)."""
 
-    font_size: int = 22
-    title_font_size: int = 28
+    font_size: int = 24
+    title_font_size: int = 34
     pad_x: int = 14
     pad_y: int = 10
-    margin: int = 18
+    margin: int = 28
     line_width: int = 2
     # Soft caps to avoid absurdly wide images if a cell string explodes
-    max_col_px: int = 520
-    max_total_px: int = 1600
+    max_col_px: int = 460
+    line_spacing: int = 4
+    max_total_px: int = 1280
 
 
 def _first_existing(paths: Sequence[str]) -> Optional[str]:
@@ -104,16 +105,25 @@ def _load_font(size: int, bold: bool = False):
         return ImageFont.truetype(path, size=size)  # type: ignore[arg-type]
 
 
-def _text_bbox(draw, text: str, font) -> Tuple[int, int]:
-    """Return (w, h) for a single-line text."""
+def _text_bbox(draw, text: str, font, spacing: int = 0) -> Tuple[int, int]:
+    """Return (w, h) for a possibly-multiline text."""
 
     s = "" if text is None else str(text)
-    x0, y0, x1, y1 = draw.textbbox((0, 0), s, font=font)
+    try:
+        x0, y0, x1, y1 = draw.multiline_textbbox((0, 0), s, font=font, spacing=spacing)
+    except Exception:
+        # Fallback: treat as single line.
+        x0, y0, x1, y1 = draw.textbbox((0, 0), s.replace("\n", " "), font=font)
     return int(x1 - x0), int(y1 - y0)
 
 
 def _truncate_to_px(draw, text: str, font, max_px: int, ellipsis: str = "…") -> str:
     s = "" if text is None else str(text)
+
+    # If multi-line, truncate each line independently.
+    if "\n" in s:
+        return "\n".join(_truncate_to_px(draw, line, font, max_px, ellipsis=ellipsis) for line in s.splitlines())
+
     if max_px <= 0:
         return s
     w, _ = _text_bbox(draw, s, font)
@@ -235,7 +245,14 @@ def _render_table_png_pil(
     out_path: str,
     style: TableImageStyle,
 ) -> str:
-    """Render a simple table to a PNG image using Pillow."""
+    """Render a simple table to a PNG image using Pillow.
+
+    Notes:
+    - Supports multi-line cells ("
+" in cell text).
+    - Uses zebra striping for body rows (readability on mobile).
+    - Right-aligns numeric columns (#, SL, TP1/リム, Risk).
+    """
 
     if not _HAVE_PIL:
         raise RuntimeError("Pillow (PIL) is not installed; cannot render PNG")
@@ -257,7 +274,7 @@ def _render_table_png_pil(
     if n_cols == 0:
         raise ValueError("headers must not be empty")
 
-    # Normalize row lengths
+    # Normalize row lengths.
     norm_rows: List[List[str]] = []
     for r in rows_s:
         rr = list(r[:n_cols]) + [""] * max(0, n_cols - len(r))
@@ -266,15 +283,15 @@ def _render_table_png_pil(
     # Compute max width per column, with truncation caps.
     col_px: List[int] = []
     for j in range(n_cols):
-        w_h, _ = _text_bbox(draw, headers_s[j], header_font)
+        w_h, _ = _text_bbox(draw, headers_s[j], header_font, spacing=style.line_spacing)
         mx = w_h
         for r in norm_rows:
-            w, _ = _text_bbox(draw, r[j], font)
+            w, _ = _text_bbox(draw, r[j], font, spacing=style.line_spacing)
             mx = max(mx, w)
         mx = min(mx, style.max_col_px)
         col_px.append(mx + style.pad_x * 2)
 
-    # If total is too wide, shrink by truncation.
+    # If total is too wide, shrink by truncation (reduce column widths).
     total_w = sum(col_px) + style.margin * 2
     if total_w > style.max_total_px and n_cols > 0:
         over = total_w - style.max_total_px
@@ -305,12 +322,27 @@ def _render_table_png_pil(
             rr.append(_truncate_to_px(draw, r[j], font, max_txt_px))
         rows_fit.append(rr)
 
-    # Heights
-    _title_w, title_h = _text_bbox(draw, title, title_font)
-    row_h = int(max(_text_bbox(draw, "A", font)[1], _text_bbox(draw, "あ", font)[1]) + style.pad_y * 2)
-    head_h = int(
-        max(_text_bbox(draw, "A", header_font)[1], _text_bbox(draw, "あ", header_font)[1]) + style.pad_y * 2
-    )
+    # Heights (multi-line aware).
+    _title_w, title_h = _text_bbox(draw, title, title_font, spacing=style.line_spacing)
+
+    # Base line heights (for vertical centering of multi-line text).
+    line_h_body = max(_text_bbox(draw, "A", font)[1], _text_bbox(draw, "あ", font)[1])
+    line_h_head = max(_text_bbox(draw, "A", header_font)[1], _text_bbox(draw, "あ", header_font)[1])
+
+    body_cell_h = 0
+    for r in rows_fit:
+        for cell in r:
+            _, h = _text_bbox(draw, cell, font, spacing=style.line_spacing)
+            body_cell_h = max(body_cell_h, h)
+
+    head_cell_h = 0
+    for htxt in headers_fit:
+        _, h = _text_bbox(draw, htxt, header_font, spacing=style.line_spacing)
+        head_cell_h = max(head_cell_h, h)
+
+    # Ensure the row height is at least 1 line high + padding.
+    row_h = max(body_cell_h, line_h_body) + style.pad_y * 2
+    head_h = max(head_cell_h, line_h_head) + style.pad_y * 2
 
     table_h = head_h + row_h * max(1, len(rows_fit))
     img_h = style.margin * 2 + title_h + 12 + table_h
@@ -319,17 +351,48 @@ def _render_table_png_pil(
     img = Image.new("RGB", (img_w, img_h), "white")  # type: ignore[attr-defined]
     d = ImageDraw.Draw(img)  # type: ignore[attr-defined]
 
-    # Title
+    def draw_cell_text(
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        text: str,
+        font_obj,
+        line_h: int,
+        align: str = "left",
+    ) -> None:
+        lines = ("" if text is None else str(text)).splitlines() or [""]
+        block_h = len(lines) * line_h + (len(lines) - 1) * style.line_spacing
+        ty = y + max(0, (h - block_h) // 2)
+        for line in lines:
+            lw, _ = _text_bbox(d, line, font_obj)
+            if align == "right":
+                tx = x + w - style.pad_x - lw
+            elif align == "center":
+                tx = x + (w - lw) // 2
+            else:
+                tx = x + style.pad_x
+            d.text((int(tx), int(ty)), line, font=font_obj, fill="black")
+            ty += line_h + style.line_spacing
+
+    # Title (multi-line OK)
     tx = style.margin
     ty = style.margin
-    d.text((tx, ty), title, font=title_font, fill="black")
+    d.multiline_text((tx, ty), title, font=title_font, fill="black", spacing=style.line_spacing)
 
     # Table origin
     y0 = ty + title_h + 12
     x0 = style.margin
+    x1 = img_w - style.margin
 
     # Header background
-    d.rectangle([x0, y0, img_w - style.margin, y0 + head_h], fill="#F0F0F0")
+    d.rectangle([x0, y0, x1, y0 + head_h], fill="#F0F0F0")
+
+    # Zebra striping for body
+    for i in range(max(1, len(rows_fit))):
+        if i % 2 == 1:
+            y = y0 + head_h + i * row_h
+            d.rectangle([x0, y, x1, y + row_h], fill="#FAFAFA")
 
     # Grid lines
     x = x0
@@ -339,17 +402,21 @@ def _render_table_png_pil(
         d.line([x, y0, x, y0 + head_h + row_h * max(1, len(rows_fit))], fill="#202020", width=style.line_width)
 
     y = y0
-    d.line([x0, y, img_w - style.margin, y], fill="#202020", width=style.line_width)
+    d.line([x0, y, x1, y], fill="#202020", width=style.line_width)
     y += head_h
-    d.line([x0, y, img_w - style.margin, y], fill="#202020", width=style.line_width)
+    d.line([x0, y, x1, y], fill="#202020", width=style.line_width)
     for _ in range(max(1, len(rows_fit))):
         y += row_h
-        d.line([x0, y, img_w - style.margin, y], fill="#202020", width=style.line_width)
+        d.line([x0, y, x1, y], fill="#202020", width=style.line_width)
 
-    # Header text
+    # Determine right-aligned columns by header name.
+    right_align = {"#", "SL", "TP1/リム", "Risk"}
+    right_cols = {j for j, htxt in enumerate(headers_s) if (htxt or "").strip() in right_align}
+
+    # Header text (center)
     x = x0
-    for j, h in enumerate(headers_fit):
-        d.text((x + style.pad_x, y0 + style.pad_y), h, font=header_font, fill="black")
+    for j, htxt in enumerate(headers_fit):
+        draw_cell_text(x, y0, col_px[j], head_h, htxt, header_font, line_h_head, align="center")
         x += col_px[j]
 
     # Body
@@ -358,10 +425,11 @@ def _render_table_png_pil(
         x = x0
         y = y0 + head_h + i * row_h
         for j, cell in enumerate(rr):
-            d.text((x + style.pad_x, y + style.pad_y), cell, font=font, fill="black")
+            align = "right" if j in right_cols else "left"
+            draw_cell_text(x, y, col_px[j], row_h, cell, font, line_h_body, align=align)
             x += col_px[j]
 
-    img.save(out_path)
+    img.save(out_path, optimize=True)
     return out_path
 
 
