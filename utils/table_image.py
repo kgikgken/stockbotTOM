@@ -3,6 +3,7 @@ import csv
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple, Optional
 # Pillow is optional in some environments.
@@ -26,26 +27,26 @@ class TableImageStyle:
     So we intentionally cap the width and prefer wrapping (taller image) over truncation.
     """
     # Target width for mobile (LINE chat). Keep this modest so text stays large in the preview.
-    max_total_px: int = 1080
+    max_total_px: int = 960
     # Per-column cap (before global scaling). Larger values help long text columns.
     max_col_px: int = 520
-    margin: int = 24
+    margin: int = 20
     pad_x: int = 16
     pad_y: int = 12
-    font_size: int = 26
-    title_font_size: int = 38
-    section_font_size: int = 28
+    font_size: int = 28
+    title_font_size: int = 40
+    section_font_size: int = 30
     line_width: int = 2
     line_spacing: int = 6  # between multiline lines
     # Colors
     header_bg: str = "#F2F2F2"
-    zebra_bg: str = "#FAFAFA"
+    zebra_bg: str = "#F7F7F7"
     section_bg: str = "#E8F0FE"
     text_color: str = "#101010"
     grid_color: str = "#202020"
     # Text wrapping
     wrap_cells: bool = True
-    max_lines: int = 4
+    max_lines: int = 5
 
 
 
@@ -252,10 +253,11 @@ def _render_table_png_pil(
     headers_s = ["" if h is None else str(h) for h in headers]
     n_cols = len(headers_s)
     # ---- Fonts
-    title_font = _load_pil_font(style.title_font_size)
-    header_font = _load_pil_font(style.font_size)
+    # Title / section headers: bold makes the image easier to scan on mobile.
+    title_font = _load_pil_font(style.title_font_size, bold=True)
+    header_font = _load_pil_font(style.font_size, bold=True)
     body_font = _load_pil_font(style.font_size)
-    section_font = _load_pil_font(style.section_font_size)
+    section_font = _load_pil_font(style.section_font_size, bold=True)
     # ---- Measurement helpers (use a tiny dummy canvas)
     dummy = Image.new("RGB", (4, 4), "white")
     mdraw = ImageDraw.Draw(dummy)
@@ -333,7 +335,9 @@ def _render_table_png_pil(
             fitted.append(fit_cell(c, body_font, max_w, max_lines=style.max_lines))
         rows_fit.append(("data", fitted))
     # ---- Heights
-    title_w, title_h = _text_bbox(mdraw, title, title_font, spacing=style.line_spacing)
+    # Wrap the title/subtitle to the table width so it never gets clipped.
+    title_fit = _wrap_to_px(mdraw, title, title_font, max_px=table_inner_w)
+    title_w, title_h = _text_bbox(mdraw, title_fit, title_font, spacing=style.line_spacing)
     head_h = 0
     for h in headers_fit:
         _, h_px = _text_bbox(mdraw, h, header_font, spacing=style.line_spacing)
@@ -359,7 +363,7 @@ def _render_table_png_pil(
     # Title
     draw.multiline_text(
         (style.margin, style.margin),
-        title,
+        title_fit,
         fill=style.text_color,
         font=title_font,
         spacing=style.line_spacing,
