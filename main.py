@@ -187,11 +187,14 @@ def main() -> None:
     except Exception:
         image_path = None
 
+    image_only = os.getenv("LINE_IMAGE_ONLY", "1").strip().lower() not in ("0", "false", "no", "off")
+
     if image_path:
+        # Image-only (no caption / no long text) by default.
         result = send_line(
             report,
             image_path=image_path,
-            image_caption=f"🖼 表画像: {os.path.basename(image_path)}",
+            image_caption="",
             image_key=os.path.basename(image_path),
         )
     else:
@@ -207,10 +210,16 @@ def main() -> None:
 
     # If required, fail the run when delivery did not succeed.
     if os.getenv("REQUIRE_LINE_DELIVERY", "0") == "1":
-        if not result.get("text_ok"):
-            raise SystemExit(f"LINE text delivery failed: {result.get('text_detail')}")
-        if image_path and result.get("image_ok") is not True:
-            raise SystemExit(f"LINE image delivery failed: {result.get('image_detail')}")
+        # Image-only mode: require image to be delivered.
+        # (If image is missing or upload failed, fall back to text check.)
+        if image_path:
+            if result.get("image_ok") is not True:
+                raise SystemExit(f"LINE image delivery failed: {result.get('image_detail')}")
+            if not image_only and not result.get("text_ok"):
+                raise SystemExit(f"LINE text delivery failed: {result.get('text_detail')}")
+        else:
+            if not result.get("text_ok"):
+                raise SystemExit(f"LINE text delivery failed: {result.get('text_detail')}")
 
     save_state(state)
 
