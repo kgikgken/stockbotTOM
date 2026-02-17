@@ -719,7 +719,11 @@ def build_report(
         csv_path = os.path.join(outdir, f"report_table_{today_str}.csv")
         new_str = "OK" if (not no_trade) else "NG"
         macro_str = "ON" if macro_on else "OFF"
-        fut_str = f"{futures_change:+.2f}%" if futures_change is not None else "-"
+
+        # NOTE: build_report() receives `futures_chg` (float or None).
+        # A previous refactor accidentally referenced the old variable name
+        # `futures_change`, which caused a NameError on GitHub Actions.
+        fut_str = f"{futures_chg:+.2f}%" if futures_chg is not None else "-"
         title = (
             f"stockbotTOM {today_str} 注文サマリ\n"
             f"新規:{new_str}  地合い:{mkt_score}  先物:{fut_str}  Macro:{macro_str}  週次:{weekly_used}/{weekly_max}  レバ:{leverage:.1f}x"
