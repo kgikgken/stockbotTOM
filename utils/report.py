@@ -746,11 +746,56 @@ def build_report(
             except Exception as e:
                 if note_enabled:
                     lines.append("")
-                    lines.append(f"🗒 注文サマリCSV: 生成失敗（{e}）")
+                    lines.append(f"🗒 注文サマリCSV: 生成失敗（{e}）")            # 画像（PNG/SVG）はスマホ（LINE）で見やすいように列数を減らす
+            # - 区分は「セクション見出し行」として1回だけ表示
+            # - SL/TP1/Risk は1カラムにまとめて改行表示
+            def _pretty_group_label(g: str) -> str:
+                g = (g or "").strip()
+                if g == "狙える":
+                    return "🏆 狙える"
+                if g == "ポジ":
+                    return "📊 ポジション"
+                if g.startswith("ソーサー"):
+                    tf = g.replace("ソーサー", "").strip()
+                    return f"🥣 ソーサー（{tf}）" if tf else "🥣 ソーサー"
+                if g.startswith("見送り"):
+                    return "🚫 見送り"
+                return g
+
+            img_headers = ["#", "銘柄", "注文", "SL/TP1/Risk", "メモ"]
+            img_rows: list[list[str]] = []
+            last_group = None
+            for r in table_rows:
+                if not r:
+                    continue
+
+                group = str(r[0])
+                if group != last_group:
+                    img_rows.append([_pretty_group_label(group)])
+                    last_group = group
+
+                idx = str(r[1]) if len(r) > 1 else ""
+                sym = str(r[2]) if len(r) > 2 else ""
+                order = str(r[3]) if len(r) > 3 else ""
+                sl = str(r[4]) if len(r) > 4 else ""
+                tp1 = str(r[5]) if len(r) > 5 else ""
+                risk = str(r[6]) if len(r) > 6 else ""
+                memo = str(r[7]) if len(r) > 7 else ""
+
+                risk_lines: list[str] = []
+                if sl:
+                    risk_lines.append(f"SL {sl}")
+                if tp1:
+                    risk_lines.append(f"TP1 {tp1}")
+                if risk:
+                    risk_lines.append(f"Risk {risk}")
+                risk_block = "\n".join(risk_lines)
+
+                img_rows.append([idx, sym, order, risk_block, memo])
 
             # SVG first (dependency-free; useful even if PNG fails)
             try:
-                render_table_svg(title, table_headers, table_rows, svg_path, style=TableImageStyle())
+                render_table_svg(title, img_headers, img_rows, svg_path, style=TableImageStyle())
                 if note_enabled:
                     lines.append(f"🧾 表SVG: {svg_path}")
             except Exception as e:
@@ -762,7 +807,7 @@ def build_report(
             # If you want CI to FAIL when PNG cannot be produced, set:
             #   REQUIRE_REPORT_PNG=1
             try:
-                render_table_png(title, table_headers, table_rows, png_path, style=TableImageStyle())
+                render_table_png(title, img_headers, img_rows, png_path, style=TableImageStyle())
                 if note_enabled:
                     lines.append(f"🖼 表画像: {png_path}")
             except Exception as e:
