@@ -42,6 +42,20 @@ def _strip_icons(s: str) -> str:
     return " ".join(s.split())
 
 
+def _symbol_cell(head: str) -> str:
+    """Format the '銘柄' cell for the table image.
+
+    To improve readability in LINE, split ticker and name/tags into 2 lines.
+    Example: "7599.T IDOM [A1/...]" -> "7599.T\nIDOM [A1/...]"
+    """
+    s = _strip_icons(head)
+    if " " in s:
+        a, b = s.split(" ", 1)
+        return f"{a}\n{b}"
+    return s
+
+
+
 def _fmt_oku(yen: float) -> str:
     """Format yen value as Japanese "億" unit (1億=1e8円).
 
@@ -301,7 +315,7 @@ def build_report(
                     [
                         "狙える",
                         str(n),
-                        _strip_icons(head),
+                        _symbol_cell(head),
                         _strip_icons(order_line),
                         sl_txt,
                         tp1_txt,
@@ -349,7 +363,7 @@ def build_report(
                     [
                         "狙える",
                         "-",
-                        _strip_icons(head),
+                        _symbol_cell(head),
                         "見送り",
                         "-",
                         "-",
@@ -516,7 +530,7 @@ def build_report(
                 [
                     "ポジ",
                     "-",
-                    _strip_icons(head),
+                    _symbol_cell(head),
                     _strip_icons(act),
                     sl or "-",
                     tp1 or "-",
@@ -703,7 +717,13 @@ def build_report(
         png_path = os.path.join(outdir, f"report_table_{today_str}.png")
         svg_path = os.path.join(outdir, f"report_table_{today_str}.svg")
         csv_path = os.path.join(outdir, f"report_table_{today_str}.csv")
-        title = f"stockbotTOM {today_str} 注文サマリ"
+        new_str = "OK" if allow_new else "NG"
+        macro_str = "ON" if macro_warn else "OFF"
+        fut_str = f"{futures_change:+.2f}%" if futures_change is not None else "-"
+        title = (
+            f"stockbotTOM {today_str} 注文サマリ\n"
+            f"新規:{new_str}  地合い:{mkt_score}  先物:{fut_str}  Macro:{macro_str}  週次:{weekly_used}/{weekly_max}  レバ:{leverage:.1f}x"
+        )
 
         try:
             from utils.table_image import TableImageStyle, render_table_csv, render_table_png, render_table_svg
