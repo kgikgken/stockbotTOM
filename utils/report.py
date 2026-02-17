@@ -762,7 +762,9 @@ def build_report(
                     return "🚫 見送り"
                 return g
 
-            img_headers = ["#", "銘柄", "注文", "SL/TP1/Risk", "メモ"]
+            # Make the header intentionally multi-line so it doesn't awkwardly auto-wrap
+            # (e.g. "Ri\nsk") on narrow mobile images.
+            img_headers = ["#", "銘柄", "注文", "SL/TP1\nRisk", "メモ"]
             img_rows: list[list[str]] = []
             import re
 
@@ -781,6 +783,22 @@ def build_report(
                 order = str(r[3]) if len(r) > 3 else ""
 
                 # --- Mobile readability tweaks ---
+                # 0) Shorten common annotations (space is limited on mobile).
+                order = (
+                    order.replace("（現値）", "")
+                    .replace("（押し待ち）", "(押)")
+                    .replace("（押し待）", "(押)")
+                )
+
+                # 0.5) Compact "逆指値 Trg ... / 上限 ..." to avoid splitting "Trg" and save space.
+                # Example: "逆指値 Trg 4,935 / 上限 5,003" -> "逆指値\n4,935→5,003"
+                if order.startswith("逆指値") and "Trg" in order:
+                    nums = re.findall(r"\d[\d,]*", order)
+                    if "上限" in order and len(nums) >= 2:
+                        order = f"逆指値\n{nums[0]}→{nums[1]}"
+                    elif len(nums) >= 1:
+                        order = f"逆指値\n{nums[0]}"
+
                 # 1) Avoid awkward mid-number wraps by inserting intentional newlines.
                 m = re.search(r"[0-9]", order)
                 if m and m.start() > 0:
@@ -817,9 +835,9 @@ def build_report(
                 if sl:
                     risk_lines.append(f"SL {sl}")
                 if tp1:
-                    risk_lines.append(f"TP1 {tp1}")
+                    risk_lines.append(f"TP {tp1}")
                 if risk:
-                    risk_lines.append(f"Risk {risk}")
+                    risk_lines.append(f"R {risk}")
                 risk_block = "\n".join(risk_lines)
 
                 img_rows.append([idx, sym, order, risk_block, memo])
