@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from utils.util import download_history_bulk, safe_float, is_abnormal_stock
+from utils.util import download_history_bulk, safe_float, is_abnormal_stock, atr14
 from utils.setup import build_setup_info, liquidity_filters
 from utils.rr_ev import calc_ev, pass_thresholds
 from utils.diversify import apply_sector_cap, apply_corr_filter
@@ -106,6 +106,193 @@ def _weekly_trend_ok(df: pd.DataFrame) -> bool | None:
         return None
     ok = bool((last > m10 > m20) and (m10 >= m10_4))
     return ok
+
+
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float-like environment variable with a safe fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return float(default)
+
+
+def _trend_template_metrics(df: pd.DataFrame) -> Dict[str, float | bool]:
+    """Compute a simple 'trend template' score for momentum/trend screening.
+
+    This is intentionally lightweight (daily OHLCV only) and designed for short-term
+    swing *trend-following* screening. It loosely follows well-known trend-template
+    ideas (MA alignment + rising long MA + proximity to highs).
+
+    Returns keys:
+      - score: 0.0..1.0
+      - ok: bool
+      - dist_52w_high: % distance from 52w high (0=at high)
+      - from_52w_low: % above 52w low
+      - ma50: last MA50
+      - ma200: last MA200
+      - ma200_slope20: % change of MA200 over ~1 month
+      - ma_align: 1 if MA50>MA200 else 0
+    """
+    out: Dict[str, float | bool] = {
+        "score": float("nan"),
+        "ok": False,
+        "dist_52w_high": float("nan"),
+        "from_52w_low": float("nan"),
+        "ma50": float("nan"),
+        "ma200": float("nan"),
+        "ma200_slope20": float("nan"),
+        "ma_align": 0.0,
+    }
+    try:
+        c = df["Close"].astype(float).dropna()
+        if len(c) < 210:
+            return out
+
+        close_last = safe_float(c.iloc[-1], np.nan)
+
+        look = int(min(_env_float("TREND_LOOKBACK_DAYS", 252.0), float(len(c))))
+        if look < 60:
+            return out
+
+        hh = safe_float(c.iloc[-look:].max(), np.nan)
+        ll = safe_float(c.iloc[-look:].min(), np.nan)
+
+        ma50 = safe_float(c.rolling(50).mean().iloc[-1], np.nan)
+        ma200_s = c.rolling(200).mean()
+        ma200 = safe_float(ma200_s.iloc[-1], np.nan)
+        ma200_prev = safe_float(ma200_s.shift(20).iloc[-1], np.nan)
+        ma200_slope20 = float("nan")
+        if np.isfinite(ma200) and np.isfinite(ma200_prev) and ma200_prev > 0:
+            ma200_slope20 = (ma200 / ma200_prev - 1.0) * 100.0
+
+        dist_high = float("nan")
+        from_low = float("nan")
+        if np.isfinite(hh) and hh > 0 and np.isfinite(close_last):
+            dist_high = (hh - close_last) / hh * 100.0
+        if np.isfinite(ll) and ll > 0 and np.isfinite(close_last):
+            from_low = (close_last / ll - 1.0) * 100.0
+
+        close_gt_ma50 = bool(np.isfinite(close_last) and np.isfinite(ma50) and close_last > ma50)
+        close_gt_ma200 = bool(np.isfinite(close_last) and np.isfinite(ma200) and close_last > ma200)
+        ma_align = bool(np.isfinite(ma50) and np.isfinite(ma200) and ma50 > ma200)
+        ma200_up = bool(np.isfinite(ma200_slope20) and ma200_slope20 >= 0.0)
+
+        # Scoring (sum to 1.0)
+        score = 0.0
+        if close_gt_ma50:
+            score += 0.20
+        if close_gt_ma200:
+            score += 0.10
+        if ma_align:
+            score += 0.20
+        if ma200_up:
+            score += 0.20
+
+        max_dist_high = _env_float("TREND_MAX_DIST_52W_HIGH", 25.0)
+        min_from_low = _env_float("TREND_MIN_FROM_52W_LOW", 30.0)
+
+        if np.isfinite(dist_high) and dist_high <= max_dist_high:
+            score += 0.20
+        if np.isfinite(from_low) and from_low >= min_from_low:
+            score += 0.10
+
+        score = float(min(1.0, max(0.0, score)))
+        ok = bool(score >= _env_float("TREND_TEMPLATE_MIN_SCORE", 0.70))
+
+        out.update(
+            {
+                "score": score,
+                "ok": ok,
+                "dist_52w_high": dist_high,
+                "from_52w_low": from_low,
+                "ma50": ma50,
+                "ma200": ma200,
+                "ma200_slope20": ma200_slope20,
+                "ma_align": 1.0 if ma_align else 0.0,
+            }
+        )
+        return out
+    except Exception:
+        return out
+
+
+def _volume_dry_ratio(df: pd.DataFrame, lookback: int = 10) -> float:
+    """Down-volume / Up-volume ratio over the recent window.
+
+    For healthy pullbacks in an uptrend, we generally prefer down-volume <= up-volume.
+    Values > 1.0 can indicate distribution / supply.
+    """
+    try:
+        v = df["Volume"].astype(float)
+        c = df["Close"].astype(float)
+        if len(v) < lookback + 2:
+            return float("nan")
+        v_win = v.iloc[-(lookback + 1):]
+        c_win = c.iloc[-(lookback + 1):]
+        d = c_win.diff()
+        up = v_win[d > 0]
+        dn = v_win[d < 0]
+        if len(up) < 2 or len(dn) < 2:
+            return float("nan")
+        up_m = safe_float(up.mean(), np.nan)
+        dn_m = safe_float(dn.mean(), np.nan)
+        if not (np.isfinite(up_m) and np.isfinite(dn_m)) or up_m <= 0:
+            return float("nan")
+        return float(dn_m / up_m)
+    except Exception:
+        return float("nan")
+
+
+def _gap_atr_metrics(df: pd.DataFrame, lookback: int = 60, atr_mult: float = 1.0) -> Dict[str, float]:
+    """Overnight gap risk using ATR units.
+
+    Computes frequency and max magnitude of |Open - prevClose| in ATR units
+    over the recent window.
+    """
+    out = {"freq": float("nan"), "max": float("nan")}
+    try:
+        if len(df) < lookback + 30:
+            return out
+        o = df["Open"].astype(float)
+        c = df["Close"].astype(float)
+        atr_s = atr14(df).shift(1)  # use yesterday's ATR
+        gap = (o - c.shift(1)).abs()
+        ratio = gap / atr_s.replace(0.0, np.nan)
+        win = ratio.iloc[-lookback:]
+        freq = float((win > float(atr_mult)).mean())
+        mx = safe_float(win.max(), np.nan)
+        out["freq"] = freq
+        out["max"] = mx
+        return out
+    except Exception:
+        return out
+
+
+def _bb_width_ratio(df: pd.DataFrame, lookback: int = 60) -> float:
+    """Bollinger Band width contraction ratio (20d width / median(20d width, lookback)).
+
+    < 1.0 indicates contraction (tight), > 1.0 indicates expansion (loose).
+    """
+    try:
+        c = df["Close"].astype(float)
+        if len(c) < 120:
+            return float("nan")
+        ma20 = c.rolling(20).mean()
+        sd20 = c.rolling(20).std()
+        width = (4.0 * sd20) / ma20.replace(0.0, np.nan)  # (upper-lower)/ma
+        w_last = safe_float(width.iloc[-1], np.nan)
+        w_med = safe_float(width.iloc[-lookback:].median(), np.nan)
+        if not (np.isfinite(w_last) and np.isfinite(w_med)) or w_med <= 0:
+            return float("nan")
+        return float(w_last / w_med)
+    except Exception:
+        return float("nan")
+
 
 
 def _liquidity_grade(
@@ -398,6 +585,73 @@ def run_screen(
         r20 = float(info.ret20) if getattr(info, "ret20", None) is not None else np.nan
         rc = float(info.range_contr) if getattr(info, "range_contr", None) is not None else np.nan
 
+
+        # --- Multi-angle screening metrics (trend template / volatility regime / gap risk / volume dry-up) ---
+        trend_tpl = _trend_template_metrics(df)
+        trend_score = safe_float(trend_tpl.get("score"), np.nan)
+        if not np.isfinite(trend_score):
+            continue
+        dist_52w_high = safe_float(trend_tpl.get("dist_52w_high"), np.nan)
+        from_52w_low = safe_float(trend_tpl.get("from_52w_low"), np.nan)
+
+        bb_ratio = _bb_width_ratio(df, lookback=int(_env_float("BB_RATIO_LOOKBACK", 60.0)))
+
+        vol_dry = _volume_dry_ratio(df, lookback=int(_env_float("VOL_DRY_LOOKBACK", 10.0)))
+
+        gap_atr = _gap_atr_metrics(
+            df,
+            lookback=int(_env_float("GAP_ATR_LOOKBACK", 60.0)),
+            atr_mult=_env_float("GAP_ATR_MULT", 1.0),
+        )
+        gap_atr_freq = safe_float(gap_atr.get("freq"), np.nan)
+        gap_atr_max = safe_float(gap_atr.get("max"), np.nan)
+
+        ext_atr = np.nan
+        try:
+            c_ser = df["Close"].astype(float)
+            ma20_last = safe_float(c_ser.rolling(20).mean().iloc[-1], np.nan)
+            atr_abs = safe_float(atr14(df).iloc[-1], np.nan)
+            close_last = safe_float(c_ser.iloc[-1], np.nan)
+            if np.isfinite(close_last) and np.isfinite(ma20_last) and np.isfinite(atr_abs) and atr_abs > 0:
+                ext_atr = float((close_last - ma20_last) / atr_abs)
+        except Exception:
+            ext_atr = np.nan
+
+        # Simple momentum sanity (helps avoid 'trend setups' inside a longer downtrend)
+        ret60 = np.nan
+        dd60 = np.nan
+        up_ratio20 = np.nan
+        try:
+            c_ser = df["Close"].astype(float)
+            if len(c_ser) >= 61:
+                ret60 = safe_float((c_ser.iloc[-1] / c_ser.iloc[-61] - 1.0) * 100.0, np.nan)
+            sub = c_ser.iloc[-60:]
+            if len(sub) >= 20:
+                peak = sub.cummax()
+                dd60 = safe_float(((sub / peak) - 1.0).min() * 100.0, np.nan)  # negative
+            d = c_ser.diff().iloc[-20:]
+            if len(d) >= 10:
+                up_ratio20 = float((d > 0).mean())
+        except Exception:
+            pass
+
+        # Trend template gate (setup-dependent, market-regime aware)
+        trend_min_a1 = _env_float("TREND_MIN_A1", 0.70)
+        trend_min_a2 = _env_float("TREND_MIN_A2", 0.62)
+        trend_min_b = _env_float("TREND_MIN_B", 0.72)
+        trend_min = trend_min_a1
+        if info.setup == "A2":
+            trend_min = trend_min_a2
+        elif info.setup == "B":
+            trend_min = trend_min_b
+        if mkt_score < _env_float("TREND_WEAK_MKT_SCORE", 65.0):
+            trend_min = min(1.0, trend_min + _env_float("TREND_WEAK_BONUS", 0.05))
+        if np.isfinite(trend_score) and trend_score < trend_min:
+            continue
+        if info.setup in ("A1-Strong", "A1") and np.isfinite(ret60) and ret60 < 0:
+            continue
+
+
         # RS20（TOPIX比）：指数より強いものを上に。
         rs20 = float("nan")
         if np.isfinite(r20) and np.isfinite(topx_ret20):
@@ -416,6 +670,18 @@ def run_screen(
         if np.isfinite(gf) and gf >= 0.20:
             noise_score += 1
         if np.isfinite(rc) and rc >= 1.40:
+            noise_score += 1
+        # ATR-based overnight gap risk (gap in ATR units)
+        if np.isfinite(gap_atr_freq) and gap_atr_freq >= _env_float("GAP_ATR_FREQ_WARN", 0.25):
+            noise_score += 1
+        # Pullback distribution check: down-volume dominance is a red flag
+        if np.isfinite(vol_dry) and vol_dry >= _env_float("VOL_DRY_WARN", 1.35):
+            noise_score += 1
+        # Overextension (chasing risk)
+        if np.isfinite(ext_atr) and ext_atr >= _env_float("EXT_ATR_WARN", 2.8):
+            noise_score += 1
+        # Deep drawdown within the last ~3 months
+        if np.isfinite(dd60) and dd60 <= -20.0:
             noise_score += 1
 
         if noise_score >= NOISE_EXCLUDE_SCORE:
@@ -504,7 +770,42 @@ def run_screen(
             elif amihud_bps100m >= 60.0:
                 quality -= 0.03
 
-        quality = float(np.clip(quality, -0.25, 0.25))
+        # Trend template / regime (already gated; still helps ranking)
+        if np.isfinite(trend_score):
+            quality += (trend_score - 0.70) * 0.08
+
+        # BB width contraction: prefer tightening (ratio < 1)
+        if np.isfinite(bb_ratio):
+            if bb_ratio <= 0.85:
+                quality += 0.02
+            elif bb_ratio >= 1.15:
+                quality -= 0.02
+
+        # Volume dry-up on pullback: prefer down-volume <= up-volume
+        if np.isfinite(vol_dry):
+            if vol_dry <= 0.85:
+                quality += 0.02
+            elif vol_dry >= 1.25:
+                quality -= 0.02
+
+        # ATR-based gap risk penalty (overnight)
+        if np.isfinite(gap_atr_freq) and gap_atr_freq > 0.20:
+            quality -= min(0.03, (gap_atr_freq - 0.20) * 0.15)
+
+        # Overextension penalty (chasing risk)
+        if np.isfinite(ext_atr) and ext_atr > 2.5:
+            quality -= min(0.03, (ext_atr - 2.5) * 0.02)
+
+        # Momentum consistency
+        if np.isfinite(dd60) and dd60 < -15.0:
+            quality -= 0.02
+        if np.isfinite(up_ratio20):
+            if up_ratio20 >= 0.58:
+                quality += 0.01
+            elif up_ratio20 <= 0.42:
+                quality -= 0.01
+
+        quality = float(np.clip(quality, -0.30, 0.30))
 
         # 現値IN判定（運用ルールに沿って“現実的にOK”な条件に限定）
         # - エントリー帯内（微小誤差は許容）
@@ -595,6 +896,17 @@ def run_screen(
                 "range_contr": float(rc) if np.isfinite(rc) else float("nan"),
                 "rs20": float(rs20) if np.isfinite(rs20) else float("nan"),
                 "noise_score": int(noise_score),
+                "trend_score": float(trend_score) if np.isfinite(trend_score) else float("nan"),
+                "dist_52w_high": float(dist_52w_high) if np.isfinite(dist_52w_high) else float("nan"),
+                "from_52w_low": float(from_52w_low) if np.isfinite(from_52w_low) else float("nan"),
+                "bb_ratio": float(bb_ratio) if np.isfinite(bb_ratio) else float("nan"),
+                "vol_dry": float(vol_dry) if np.isfinite(vol_dry) else float("nan"),
+                "gap_atr_freq": float(gap_atr_freq) if np.isfinite(gap_atr_freq) else float("nan"),
+                "gap_atr_max": float(gap_atr_max) if np.isfinite(gap_atr_max) else float("nan"),
+                "ext_atr": float(ext_atr) if np.isfinite(ext_atr) else float("nan"),
+                "ret60": float(ret60) if np.isfinite(ret60) else float("nan"),
+                "dd60": float(dd60) if np.isfinite(dd60) else float("nan"),
+                "up_ratio20": float(up_ratio20) if np.isfinite(up_ratio20) else float("nan"),
                 "ev_r": float(ev.ev_r),
                 "ev_r_day": float(ev.ev_r / max(ev.expected_days, 1e-6)),
                 "score": float(ev.cagr_score + (QUALITY_WEIGHT * quality)),
