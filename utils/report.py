@@ -361,7 +361,7 @@ def build_report(
                 # Table row
                 table_rows.append(
                     [
-                        "狙える",
+                        "見送り",
                         "-",
                         _symbol_cell(head),
                         "見送り",
@@ -762,7 +762,36 @@ def build_report(
                 s = s.replace("指値（帯）", "指値(帯)")
                 return s.strip()
 
-            digit_re = re.compile(r"[0-9]")
+            def _format_order_cell(s: str) -> str:
+                """注文セルをLINE向けに整形。
+
+                - 意味の区切りで改行して、文字の途中で不自然に割れないようにする
+                - stop(逆指値)の "Trg" が "T / rg" に割れるのを抑える
+                - レンジ(〜)は区切りで改行して価格が崩れないようにする
+                """
+
+                s = _shorten_order_text(s)
+                if not s:
+                    return ""
+
+                # Many order strings are concatenated like "指値(押)1,489".
+                # Insert one space before the first digit to keep it readable.
+                s = re.sub(r"([^\s])([0-9])", r"\1 \2", s, count=1)
+
+                # slash 区切りは必ず改行
+                s = s.replace(" / ", "\n")
+
+                # stop注文: "逆指値 Trg 4,253" → "逆指値\nTrg 4,253"
+                s = s.replace("逆指値 Trg", "逆指値\nTrg")
+
+                # レンジ注文: "指値 4,935〜5,003" → "指値\n4,935〜\n5,003"
+                if s.startswith("指値 ") and "〜" in s:
+                    s = s.replace("指値 ", "指値\n", 1)
+                    s = s.replace("〜", "〜\n", 1)
+                elif "〜" in s:
+                    s = s.replace("〜", "〜\n", 1)
+
+                return s.strip()
 
             def _split_symbol_cell(cell: str) -> tuple[str, str]:
                 cell = (cell or "").strip()
@@ -803,6 +832,8 @@ def build_report(
             def _pretty_group_label(g: str) -> str:
                 if g == "狙える":
                     return "☑ 狙える（今日やること）"
+                if g == "見送り":
+                    return "✕ 見送り"
                 if g == "ポジ":
                     return "☑ ポジション"
                 if g.startswith("ソーサー"):
@@ -826,12 +857,7 @@ def build_report(
                     if sym_tags:
                         sym_cell = f"{sym_main}\n{sym_tags}"
 
-                    order_txt = _shorten_order_text(str(r[3]) if len(r) > 3 else "")
-                    # Put price on next line (prevents awkward wraps in narrow columns)
-                    m = digit_re.search(order_txt)
-                    if m:
-                        order_txt = order_txt[: m.start()].rstrip() + "\n" + order_txt[m.start():].lstrip()
-                    order_txt = order_txt.replace(" / ", "\n")
+                    order_txt = _format_order_cell(str(r[3]) if len(r) > 3 else "")
 
                     sl = str(r[4]) if len(r) > 4 else ""
                     tp1 = str(r[5]) if len(r) > 5 else ""
@@ -839,13 +865,18 @@ def build_report(
                     risk_block = _format_risk_block(sl, tp1, risk)
 
                     memo = _strip_icons(str(r[7]) if len(r) > 7 else "")
+                    # Saucer pages: keep status compact (LINE wraps aggressively)
+                    if group.startswith("ソーサー"):
+                        memo = memo.replace("（注文有効）", "")
+                        memo = memo.replace("注文有効", "")
+                        memo = " ".join(memo.split())
 
                     img_rows.append([idx, sym_cell, order_txt, risk_block, memo])
 
                 return img_rows
 
             # Split rows for multi-page PNG
-            rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "ポジ")]
+            rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "見送り", "ポジ")]
             rows_saucer_d = [r for r in table_rows if r and str(r[0]) == "ソーサー（日足）"]
             rows_saucer_w = [r for r in table_rows if r and str(r[0]) == "ソーサー（週足）"]
             rows_saucer_m = [r for r in table_rows if r and str(r[0]) == "ソーサー（月足）"]
@@ -876,7 +907,7 @@ def build_report(
             if rows_orders:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "メモ"]
                 img_rows = _build_img_rows(rows_orders)
-                title_orders = f"stockbotTOM {today_str} 注文サマリ\n{subtitle}"
+                title_orders = f"stockbotTOM {today_str} 注文サマリ"
                 try:
                     # NOTE: `render_table_png` auto-detects risk columns from the header names
                     # (e.g. columns containing "Risk" or "SL/TP" + "R").
@@ -893,7 +924,7 @@ def build_report(
             if rows_saucer_d:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_img_rows(rows_saucer_d)
-                title_d = f"stockbotTOM {today_str} ソーサー（日足）\n{subtitle}"
+                title_d = f"stockbotTOM {today_str} ソーサー（日足）"
                 try:
                     render_table_png(title_d, img_headers, img_rows, png_d, style=style)
                     png_paths.append(png_d)
@@ -906,7 +937,7 @@ def build_report(
             if rows_saucer_w:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_img_rows(rows_saucer_w)
-                title_w = f"stockbotTOM {today_str} ソーサー（週足）\n{subtitle}"
+                title_w = f"stockbotTOM {today_str} ソーサー（週足）"
                 try:
                     render_table_png(title_w, img_headers, img_rows, png_w, style=style)
                     png_paths.append(png_w)
@@ -919,7 +950,7 @@ def build_report(
             if rows_saucer_m:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_img_rows(rows_saucer_m)
-                title_m = f"stockbotTOM {today_str} ソーサー（月足）\n{subtitle}"
+                title_m = f"stockbotTOM {today_str} ソーサー（月足）"
                 try:
                     render_table_png(title_m, img_headers, img_rows, png_m, style=style)
                     png_paths.append(png_m)
