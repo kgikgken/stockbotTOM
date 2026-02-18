@@ -1,19 +1,41 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Iterable, Optional
 
+import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from utils.util import sma, returns, safe_float, clamp
 
-def _fetch_index(symbol: str, period: str = "220d") -> pd.DataFrame:
+# NOTE:
+#  - yfinance does *not* reliably provide "^TOPX" (TOPIX index).
+#  - For Japan, TOPIX ETF tickers (e.g. 1306.T) are far more stable.
+#  - We keep a fallback list to avoid noisy "possibly delisted" warnings.
+
+
+def _parse_csv_env(name: str, default: str) -> list[str]:
+    raw = os.getenv(name, default)
+    xs = [x.strip() for x in str(raw).split(",") if x.strip()]
+    return xs
+
+
+def _fetch_index(symbol: str, period: str = "260d") -> pd.DataFrame:
     try:
         df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
         return df if df is not None else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
+
+
+def _fetch_any(symbols: Iterable[str], period: str = "260d") -> tuple[str, pd.DataFrame]:
+    for sym in symbols:
+        df = _fetch_index(sym, period=period)
+        if df is not None and not df.empty and len(df) >= 60:
+            return sym, df
+    return "", pd.DataFrame()
+
 
 def _ma_structure_score(df: pd.DataFrame) -> float:
     if df is None or df.empty or len(df) < 60:
@@ -35,7 +57,12 @@ def _ma_structure_score(df: pd.DataFrame) -> float:
     elif m20 > m50:
         sc += 3
 
-    slope20 = safe_float(ma20.pct_change(fill_method=None).iloc[-1], 0.0)
+    # slope of MA20 over 5 days (less noisy than 1-day pct_change)
+    if len(ma20) >= 26 and np.isfinite(safe_float(ma20.iloc[-6], np.nan)):
+        slope20 = safe_float(ma20.iloc[-1] / ma20.iloc[-6] - 1.0, 0.0)
+    else:
+        slope20 = safe_float(ma20.pct_change(fill_method=None).iloc[-1], 0.0)
+
     if slope20 >= 0.004:
         sc += 8
     elif slope20 > 0:
@@ -44,6 +71,7 @@ def _ma_structure_score(df: pd.DataFrame) -> float:
         sc += max(0.0, 4 + slope20 * 200)
 
     return float(clamp(sc, 0, 20))
+
 
 def _momentum_score(df: pd.DataFrame) -> float:
     if df is None or df.empty or len(df) < 21:
@@ -55,6 +83,7 @@ def _momentum_score(df: pd.DataFrame) -> float:
     sc += clamp(r5, -6, 6) * 2.0
     sc += clamp(r20, -12, 12) * 1.0
     return float(clamp(sc, -25, 25))
+
 
 def _vol_gap_penalty(df: pd.DataFrame) -> float:
     if df is None or df.empty or len(df) < 30:
@@ -70,16 +99,26 @@ def _vol_gap_penalty(df: pd.DataFrame) -> float:
     pen += clamp((vola - 0.012) * 500.0, 0.0, 10.0)
     return float(-pen)
 
+
 def market_score() -> Dict[str, float]:
-    n225 = _fetch_index("^N225")
-    topx = _fetch_index("^TOPX")
+    # Prefer ETFs for stability. Users can override via env vars.
+    topx_syms = _parse_csv_env("MARKET_TOPX_TICKERS", "1306.T,^TOPX")
+    n225_syms = _parse_csv_env("MARKET_N225_TICKERS", "^N225,1321.T")
+
+    _, n225 = _fetch_any(n225_syms)
+    _, topx = _fetch_any(topx_syms)
 
     base = 50.0
-    base += _ma_structure_score(n225)
-    base += _ma_structure_score(topx)
-    base += _momentum_score(n225) * 0.6
-    base += _momentum_score(topx) * 0.6
-    base += (_vol_gap_penalty(n225) + _vol_gap_penalty(topx)) * 0.7
+
+    # If one index is missing, still compute from the other.
+    if not n225.empty:
+        base += _ma_structure_score(n225)
+        base += _momentum_score(n225) * 0.6
+        base += _vol_gap_penalty(n225) * 0.7
+    if not topx.empty:
+        base += _ma_structure_score(topx)
+        base += _momentum_score(topx) * 0.6
+        base += _vol_gap_penalty(topx) * 0.7
 
     score = int(clamp(round(base), 0, 100))
 
@@ -95,6 +134,7 @@ def market_score() -> Dict[str, float]:
         comment = "かなり弱い"
 
     return {"score": float(score), "comment": comment}
+
 
 def futures_risk_on() -> Tuple[bool, float]:
     try:
