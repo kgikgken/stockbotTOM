@@ -1,6 +1,7 @@
 from __future__ import annotations
 import csv
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -330,6 +331,45 @@ def _render_table_png_pil(
     table_inner_w = sum(col_px)
     # ---- Wrap/truncate text to the *actual* column widths
     headers_fit: list[str] = []
+    # Identify "risk" column indices so we can tint the Risk column (mobile-friendly heatmap).
+    # We intentionally keep this heuristic loose because headers vary a bit between pages.
+    risk_cols: set[int] = set()
+    for j, h in enumerate(headers_s):
+        ht = (h or "").replace("\n", " ").lower()
+        if ("risk" in ht) or (("sl" in ht or "tp" in ht) and ("r" in ht)):
+            risk_cols.add(j)
+
+    _re_risk_range = re.compile(r"\bR\s*([-+]?\d+(?:\.\d+)?)\s*(?:~|〜|–|-|ー)\s*([-+]?\d+(?:\.\d+)?)\s*%")
+    _re_risk_single = re.compile(r"\bR\s*([-+]?\d+(?:\.\d+)?)\s*%")
+
+    def _risk_tint(cell_text: str) -> Optional[str]:
+        s = (cell_text or "").replace(",", "")
+        m = _re_risk_range.search(s)
+        pct: Optional[float] = None
+        if m:
+            try:
+                pct = max(float(m.group(1)), float(m.group(2)))
+            except Exception:
+                pct = None
+        else:
+            m2 = _re_risk_single.search(s)
+            if m2:
+                try:
+                    pct = float(m2.group(1))
+                except Exception:
+                    pct = None
+
+        if pct is None or pct < 0:
+            return None
+
+        # Tune for typical stockbot ranges: 0–3% (low), 3–6% (mid), 6–8% (high), >8% (very high)
+        if pct <= 3.0:
+            return "#ECFDF5"  # green-50
+        if pct <= 6.0:
+            return "#FFFBEB"  # amber-50
+        if pct <= 8.0:
+            return "#FEF2F2"  # red-50
+        return "#FFE4E6"      # red-100
     for j, h in enumerate(headers_s):
         max_w = max(10, col_px[j] - style.pad_x * 2)
         headers_fit.append(fit_cell(h, header_font, max_w, max_lines=2))
@@ -438,6 +478,12 @@ def _render_table_png_pil(
                 align = "right"
             else:
                 align = "left"
+            # Per-cell tint (Risk heatmap)
+            if j in risk_cols:
+                tint = _risk_tint(c)
+                if tint:
+                    draw.rectangle([int(cx), int(y), int(cx + col_px[j]), int(y + rh)], fill=tint)
+
             draw_cell(int(cx), int(y), int(col_px[j]), int(rh), c, body_font, align=align, fill=style.text_color)
             cx += col_px[j]
         data_row_index += 1
@@ -471,6 +517,10 @@ def _render_table_png_pil(
             for x in xs:
                 draw.line([x, y_cursor, x, y_next], fill=style.grid_color, width=style.line_width)
         y_cursor = y_next
+    # Outer border slightly thicker (looks clearer in LINE preview)
+    outer_w = max(style.line_width, 2)
+    draw.rectangle([x0, y0, x1, y0 + table_h], outline=style.grid_color, width=outer_w)
+
     img.save(out_path)
     return out_path
 def _render_table_png_mpl(
