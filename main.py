@@ -12,6 +12,7 @@ preserves the existing contract: `send_line(text: str) -> None`.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pandas as pd
 
@@ -56,42 +57,94 @@ def _resolve_send_line() -> Callable[..., None]:
         import os
         import time
 
+        # When running in image-only mode, `main()` may call send_line("", image_path=...).
+        # In the fallback (text-only) sender, avoid pushing empty messages.
+        if not str(text or "").strip():
+            return {
+                "ok": True,
+                "skipped": True,
+                "status_code": 0,
+                "text": "",
+                "image_ok": False,
+            }
+
         worker_url = os.getenv("WORKER_URL")
         if not worker_url:
             print(text)
-            return
+            return {
+                "ok": True,
+                "status_code": 0,
+                "text": str(text),
+                "image_ok": False,
+            }
 
         try:
             import requests  # local import: keep module import resilient
         except Exception:
             # If requests isn't available, do not fail the run.
             print(text)
-            return
+            return {
+                "ok": True,
+                "status_code": 0,
+                "text": str(text),
+                "image_ok": False,
+            }
 
         chunk_size = 3800
         chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
 
         for ch in chunks:
             last_err = ""
+            last_status = 0
+            last_body = ""
             for attempt in range(3):
                 try:
                     r = requests.post(worker_url, json={"text": ch}, timeout=20)
-                    body = str(getattr(r, "text", ""))[:200]
-                    print("[LINE RESULT]", getattr(r, "status_code", "?"), body)
-                    if 200 <= int(getattr(r, "status_code", 0)) < 300:
+                    last_status = int(getattr(r, "status_code", 0) or 0)
+                    last_body = str(getattr(r, "text", ""))[:200]
+                    print("[LINE RESULT]", last_status, last_body)
+                    if 200 <= last_status < 300:
                         last_err = ""
                         break
-                    last_err = f"HTTP {getattr(r, 'status_code', '?')}: {body}"
+                    last_err = f"HTTP {last_status}: {last_body}"
                 except Exception as e:
                     last_err = repr(e)
                 time.sleep(0.8 * (2**attempt))
             if last_err:
                 print("[LINE ERROR]", last_err)
 
+        ok = not bool(last_err)
+        return {
+            "ok": ok,
+            "status_code": last_status,
+            "text": last_body,
+            "image_ok": False,
+        }
+
     return _fallback
 
 
 send_line = _resolve_send_line()
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    """Parse a boolean-like environment variable.
+
+    Accepts common truthy/falsy strings:
+    - truthy: 1, true, yes, y, on
+    - falsy : 0, false, no, n, off
+    (case-insensitive)
+    """
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    v = str(raw).strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
 
 def main() -> None:
     today_str = jst_today_str()
@@ -185,6 +238,7 @@ def main() -> None:
     #   - report_table_YYYY-MM-DD_w.png : ソーサー（週足）
     #   - report_table_YYYY-MM-DD_m.png : ソーサー（月足）(該当時のみ)
     image_paths: list[str] = []
+    out_dir = os.getenv("REPORT_OUTDIR", "out")
     if _env_truthy("LINE_SEND_IMAGE", True):
         candidates = [
             Path(out_dir) / f"report_table_{today_str}.png",
