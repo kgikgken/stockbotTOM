@@ -878,7 +878,11 @@ def build_report(
                 img_rows = _build_img_rows(rows_orders)
                 title_orders = f"stockbotTOM {today_str} 注文サマリ\n{subtitle}"
                 try:
-                    render_table_png(title_orders, img_headers, img_rows, png_main, style=style, risk_cols=[3])
+                    # NOTE: `render_table_png` auto-detects risk columns from the header names
+                    # (e.g. columns containing "Risk" or "SL/TP" + "R").
+                    # Older drafts passed `risk_cols=...`, but the current `render_table_png`
+                    # implementation does not accept that argument.
+                    render_table_png(title_orders, img_headers, img_rows, png_main, style=style)
                     png_paths.append(png_main)
                 except Exception as e:
                     if note_enabled:
@@ -891,7 +895,7 @@ def build_report(
                 img_rows = _build_img_rows(rows_saucer_d)
                 title_d = f"stockbotTOM {today_str} ソーサー（日足）\n{subtitle}"
                 try:
-                    render_table_png(title_d, img_headers, img_rows, png_d, style=style, risk_cols=[3])
+                    render_table_png(title_d, img_headers, img_rows, png_d, style=style)
                     png_paths.append(png_d)
                 except Exception as e:
                     if note_enabled:
@@ -904,7 +908,7 @@ def build_report(
                 img_rows = _build_img_rows(rows_saucer_w)
                 title_w = f"stockbotTOM {today_str} ソーサー（週足）\n{subtitle}"
                 try:
-                    render_table_png(title_w, img_headers, img_rows, png_w, style=style, risk_cols=[3])
+                    render_table_png(title_w, img_headers, img_rows, png_w, style=style)
                     png_paths.append(png_w)
                 except Exception as e:
                     if note_enabled:
@@ -917,7 +921,7 @@ def build_report(
                 img_rows = _build_img_rows(rows_saucer_m)
                 title_m = f"stockbotTOM {today_str} ソーサー（月足）\n{subtitle}"
                 try:
-                    render_table_png(title_m, img_headers, img_rows, png_m, style=style, risk_cols=[3])
+                    render_table_png(title_m, img_headers, img_rows, png_m, style=style)
                     png_paths.append(png_m)
                 except Exception as e:
                     if note_enabled:
