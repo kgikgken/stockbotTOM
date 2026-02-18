@@ -178,48 +178,70 @@ def main() -> None:
         saucers=meta.get("saucers"),
     )
 
-    # Prefer sending the table image to LINE as well (worker must support multipart upload).
-    image_path: Optional[str] = None
-    try:
-        candidate = f"out/report_table_{today_str}.png"
-        if os.getenv("LINE_SEND_IMAGE", "1") != "0" and os.path.exists(candidate):
-            image_path = candidate
-    except Exception:
-        image_path = None
+    # Prefer sending the table image(s) to LINE as well (worker must support multipart upload).
+    # We may generate multiple pages:
+    #   - report_table_YYYY-MM-DD.png   : 注文（狙える + ポジション）
+    #   - report_table_YYYY-MM-DD_d.png : ソーサー（日足）
+    #   - report_table_YYYY-MM-DD_w.png : ソーサー（週足）
+    #   - report_table_YYYY-MM-DD_m.png : ソーサー（月足）(該当時のみ)
+    image_paths: list[str] = []
+    if _env_truthy("LINE_SEND_IMAGE", True):
+        candidates = [
+            Path(out_dir) / f"report_table_{today_str}.png",
+            Path(out_dir) / f"report_table_{today_str}_d.png",
+            Path(out_dir) / f"report_table_{today_str}_w.png",
+            Path(out_dir) / f"report_table_{today_str}_m.png",
+        ]
+        image_paths = [str(p) for p in candidates if p.exists()]
 
-    image_only = os.getenv("LINE_IMAGE_ONLY", "1").strip().lower() not in ("0", "false", "no", "off")
+    require_delivery = _env_truthy("REQUIRE_LINE_DELIVERY", False)
 
-    if image_path:
-        # Image-only (no caption / no long text) by default.
-        result = send_line(
-            report,
-            image_path=image_path,
-            image_caption="",
-            image_key=os.path.basename(image_path),
-        )
-    else:
-        result = send_line(report)
+    if send_line:
+        try:
+            result: dict = {}
+            if image_paths:
+                # Send the first image with report text as fallback (only used when the image upload fails).
+                first = image_paths[0]
+                result = send_line(
+                    report,
+                    image_path=first,
+                    image_caption="",  # image only (no caption text)
+                    image_key=os.path.basename(first),
+                )
+                others: list[dict] = []
+                for p in image_paths[1:]:
+                    others.append(
+                        send_line(
+                            "",
+                            image_path=p,
+                            image_caption="",  # image only (no caption text)
+                            image_key=os.path.basename(p),
+                        )
+                    )
 
-    # Print delivery status to logs (visible in GitHub Actions).
-    try:
-        print(f"[DELIVERY] text_ok={result.get('text_ok')} detail={result.get('text_detail')}")
-        if result.get("image_ok") is not None:
-            print(f"[DELIVERY] image_ok={result.get('image_ok')} detail={result.get('image_detail')}")
-    except Exception:
-        pass
+                # Aggregate status across pages
+                image_ok_all = bool(result.get("image_ok"))
+                for r in others:
+                    if r.get("image_ok") is False:
+                        image_ok_all = False
+                result["image_ok_all"] = image_ok_all
+            else:
+                # No images → fallback to text
+                result = send_line(report)
 
-    # If required, fail the run when delivery did not succeed.
-    if os.getenv("REQUIRE_LINE_DELIVERY", "0") == "1":
-        # Image-only mode: require image to be delivered.
-        # (If image is missing or upload failed, fall back to text check.)
-        if image_path:
-            if result.get("image_ok") is not True:
-                raise SystemExit(f"LINE image delivery failed: {result.get('image_detail')}")
-            if not image_only and not result.get("text_ok"):
-                raise SystemExit(f"LINE text delivery failed: {result.get('text_detail')}")
-        else:
-            if not result.get("text_ok"):
-                raise SystemExit(f"LINE text delivery failed: {result.get('text_detail')}")
+            print("LINE result:", result)
+
+            if require_delivery:
+                if image_paths:
+                    if not result.get("image_ok_all", False):
+                        raise RuntimeError("LINE delivery failed (one or more images)")
+                else:
+                    if not result.get("text_ok", False):
+                        raise RuntimeError("LINE delivery failed (text)")
+        except Exception as e:
+            print("LINE delivery error:", e)
+            if require_delivery:
+                raise
 
     save_state(state)
 
