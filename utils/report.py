@@ -778,12 +778,6 @@ def build_report(
                     return main, tags
                 return cell, ""
 
-            def _strip_icons(s: str) -> str:
-                if not s:
-                    return ""
-                s = s.replace("✅", "").replace("🟢", "").replace("⚠", "")
-                return " ".join(s.split()).strip()
-
             def _pretty_group_label(g: str) -> str:
                 if g == "狙える":
                     return "☑ 狙える（今日やること）"
