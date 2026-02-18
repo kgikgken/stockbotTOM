@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import numpy as np
 
 
@@ -688,7 +688,7 @@ def build_report(
                     memo_parts.append(now_note.replace("状態：", "").split("/")[0].strip())
                 table_rows.append(
                     [
-                        f"ソーサー{_tf_title(key)}",
+                        f"ソーサー（{_tf_title(key)}）",
                         str(idx),
                         _strip_icons(f"{ticker} {name}{tier_tag}"),
                         _strip_icons(ord_txt),
@@ -714,78 +714,66 @@ def build_report(
     if table_rows and img_enabled:
         outdir = os.getenv("REPORT_OUTDIR", "out")
         os.makedirs(outdir, exist_ok=True)
-        png_path = os.path.join(outdir, f"report_table_{today_str}.png")
-        svg_path = os.path.join(outdir, f"report_table_{today_str}.svg")
-        csv_path = os.path.join(outdir, f"report_table_{today_str}.csv")
+
+        base = os.path.join(outdir, f"report_table_{today_str}")
+        png_main = base + ".png"
+        png_d = base + "_d.png"
+        png_w = base + "_w.png"
+        png_m = base + "_m.png"
+        csv_path = base + ".csv"
+
         new_str = "OK" if (not no_trade) else "NG"
         macro_str = "ON" if macro_on else "OFF"
+        fut_str = f"{futures_chg:+.2f}%" if futures_chg is not None else "--"
 
-        # NOTE: build_report() receives `futures_chg` (float or None).
-        # A previous refactor accidentally referenced the old variable name
-        # `futures_change`, which caused a NameError on GitHub Actions.
-        fut_str = f"{futures_chg:+.2f}%" if futures_chg is not None else "-"
-        title = (
-            f"stockbotTOM {today_str} 注文サマリ\n"
-            f"新規:{new_str}  地合い:{mkt_score}  先物:{fut_str}  Macro:{macro_str}  週次:{weekly_used}/{weekly_max}  レバ:{leverage:.1f}x"
+        subtitle = (
+            f"新規:{new_str}  地合い:{mkt_score}  先物:{fut_str}  Macro:{macro_str}  "
+            f"週次:{weekly_used}/{weekly_max}  レバ:{leverage:.1f}x"
         )
 
         try:
-            from utils.table_image import TableImageStyle, render_table_csv, render_table_png, render_table_svg
+            from utils.table_image import TableImageStyle, render_table_csv, render_table_png
         except Exception as e:
-            # Should be rare; keep it visible.
             if note_enabled:
                 lines.append("")
                 lines.append(f"🖼 表画像: 生成不可（table_image import失敗: {e}）")
         else:
-            # Always export CSV (no heavy dependencies).
+            # CSV is lightweight and always useful for debugging/backtesting.
             try:
-                render_table_csv(title, table_headers, table_rows, csv_path)
+                render_table_csv(f"stockbotTOM {today_str} 注文サマリ", table_headers, table_rows, csv_path)
                 if note_enabled:
                     lines.append("")
                     lines.append(f"🗒 注文サマリCSV: {csv_path}")
             except Exception as e:
                 if note_enabled:
                     lines.append("")
-                    lines.append(f"🗒 注文サマリCSV: 生成失敗（{e}）")            # 画像（PNG/SVG）はスマホ（LINE）で見やすいように列数を減らす
-            # 画像（PNG）はスマホ（LINE）で読みやすいように「重要度ごとに分割」して出力する。
-            # - report_table_YYYY-MM-DD.png        : 注文（狙える + ポジション）
-            # - report_table_YYYY-MM-DD_d.png      : ソーサー（日足）
-            # - report_table_YYYY-MM-DD_w.png      : ソーサー（週足）
-            # - report_table_YYYY-MM-DD_m.png      : ソーサー（月足）(該当時のみ)
+                    lines.append(f"🗒 注文サマリCSV: 生成失敗（{e}）")
+
+            # --- Image rendering (mobile-first) ---
             import re
 
             def _shorten_order_text(s: str) -> str:
-                s = s or ""
-                # Keep meaning but make it compact for mobile.
+                s = (s or "").strip()
                 s = s.replace("成行（現値）", "成行(現)")
                 s = s.replace("成行（現）", "成行(現)")
                 s = s.replace("指値（押し待ち）", "指値(押)")
                 s = s.replace("指値（押）", "指値(押)")
-                s = s.replace("指値（寄り後）", "指値(寄)")
+                s = s.replace("指値（帯内）", "指値(帯)")
+                s = s.replace("指値（帯）", "指値(帯)")
                 return s.strip()
 
             digit_re = re.compile(r"[0-9]")
 
             def _split_symbol_cell(cell: str) -> tuple[str, str]:
+                cell = (cell or "").strip()
                 if not cell:
                     return "", ""
-                cell = str(cell).strip()
-                # Find [...] tag block at end if present
                 m = re.search(r"(\[[^\]]+\])\s*$", cell)
                 if m:
                     tags = m.group(1).strip("[]").strip()
                     main = cell[: m.start()].strip()
                     return main, tags
                 return cell, ""
-
-            def _pretty_group_label(g: str) -> str:
-                if g == "狙える":
-                    return "☑ 狙える（今日やること）"
-                if g == "ポジ":
-                    return "☑ ポジション"
-                if g.startswith("ソーサー"):
-                    return f"☑ {g}"
-                return f"☑ {g}"
 
             def _format_tags(tags: str) -> str:
                 tags = _strip_icons(tags)
@@ -799,26 +787,37 @@ def build_report(
                 sl = (sl or "").strip()
                 tp1 = (tp1 or "").strip()
                 risk = (risk or "").strip()
-                lines_: list[str] = []
-                if sl and tp1:
-                    lines_.append(f"SL {sl}  TP {tp1}")
-                elif sl:
-                    lines_.append(f"SL {sl}")
-                elif tp1:
-                    lines_.append(f"TP {tp1}")
+                out: list[str] = []
+                if sl or tp1:
+                    left = f"SL {sl}" if sl else ""
+                    right = f"TP {tp1}" if tp1 else ""
+                    if left and right:
+                        out.append(f"{left}  {right}")
+                    else:
+                        out.append(left or right)
                 if risk:
-                    lines_.append(f"R {risk}")
-                return "\n".join(lines_)
+                    # Keep '%' so the renderer can tint by risk.
+                    out.append(f"R {risk}")
+                return "\n".join([x for x in out if x])
+
+            def _pretty_group_label(g: str) -> str:
+                if g == "狙える":
+                    return "☑ 狙える（今日やること）"
+                if g == "ポジ":
+                    return "☑ ポジション"
+                if g.startswith("ソーサー"):
+                    return f"☑ {g}"
+                return f"☑ {g}"
 
             def _build_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
-                img_rows_: list[list[str]] = []
-                current_group: Optional[str] = None
+                img_rows: list[list[str]] = []
+                current_group: str | None = None
 
                 for r in rows_src:
                     group = str(r[0]) if r and len(r) > 0 else ""
                     if group != current_group:
                         current_group = group
-                        img_rows_.append([_pretty_group_label(group)])
+                        img_rows.append([_pretty_group_label(group)])
 
                     idx = str(r[1]) if len(r) > 1 else ""
                     sym_main, sym_tags = _split_symbol_cell(str(r[2]) if len(r) > 2 else "")
@@ -839,45 +838,36 @@ def build_report(
                     risk = str(r[6]) if len(r) > 6 else ""
                     risk_block = _format_risk_block(sl, tp1, risk)
 
-                    memo = str(r[7]) if len(r) > 7 else ""
-                    memo = _strip_icons(memo)
+                    memo = _strip_icons(str(r[7]) if len(r) > 7 else "")
 
-                    img_rows_.append([idx, sym_cell, order_txt, risk_block, memo])
+                    img_rows.append([idx, sym_cell, order_txt, risk_block, memo])
 
-                return img_rows_
+                return img_rows
 
-            # --- Split rows for multi-page PNG ---
+            # Split rows for multi-page PNG
             rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "ポジ")]
             rows_saucer_d = [r for r in table_rows if r and str(r[0]) == "ソーサー（日足）"]
             rows_saucer_w = [r for r in table_rows if r and str(r[0]) == "ソーサー（週足）"]
             rows_saucer_m = [r for r in table_rows if r and str(r[0]) == "ソーサー（月足）"]
 
-            new_str = "OK" if allow_new else "NG"
-            mkt_score = str(market_score)
-            fut_str = f"{futures_chg:+.2f}%" if futures_chg is not None else "--"
-            macro_str = "OFF" if not macro_warning else "ON"
-            subtitle = (
-                f"新規:{new_str}  地合い:{mkt_score}  先物:{fut_str}  Macro:{macro_str}  "
-                f"週次:{weekly_new_used}/{weekly_new_max}  レバ:{recom_leverage:.1f}x"
-            )
-
-            common_style = TableImageStyle(
-                engine="pil",
+            style = TableImageStyle(
                 max_total_px=1080,
-                font_size=32,
-                header_font_size=32,
+                max_col_px=520,
+                margin=24,
+                pad_x=16,
+                pad_y=14,
+                font_size=30,
                 title_font_size=42,
                 section_font_size=34,
-                margin=24,
-                cell_padding_x=16,
-                cell_padding_y=14,
-                line_width=1,
-                grid_color="#D1D5DB",
+                line_width=2,
+                line_spacing=4,
                 header_bg="#F3F4F6",
-                zebra_even_bg="#FFFFFF",
-                zebra_odd_bg="#FAFAFA",
-                section_row_bg="#DBEAFE",
+                zebra_bg="#FAFAFA",
+                section_bg="#DBEAFE",
                 text_color="#111827",
+                grid_color="#D1D5DB",
+                wrap_cells=True,
+                max_lines=6,
             )
 
             png_paths: list[str] = []
@@ -886,93 +876,59 @@ def build_report(
             if rows_orders:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "メモ"]
                 img_rows = _build_img_rows(rows_orders)
-
-                common_style.col_width_ratios = {
-                    "#": 0.06,
-                    "銘柄": 0.46,
-                    "注文": 0.22,
-                    "SL/TP\nR": 0.18,
-                    "メモ": 0.08,
-                }
-
                 title_orders = f"stockbotTOM {today_str} 注文サマリ\n{subtitle}"
-                png_path_main = os.path.join(out_dir, f"report_table_{today_str}.png")
                 try:
-                    render_table_png(title_orders, img_headers, img_rows, png_path_main, style=common_style)
-                    png_paths.append(png_path_main)
+                    render_table_png(title_orders, img_headers, img_rows, png_main, style=style, risk_cols=[3])
+                    png_paths.append(png_main)
                 except Exception as e:
-                    lines.append(f"🖼 表画像生成に失敗: {e}")
+                    if note_enabled:
+                        lines.append("")
+                        lines.append(f"🖼 表画像: 生成失敗（{e}）")
 
             # 2) Saucer (daily)
             if rows_saucer_d:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_img_rows(rows_saucer_d)
-
-                style_d = TableImageStyle(**{**common_style.__dict__})
-                style_d.col_width_ratios = {
-                    "#": 0.06,
-                    "銘柄": 0.44,
-                    "注文": 0.26,
-                    "SL/TP\nR": 0.18,
-                    "状態": 0.06,
-                }
-
                 title_d = f"stockbotTOM {today_str} ソーサー（日足）\n{subtitle}"
-                png_path_d = os.path.join(out_dir, f"report_table_{today_str}_d.png")
                 try:
-                    render_table_png(title_d, img_headers, img_rows, png_path_d, style=style_d)
-                    png_paths.append(png_path_d)
+                    render_table_png(title_d, img_headers, img_rows, png_d, style=style, risk_cols=[3])
+                    png_paths.append(png_d)
                 except Exception as e:
-                    lines.append(f"🖼 日足画像生成に失敗: {e}")
+                    if note_enabled:
+                        lines.append("")
+                        lines.append(f"🖼 日足画像: 生成失敗（{e}）")
 
             # 3) Saucer (weekly)
             if rows_saucer_w:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_img_rows(rows_saucer_w)
-
-                style_w = TableImageStyle(**{**common_style.__dict__})
-                style_w.col_width_ratios = {
-                    "#": 0.06,
-                    "銘柄": 0.44,
-                    "注文": 0.26,
-                    "SL/TP\nR": 0.18,
-                    "状態": 0.06,
-                }
-
                 title_w = f"stockbotTOM {today_str} ソーサー（週足）\n{subtitle}"
-                png_path_w = os.path.join(out_dir, f"report_table_{today_str}_w.png")
                 try:
-                    render_table_png(title_w, img_headers, img_rows, png_path_w, style=style_w)
-                    png_paths.append(png_path_w)
+                    render_table_png(title_w, img_headers, img_rows, png_w, style=style, risk_cols=[3])
+                    png_paths.append(png_w)
                 except Exception as e:
-                    lines.append(f"🖼 週足画像生成に失敗: {e}")
+                    if note_enabled:
+                        lines.append("")
+                        lines.append(f"🖼 週足画像: 生成失敗（{e}）")
 
             # 4) Saucer (monthly)
             if rows_saucer_m:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_img_rows(rows_saucer_m)
-
-                style_m = TableImageStyle(**{**common_style.__dict__})
-                style_m.col_width_ratios = {
-                    "#": 0.06,
-                    "銘柄": 0.44,
-                    "注文": 0.26,
-                    "SL/TP\nR": 0.18,
-                    "状態": 0.06,
-                }
-
                 title_m = f"stockbotTOM {today_str} ソーサー（月足）\n{subtitle}"
-                png_path_m = os.path.join(out_dir, f"report_table_{today_str}_m.png")
                 try:
-                    render_table_png(title_m, img_headers, img_rows, png_path_m, style=style_m)
-                    png_paths.append(png_path_m)
+                    render_table_png(title_m, img_headers, img_rows, png_m, style=style, risk_cols=[3])
+                    png_paths.append(png_m)
                 except Exception as e:
-                    lines.append(f"🖼 月足画像生成に失敗: {e}")
+                    if note_enabled:
+                        lines.append("")
+                        lines.append(f"🖼 月足画像: 生成失敗（{e}）")
 
-            # Report lines (artifacts)
-            if png_paths:
+            if png_paths and note_enabled:
+                lines.append("")
                 for p in png_paths:
                     lines.append(f"🖼 表画像: {p}")
+
     # Debug footer (helps confirm which commit/version actually ran in GitHub Actions)
     if _env_truthy("REPORT_DEBUG", default=False):
         try:
