@@ -6,11 +6,20 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from utils.util import download_history_bulk, safe_float, is_abnormal_stock, atr14
+from utils.util import (
+    download_history_bulk,
+    safe_float,
+    is_abnormal_stock,
+    atr14,
+    efficiency_ratio,
+    choppiness_index,
+    adx,
+    clamp,
+)
 from utils.setup import build_setup_info, liquidity_filters
 from utils.rr_ev import calc_ev, pass_thresholds
 from utils.diversify import apply_sector_cap, apply_corr_filter
-from utils.screen_logic import no_trade_conditions, max_display
+from utils.screen_logic import no_trade_conditions, max_display, rs_pct_min_by_market, rs_comp_min_by_market
 from utils.saucer import scan_saucers
 from utils.state import (
     in_cooldown,
@@ -295,6 +304,77 @@ def _bb_width_ratio(df: pd.DataFrame, lookback: int = 60) -> float:
 
 
 
+# --- Additional helpers for higher-precision trend screening ---
+
+def _linreg_slope_r2(series: pd.Series, lookback: int) -> tuple[float, float]:
+    """Linear-regression slope & R^2 on log-price.
+
+    Returns:
+      slope_ret: approximate total return over the window (e.g. 0.05 = +5%)
+      r2: trend "smoothness" (0..1)
+
+    Why:
+      - A positive slope alone is not enough; we also want a reasonably
+        straight trend (higher R^2) to avoid choppy, mean-reverting names.
+    """
+    try:
+        s = series.dropna().astype(float)
+        if len(s) < lookback + 2:
+            return float('nan'), float('nan')
+        y = np.log(s.tail(lookback).values)
+        x = np.arange(len(y), dtype=float)
+        # slope in log space per bar
+        b1, b0 = np.polyfit(x, y, 1)
+        yhat = b1 * x + b0
+        ss_res = float(np.sum((y - yhat) ** 2))
+        ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
+        slope_ret = float(np.expm1(b1 * (len(y) - 1)))
+        return slope_ret, float(clamp(r2, 0.0, 1.0))
+    except Exception:
+        return float('nan'), float('nan')
+
+
+def _up_down_volume_ratio(df: pd.DataFrame, lookback: int = 20) -> float:
+    """Up-volume / down-volume ratio (lookback bars).
+
+    Values > 1.0 suggest accumulation (up days have more volume).
+    """
+    try:
+        if df is None or df.empty or len(df) < lookback + 2:
+            return float('nan')
+        c = df['Close'].astype(float)
+        v = df['Volume'].astype(float)
+        ret = c.diff()
+        win = slice(-lookback, None)
+        up = v[win][ret[win] > 0].sum()
+        dn = v[win][ret[win] < 0].sum()
+        return float(up / (dn + 1e-9))
+    except Exception:
+        return float('nan')
+
+
+def _distribution_days(df: pd.DataFrame, lookback: int = 20) -> int:
+    """Count distribution days (price down with higher-than-average volume).
+
+    This is a classic O'Neil-style concept. We use a simple variant:
+      - Close down vs previous close
+      - Volume > 20d average volume
+    """
+    try:
+        if df is None or df.empty or len(df) < lookback + 2:
+            return 0
+        c = df['Close'].astype(float)
+        v = df['Volume'].astype(float)
+        prev = c.shift(1)
+        vol20 = v.rolling(20).mean()
+        win = slice(-lookback, None)
+        cond = (c[win] < prev[win]) & (v[win] > vol20[win])
+        return int(cond.sum())
+    except Exception:
+        return 0
+
+
 def _liquidity_grade(
     adv20_yen: float,
     mdv20_yen: float,
@@ -425,19 +505,39 @@ def run_screen(
     ohlc_map = download_history_bulk(tickers, period="780d", auto_adjust=True, group_size=200)
 
     # --- Index telemetry (for relative strength / RS)
-    # Keep it lightweight: one index series, 20/60d relative strength.
+    # yfinance is unreliable for ^TOPX, so we prefer stable Japan ETFs.
+    # Default:
+    #   1306.T (TOPIX ETF) -> ^N225 (Nikkei) -> ^TOPX
+    rs_bench_syms = [s.strip() for s in os.getenv("RS_BENCH_TICKERS", "1306.T,^N225,^TOPX").split(",") if s.strip()]
     topx_ret20 = float("nan")
     topx_ret60 = float("nan")
+    topx_ret120 = float("nan")
+    bench_sym = ""
+    bench_df = None
+    bench_close: pd.Series | None = None
+
     try:
-        idx_map = download_history_bulk(["^TOPX"], period="260d", auto_adjust=True, group_size=1)
-        topx = idx_map.get("^TOPX")
-        if topx is not None and not topx.empty and "Close" in topx.columns:
-            topx_ret20 = _ret_n(topx["Close"].astype(float), 20)
-            topx_ret60 = _ret_n(topx["Close"].astype(float), 60)
+        idx_map = download_history_bulk(rs_bench_syms, period="780d", auto_adjust=True, group_size=50)
+        for sym in rs_bench_syms:
+            dfi = idx_map.get(sym)
+            if dfi is not None and (not dfi.empty) and ("Close" in dfi.columns) and len(dfi) >= 140:
+                bench_sym = sym
+                bench_df = dfi
+                break
+        if bench_df is not None and (not bench_df.empty) and ("Close" in bench_df.columns):
+            cidx = bench_df["Close"].astype(float)
+            bench_close = cidx
+            topx_ret20 = _ret_n(cidx, 20)
+            topx_ret60 = _ret_n(cidx, 60)
+            topx_ret120 = _ret_n(cidx, 120)
     except Exception:
-        # if index fetch fails, RS features are simply disabled
+        # If index fetch fails, RS features are simply disabled.
         topx_ret20 = float("nan")
         topx_ret60 = float("nan")
+        topx_ret120 = float("nan")
+        bench_sym = ""
+        bench_df = None
+        bench_close = None
 
     # paper trade update
     update_paper_trades_with_ohlc(state, "tier0_exception", ohlc_map, today_str)
@@ -453,6 +553,10 @@ def run_screen(
 
     cands: List[Dict] = []
     gu_cnt = 0
+
+    # Cross-sectional RS percentile pool (computed after scanning)
+    rs_pool_syms: List[str] = []
+    rs_pool_vals: List[float] = []
 
     for _, row in uni.iterrows():
         ticker = str(row.get(tcol, "")).strip()
@@ -619,12 +723,21 @@ def run_screen(
 
         # Simple momentum sanity (helps avoid 'trend setups' inside a longer downtrend)
         ret60 = np.nan
+        ret120 = np.nan
         dd60 = np.nan
         up_ratio20 = np.nan
+        lr20 = np.nan
+        r2_20 = np.nan
+        lr60 = np.nan
+        r2_60 = np.nan
+        uv_ratio20 = np.nan
+        dist_days20 = 0
         try:
             c_ser = df["Close"].astype(float)
             if len(c_ser) >= 61:
                 ret60 = safe_float((c_ser.iloc[-1] / c_ser.iloc[-61] - 1.0) * 100.0, np.nan)
+            if len(c_ser) >= 121:
+                ret120 = safe_float((c_ser.iloc[-1] / c_ser.iloc[-121] - 1.0) * 100.0, np.nan)
             sub = c_ser.iloc[-60:]
             if len(sub) >= 20:
                 peak = sub.cummax()
@@ -632,8 +745,41 @@ def run_screen(
             d = c_ser.diff().iloc[-20:]
             if len(d) >= 10:
                 up_ratio20 = float((d > 0).mean())
+
+            # Trend smoothness (regression)
+            lr20, r2_20 = _linreg_slope_r2(c_ser, 20)
+            lr60, r2_60 = _linreg_slope_r2(c_ser, 60)
+
+            # Volume pattern (accumulation / distribution)
+            uv_ratio20 = _up_down_volume_ratio(df, 20)
+            dist_days20 = _distribution_days(df, 20)
         except Exception:
             pass
+
+        # --- Trend smoothness / strength (orthogonal information) -------------
+        er60 = safe_float(efficiency_ratio(df["Close"], 60), np.nan)
+        chop14 = safe_float(choppiness_index(df, 14), np.nan)
+        adx14v = safe_float(adx(df, 14), np.nan)
+
+        # --- RS Line (stock / benchmark): slope + proximity to 60D high --------
+        rs_line_pos60 = np.nan  # 1.0 = RS line at 60D high
+        rs_line_slope20 = np.nan  # % change in 20D
+        try:
+            if bench_close is not None:
+                b = bench_close.reindex(df.index).astype(float)
+                s = df["Close"].astype(float)
+                ratio = (s / (b.replace(0.0, np.nan))).dropna()
+                if len(ratio) >= 21:
+                    rs_line_slope20 = safe_float((ratio.iloc[-1] / ratio.iloc[-21] - 1.0) * 100.0, np.nan)
+                if len(ratio) >= 60:
+                    hi = float(ratio.iloc[-60:].max())
+                else:
+                    hi = float(ratio.max()) if len(ratio) else np.nan
+                if np.isfinite(hi) and hi > 0 and len(ratio):
+                    rs_line_pos60 = safe_float(float(ratio.iloc[-1]) / hi, np.nan)
+        except Exception:
+            rs_line_pos60 = np.nan
+            rs_line_slope20 = np.nan
 
         # Trend template gate (setup-dependent, market-regime aware)
         trend_min_a1 = _env_float("TREND_MIN_A1", 0.70)
@@ -651,13 +797,44 @@ def run_screen(
         if info.setup in ("A1-Strong", "A1") and np.isfinite(ret60) and ret60 < 0:
             continue
 
+        # Relative Strength: composite (20/60/120) vs benchmark.
+        # If benchmark is unavailable, fall back to absolute returns.
+        b20 = float(topx_ret20) if np.isfinite(topx_ret20) else 0.0
+        b60 = float(topx_ret60) if np.isfinite(topx_ret60) else 0.0
+        b120 = float(topx_ret120) if np.isfinite(topx_ret120) else 0.0
 
-        # RS20（TOPIX比）：指数より強いものを上に。
         rs20 = float("nan")
-        if np.isfinite(r20) and np.isfinite(topx_ret20):
-            rs20 = float(r20 - float(topx_ret20))
-            if rs20 <= RS20_EXCLUDE:
-                continue
+        rs60 = float("nan")
+        rs120 = float("nan")
+        rs_comp = float("nan")
+
+        if np.isfinite(r20):
+            rs20 = float(r20 - b20)
+        if np.isfinite(ret60):
+            rs60 = float(ret60 - b60)
+        if np.isfinite(ret120):
+            rs120 = float(ret120 - b120)
+
+        parts = []
+        if np.isfinite(rs20):
+            parts.append((0.50, rs20))
+        if np.isfinite(rs60):
+            parts.append((0.30, rs60))
+        if np.isfinite(rs120):
+            parts.append((0.20, rs120))
+        if parts:
+            wsum = sum(w for w, _ in parts)
+            rs_comp = float(sum(w * v for w, v in parts) / (wsum or 1.0))
+
+        # Hard exclude on weak RS composite (regime adaptive)
+        rs_comp_min = float(rs_comp_min_by_market(mkt_score))
+        if np.isfinite(rs_comp) and (rs_comp < rs_comp_min):
+            continue
+
+        # Add to cross-sectional pool (for percentile ranking later)
+        if np.isfinite(rs_comp):
+            rs_pool_syms.append(ticker)
+            rs_pool_vals.append(rs_comp)
 
         # ノイズスコア（イベント起因・滑り地雷の検知）
         #  - 出来高拡大 + ギャップ多発 + ボラ拡大 は「狙える形」(押し目)の期待値を大きく毀損しやすい
@@ -682,6 +859,22 @@ def run_screen(
             noise_score += 1
         # Deep drawdown within the last ~3 months
         if np.isfinite(dd60) and dd60 <= -20.0:
+            noise_score += 1
+
+        # Choppy trend / distribution pressure
+        if np.isfinite(r2_60) and (r2_60 <= _env_float("R2_60_WARN", 0.18)):
+            noise_score += 1
+        if np.isfinite(uv_ratio20) and (uv_ratio20 <= _env_float("UPDN_VOL_WARN", 0.85)):
+            noise_score += 1
+        if int(dist_days20) >= int(os.getenv("DIST_DAYS_WARN", "4")):
+            noise_score += 1
+
+        # Smoothness / chop / trend-strength filters (orthogonal to MA template)
+        if np.isfinite(er60) and (er60 <= _env_float("ER60_WARN", 0.20)):
+            noise_score += 1
+        if np.isfinite(chop14) and (chop14 >= _env_float("CHOP14_WARN", 62.0)):
+            noise_score += 1
+        if np.isfinite(adx14v) and (adx14v <= _env_float("ADX14_WARN", 14.0)):
             noise_score += 1
 
         if noise_score >= NOISE_EXCLUDE_SCORE:
@@ -736,17 +929,64 @@ def run_screen(
         elif band_dist_pct >= 3.0:
             quality -= 0.02
 
-        # RS20（TOPIX比）: 「指数に勝つ」銘柄を優先
-        #  - r20 だけだと相場全体が上げている局面で見誤るので、相対で補正
-        if np.isfinite(rs20):
-            if rs20 >= 10.0:
+        # Relative Strength (composite): prefer leaders.
+        if np.isfinite(rs_comp):
+            if rs_comp >= 10.0:
                 quality += 0.05
-            elif rs20 >= 6.0:
+            elif rs_comp >= 6.0:
                 quality += 0.04
-            elif rs20 >= 2.0:
+            elif rs_comp >= 2.0:
                 quality += 0.02
-            elif rs20 <= -4.0:
+            elif rs_comp <= -4.0:
                 quality -= 0.05
+
+        # Trend smoothness / accumulation proxies
+        if np.isfinite(r2_60):
+            if r2_60 >= 0.45:
+                quality += 0.02
+            elif r2_60 <= 0.20:
+                quality -= 0.02
+        if np.isfinite(uv_ratio20):
+            if uv_ratio20 >= 1.25:
+                quality += 0.02
+            elif uv_ratio20 <= 0.80:
+                quality -= 0.02
+        if int(dist_days20) >= 4:
+            quality -= 0.02
+
+        # --- Smoothness / CHOP / ADX (clean trend preference) -----------------
+        if np.isfinite(er60):
+            if er60 >= 0.45:
+                quality += 0.03
+            elif er60 >= 0.35:
+                quality += 0.02
+            elif er60 <= 0.20:
+                quality -= 0.03
+
+        if np.isfinite(chop14):
+            if chop14 <= 45.0:
+                quality += 0.03
+            elif chop14 >= 62.0:
+                quality -= 0.03
+
+        if np.isfinite(adx14v):
+            if adx14v >= 25.0:
+                quality += 0.02
+            elif adx14v <= 14.0:
+                quality -= 0.02
+
+        # --- RS line: prefer leaders whose RS is at/near highs ----------------
+        if np.isfinite(rs_line_pos60):
+            if rs_line_pos60 >= 0.985:
+                quality += 0.03
+            elif rs_line_pos60 <= 0.92:
+                quality -= 0.02
+
+        if np.isfinite(rs_line_slope20):
+            if rs_line_slope20 >= 3.0:
+                quality += 0.02
+            elif rs_line_slope20 <= -2.0:
+                quality -= 0.02
 
         # 週足整合（Trueなら加点。Falseはsetup次第で軽い減点）
         if weekly_ok is True:
@@ -895,6 +1135,22 @@ def run_screen(
                 "ret20": float(r20) if np.isfinite(r20) else float("nan"),
                 "range_contr": float(rc) if np.isfinite(rc) else float("nan"),
                 "rs20": float(rs20) if np.isfinite(rs20) else float("nan"),
+                "rs60": float(rs60) if np.isfinite(rs60) else float("nan"),
+                "rs120": float(rs120) if np.isfinite(rs120) else float("nan"),
+                "rs_comp": float(rs_comp) if np.isfinite(rs_comp) else float("nan"),
+                "rs_pct": float("nan"),
+                "ret120": float(ret120) if np.isfinite(ret120) else float("nan"),
+                "lr20": float(lr20) if np.isfinite(lr20) else float("nan"),
+                "r2_20": float(r2_20) if np.isfinite(r2_20) else float("nan"),
+                "lr60": float(lr60) if np.isfinite(lr60) else float("nan"),
+                "r2_60": float(r2_60) if np.isfinite(r2_60) else float("nan"),
+                "er60": float(er60) if np.isfinite(er60) else float("nan"),
+                "chop14": float(chop14) if np.isfinite(chop14) else float("nan"),
+                "adx14": float(adx14v) if np.isfinite(adx14v) else float("nan"),
+                "rs_line_pos60": float(rs_line_pos60) if np.isfinite(rs_line_pos60) else float("nan"),
+                "rs_line_slope20": float(rs_line_slope20) if np.isfinite(rs_line_slope20) else float("nan"),
+                "uv_ratio20": float(uv_ratio20) if np.isfinite(uv_ratio20) else float("nan"),
+                "dist_days20": int(dist_days20),
                 "noise_score": int(noise_score),
                 "trend_score": float(trend_score) if np.isfinite(trend_score) else float("nan"),
                 "dist_52w_high": float(dist_52w_high) if np.isfinite(dist_52w_high) else float("nan"),
@@ -941,6 +1197,79 @@ def run_screen(
         ),
         reverse=True,
     )
+    # ------------------------------------------------------------------
+    # Cross-sectional RS percentile (leaders-only bias)
+    # ------------------------------------------------------------------
+    rs_pct_map: Dict[str, float] = {}
+    if len(rs_pool_vals) >= 20:
+        try:
+            arr = np.asarray(rs_pool_vals, dtype=float)
+            order = np.argsort(arr)
+            ranks = np.empty_like(order)
+            ranks[order] = np.arange(len(arr))
+            denom = float(max(1, len(arr) - 1))
+            for sym, rk in zip(rs_pool_syms, ranks):
+                rs_pct_map[sym] = float(rk) / denom * 100.0
+        except Exception:
+            rs_pct_map = {}
+
+    rs_pct_floor = int(os.getenv("RS_PCT_MIN", str(rs_pct_min_by_market(mkt_score))))
+    rs_pct_breakout_bonus = int(os.getenv("RS_PCT_BREAKOUT_BONUS", "5"))
+    rs_pct_score_w = float(os.getenv("RS_PCT_SCORE_W", "0.10"))
+
+    if rs_pct_map:
+        filtered: List[Dict] = []
+        for cand in cands:
+            sym = cand.get("ticker", "")
+            pct = rs_pct_map.get(sym)
+            if pct is not None:
+                cand["rs_pct"] = round(float(pct), 1)
+
+            # RS-effective: add a small bonus/penalty from RS-line behavior
+            rs_eff = float(pct) if pct is not None else 50.0
+            try:
+                rs_pos = cand.get("rs_line_pos60")
+                if rs_pos is not None:
+                    rs_pos_f = float(rs_pos)
+                    if np.isfinite(rs_pos_f):
+                        if rs_pos_f >= 0.985:
+                            rs_eff += 3.0
+                        elif rs_pos_f >= 0.970:
+                            rs_eff += 2.0
+                        elif rs_pos_f <= 0.920:
+                            rs_eff -= 2.0
+                rs_sl = cand.get("rs_line_slope20")
+                if rs_sl is not None:
+                    rs_sl_f = float(rs_sl)
+                    if np.isfinite(rs_sl_f):
+                        if rs_sl_f >= 3.0:
+                            rs_eff += 1.0
+                        elif rs_sl_f <= -2.0:
+                            rs_eff -= 1.0
+            except Exception:
+                pass
+            rs_eff = max(1.0, min(99.0, rs_eff))
+            cand["rs_eff"] = round(float(rs_eff), 1)
+
+            # Required percentile depends on setup.
+            req = rs_pct_floor
+            if cand.get("setup") == "B":
+                req += rs_pct_breakout_bonus
+
+            # Positions are informational; don't drop them here.
+            if cand.get("rowtype") == "POS":
+                filtered.append(cand)
+                continue
+
+            if float(rs_eff) < req:
+                continue
+
+            # Add small leader-bias into final score
+            cand["score"] = float(cand.get("score", 0.0)) + rs_pct_score_w * ((float(rs_eff) - 50.0) / 50.0)
+
+            filtered.append(cand)
+        cands = filtered
+
     raw_n = len(cands)
 
     # diversify
