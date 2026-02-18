@@ -170,6 +170,105 @@ def atr_pct_last(df: pd.DataFrame) -> float:
         return np.nan
     return safe_float((a.iloc[-1] / (c.iloc[-1] + 1e-9)) * 100.0, np.nan)
 
+
+def efficiency_ratio(close: pd.Series, window: int = 60) -> float:
+    """Kaufman Efficiency Ratio (ER).
+
+    ER = |close(t) - close(t-window)| / sum(|diff(close)|)
+
+    Range: [0, 1]
+      - 1.0: straight / efficient trend
+      - 0.0: choppy / mean-reverting
+    """
+    try:
+        c = pd.Series(close).astype(float)
+    except Exception:
+        return float("nan")
+
+    if c is None or len(c) < window + 1:
+        return float("nan")
+
+    seg = c.iloc[-(window + 1):]
+    net = float(abs(seg.iloc[-1] - seg.iloc[0]))
+    denom = float(seg.diff().abs().sum())
+    if denom <= 0:
+        return 0.0
+    return float(net / denom)
+
+
+def choppiness_index(df: pd.DataFrame, window: int = 14) -> float:
+    """Choppiness Index (CHOP).
+
+    Higher -> choppy / ranging. Lower -> trending.
+    """
+    try:
+        if df is None or len(df) < window + 1:
+            return float("nan")
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [
+                (high - low).abs(),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+
+        tr_sum = tr.rolling(window).sum()
+        hh = high.rolling(window).max()
+        ll = low.rolling(window).min()
+        rng = (hh - ll).replace(0, np.nan)
+
+        x = (tr_sum / rng).replace([np.inf, -np.inf], np.nan)
+        chop = 100.0 * np.log10(x) / np.log10(float(window))
+        return float(chop.iloc[-1])
+    except Exception:
+        return float("nan")
+
+
+def adx(df: pd.DataFrame, window: int = 14) -> float:
+    """Average Directional Index (ADX)."""
+    try:
+        if df is None or len(df) < window * 2 + 2:
+            return float("nan")
+
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = pd.Series(plus_dm, index=df.index)
+        minus_dm = pd.Series(minus_dm, index=df.index)
+
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [
+                (high - low).abs(),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+
+        alpha = 1.0 / float(window)
+        atr = tr.ewm(alpha=alpha, adjust=False).mean()
+        plus_di = 100.0 * plus_dm.ewm(alpha=alpha, adjust=False).mean() / (atr + 1e-9)
+        minus_di = 100.0 * minus_dm.ewm(alpha=alpha, adjust=False).mean() / (atr + 1e-9)
+
+        dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+        adx_s = dx.ewm(alpha=alpha, adjust=False).mean()
+        return float(adx_s.iloc[-1])
+    except Exception:
+        return float("nan")
+
 def returns(df: pd.DataFrame) -> pd.Series:
     c = df["Close"].astype(float)
     return c.pct_change(fill_method=None)
