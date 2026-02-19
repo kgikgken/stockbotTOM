@@ -150,15 +150,18 @@ def build_report(
                 return float((entry_p - sl_p) / entry_p * 100.0)
             return float("nan")
 
-        def _risk_txt_for_entries(entry_a: float, entry_b: float, sl_p: float) -> str:
-            """Format risk for 1 or 2 ladder entries.
+        def _risk_txt_for_entries(entries: List[float], sl_p: float) -> str:
+            """Format risk for ladder entries.
 
-            - If both entries are valid, returns a range like "1.8〜2.4%".
-            - If only one is valid, returns a single value like "2.1%".
+            - N>=2: returns a range like "1.8〜2.4%".
+            - N==1: returns a single value like "2.1%".
             """
-            ra = _risk_mid(entry_a, sl_p)
-            rb = _risk_mid(entry_b, sl_p)
-            vals = [v for v in (ra, rb) if np.isfinite(v)]
+
+            vals: List[float] = []
+            for e in entries:
+                r = _risk_mid(float(e), sl_p)
+                if np.isfinite(r):
+                    vals.append(float(r))
             if not vals:
                 return "-"
             if len(vals) == 1:
@@ -264,33 +267,58 @@ def build_report(
                     (
                         idx,
                         f"🟢 {ticker} {name}{tag_txt}",
-                        f"成行（現値）{_fmt_yen(close_last)}",
+                        f"成行（寄り後）{_fmt_yen(close_last)}",
                         f"SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
                     )
                 )
                 continue
 
             if above_band and entry_price > 0 and close_last > 0 and entry_price < close_last:
-                # Two-tier pullback limit to improve fill-rate (浅押し/深押し).
-                # Upper: zone high (shallower), Lower: zone low (deeper).
-                hi_p = entry_high if entry_high > 0 else entry_price
-                lo_p = entry_low if entry_low > 0 else entry_price
-                if hi_p > 0 and lo_p > 0:
-                    hi_p, lo_p = (max(hi_p, lo_p), min(hi_p, lo_p))
+                # Pullback limit ladder to improve fill-rate.
+                # Default: 3-step ladder (上→中→下) within the pullback band.
+                levels_raw: List[float] = []
+                if entry_high > 0:
+                    levels_raw.append(entry_high)
+                if entry_price > 0:
+                    levels_raw.append(entry_price)
+                if entry_low > 0:
+                    levels_raw.append(entry_low)
 
-                use_ladder = bool(
-                    hi_p > 0
-                    and lo_p > 0
-                    and (hi_p / lo_p - 1.0) >= 0.002  # 0.2% 以上差があるときだけ 2段表示
-                )
+                # Normalize order: shallow(high) -> deep(low)
+                levels_raw = [float(x) for x in levels_raw if np.isfinite(x) and x > 0]
+                levels_raw = sorted(levels_raw, reverse=True)
 
-                if use_ladder:
-                    order_line = f"指値（押し待ち） 上 {_fmt_yen(hi_p)} / 下 {_fmt_yen(lo_p)}"
-                    risk_txt = _risk_txt_for_entries(hi_p, lo_p, sl)
+                # De-duplicate (prices are tick-rounded; int round is safe)
+                uniq: List[float] = []
+                for lv in levels_raw:
+                    if not uniq:
+                        uniq.append(lv)
+                    else:
+                        if int(round(lv)) != int(round(uniq[-1])):
+                            uniq.append(lv)
+
+                # Risk-cap filter (max 8%)
+                levels: List[float] = []
+                for lv in uniq:
+                    r = _risk_mid(lv, sl)
+                    if np.isfinite(r) and r <= 8.0 + 1e-6:
+                        levels.append(lv)
+
+                if not levels:
+                    # Fallback
+                    levels = [entry_price]
+
+                # Decide ladder display
+                if len(levels) >= 3 and (levels[0] / levels[-1] - 1.0) >= 0.002:
+                    order_line = (
+                        f"指値（押し待ち3段）浅 {_fmt_yen(levels[0])} / 中 {_fmt_yen(levels[1])} / 深 {_fmt_yen(levels[2])}"
+                    )
+                elif len(levels) >= 2 and (levels[0] / levels[-1] - 1.0) >= 0.002:
+                    order_line = f"指値（押し待ち2段）浅 {_fmt_yen(levels[0])} / 深 {_fmt_yen(levels[-1])}"
                 else:
-                    order_line = f"指値（押し待ち）{_fmt_yen(entry_price)}"
-                    r_mid = _risk_mid(entry_price, sl)
-                    risk_txt = f"{r_mid:.1f}%" if np.isfinite(r_mid) else "-"
+                    order_line = f"指値（押し待ち）{_fmt_yen(levels[0])}"
+
+                risk_txt = _risk_txt_for_entries(levels, sl)
 
                 order_items.append(
                     (
@@ -304,26 +332,20 @@ def build_report(
 
             if in_band and entry_price > 0 and close_last > 0:
                 if entry_price <= close_last:
-                    # In-zone: ladder within the pullback zone.
-                    # Upper: zone high (shallow), Lower: zone low (deep).
-                    hi_p = entry_high if entry_high > 0 else entry_price
-                    lo_p = entry_low if entry_low > 0 else entry_price
-                    if hi_p > 0 and lo_p > 0:
-                        hi_p, lo_p = (max(hi_p, lo_p), min(hi_p, lo_p))
+                    # In-zone: avoid limit above market.
+                    # Use 2-step ladder: mid(entry_price) -> deep(entry_low).
+                    levels: List[float] = [float(entry_price)]
+                    if entry_low > 0 and np.isfinite(entry_low) and entry_low < entry_price:
+                        # Risk-cap filter
+                        r_deep = _risk_mid(entry_low, sl)
+                        if np.isfinite(r_deep) and r_deep <= 8.0 + 1e-6:
+                            levels.append(float(entry_low))
 
-                    use_ladder = bool(
-                        hi_p > 0
-                        and lo_p > 0
-                        and (hi_p / lo_p - 1.0) >= 0.002
-                    )
-
-                    if use_ladder:
-                        order_line = f"指値（帯内） 上 {_fmt_yen(hi_p)} / 下 {_fmt_yen(lo_p)}"
-                        risk_txt = _risk_txt_for_entries(hi_p, lo_p, sl)
+                    if len(levels) >= 2 and (levels[0] / levels[1] - 1.0) >= 0.002:
+                        order_line = f"指値（帯内2段）中 {_fmt_yen(levels[0])} / 深 {_fmt_yen(levels[1])}"
                     else:
-                        order_line = f"指値（帯内）{_fmt_yen(entry_price)}"
-                        r_mid = _risk_mid(entry_price, sl)
-                        risk_txt = f"{r_mid:.1f}%" if np.isfinite(r_mid) else "-"
+                        order_line = f"指値（帯内）{_fmt_yen(levels[0])}"
+                    risk_txt = _risk_txt_for_entries(levels, sl)
 
                     order_items.append(
                         (
@@ -344,7 +366,51 @@ def build_report(
                 continue
 
             if below_band:
-                watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt}", "監視（戻り待ち：帯まで距離あり）"))
+                # Price is *below* the pullback band.
+                # Instead of just "watch", we can propose a *re-entry buy stop* at the band low,
+                # so you don't miss it when it snaps back into the zone.
+                dist_to_band = float("nan")
+                if close_last > 0 and entry_low > 0:
+                    dist_to_band = (entry_low / close_last - 1.0) * 100.0
+
+                reentry_max = safe_float(os.getenv("TREND_REENTRY_STOP_MAX_DIST_PCT"), 2.5)
+                reentry_ok = (
+                    np.isfinite(dist_to_band)
+                    and (dist_to_band <= reentry_max)
+                    and (entry_low > 0)
+                    and (entry_high > 0)
+                    and (sl > 0)
+                )
+
+                if reentry_ok:
+                    r_low = _risk_mid(entry_low, sl)
+                    r_high = _risk_mid(entry_high, sl)
+                    if np.isfinite(r_low) and np.isfinite(r_high):
+                        r_lo, r_hi = sorted([r_low, r_high])
+                        if r_hi <= 8.0 + 1e-9:
+                            risk_txt = (
+                                f"{r_lo:.1f}〜{r_hi:.1f}%" if abs(r_hi - r_lo) >= 0.15 else f"{r_hi:.1f}%"
+                            )
+                            order_items.append(
+                                (
+                                    idx,
+                                    f"🟢 {ticker} {name}{tag_txt}",
+                                    f"逆指値（戻り） Trg {_fmt_yen(entry_low)} / 上限 {_fmt_yen(entry_high)}",
+                                    f"SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
+                                )
+                            )
+                        else:
+                            watch_items.append(
+                                (
+                                    idx,
+                                    f"🟡 {ticker} {name}{tag_txt}",
+                                    f"監視（帯下）距離+{dist_to_band:.1f}% / Risk {r_hi:.1f}%",
+                                )
+                            )
+                    else:
+                        watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt}", "監視（戻り待ち：帯まで距離あり）"))
+                else:
+                    watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt}", "監視（戻り待ち：帯まで距離あり）"))
                 continue
 
             watch_items.append((idx, f"🟡 {ticker} {name}{tag_txt}", "監視"))
@@ -814,8 +880,12 @@ def build_report(
                 s = (s or "").strip()
                 s = s.replace("成行（現値）", "成行(現)")
                 s = s.replace("成行（現）", "成行(現)")
+                s = s.replace("成行（寄り後）", "成行(寄)")
+                s = s.replace("指値（押し待ち3段）", "指値(押)")
+                s = s.replace("指値（押し待ち2段）", "指値(押)")
                 s = s.replace("指値（押し待ち）", "指値(押)")
                 s = s.replace("指値（押）", "指値(押)")
+                s = s.replace("指値（帯内2段）", "指値(帯)")
                 s = s.replace("指値（帯内）", "指値(帯)")
                 s = s.replace("指値（帯）", "指値(帯)")
                 return s.strip()
@@ -836,6 +906,7 @@ def build_report(
                 s = s.replace(" / ", "\n")
 
                 # stop注文: "逆指値 Trg 4,253" → "逆指値\nTrg\n4,253"
+                s = s.replace("逆指値(戻) Trg", "逆指値(戻)\nTrg")
                 s = s.replace("逆指値 Trg", "逆指値\nTrg")
                 s = re.sub(r"\bTrg\s*([0-9,]+)", r"Trg\n\1", s)
                 s = re.sub(r"\b上限\s*([0-9,]+)", r"上限\n\1", s)
@@ -850,7 +921,7 @@ def build_report(
 
                 # Order-type と価格は必ず改行して、数値が途中で割れないようにする。
                 # 例: "成行(現) 1,506" -> "成行(現)\n1,506"
-                s = re.sub(r"^(成行\(現\)|指値\(押\)|指値\(帯\)|指値)\s*", r"\1\n", s)
+                s = re.sub(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*", r"\1\n", s)
 
                 # Many order strings are concatenated like "指値(押)1,489".
                 # If the above rule didn't trigger, insert a single newline before the first digit.
@@ -876,7 +947,23 @@ def build_report(
                     return ""
                 tags = tags.replace("・", "/")
                 parts = [p.strip() for p in tags.split("/") if p.strip()]
-                return " | ".join(parts)
+
+                short: list[str] = []
+                for p in parts:
+                    # Compact tags for mobile (reduce column width; prevents awkward line breaks)
+                    if p == "A1-Strong":
+                        p = "A1S"
+                    elif p == "週足OK":
+                        p = "週OK"
+                    elif p == "週足NG":
+                        p = "週NG"
+                    elif p == "板厚◎":
+                        p = "厚◎"
+                    elif p == "板厚○":
+                        p = "厚○"
+                    short.append(p)
+
+                return "/".join(short)
 
             def _format_risk_block(sl: str, tp1: str, risk: str) -> str:
                 sl = (sl or "").strip()
