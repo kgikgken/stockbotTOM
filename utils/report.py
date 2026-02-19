@@ -145,9 +145,29 @@ def build_report(
         band_tol = 0.0005  # 0.05% 表示/判定のズレを吸収
 
         def _risk_mid(entry_p: float, sl_p: float) -> float:
+            """Risk% for a long entry (distance to SL)."""
             if entry_p > 0 and sl_p > 0 and entry_p > sl_p:
                 return float((entry_p - sl_p) / entry_p * 100.0)
             return float("nan")
+
+        def _risk_txt_for_entries(entry_a: float, entry_b: float, sl_p: float) -> str:
+            """Format risk for 1 or 2 ladder entries.
+
+            - If both entries are valid, returns a range like "1.8〜2.4%".
+            - If only one is valid, returns a single value like "2.1%".
+            """
+            ra = _risk_mid(entry_a, sl_p)
+            rb = _risk_mid(entry_b, sl_p)
+            vals = [v for v in (ra, rb) if np.isfinite(v)]
+            if not vals:
+                return "-"
+            if len(vals) == 1:
+                return f"{vals[0]:.1f}%"
+            lo = float(min(vals))
+            hi = float(max(vals))
+            if abs(hi - lo) < 0.05:
+                return f"{hi:.1f}%"
+            return f"{lo:.1f}〜{hi:.1f}%"
 
         # Keep original ranking (idx) but renumber within each bucket for readability.
         # For readability, split order and risk into separate lines.
@@ -251,13 +271,32 @@ def build_report(
                 continue
 
             if above_band and entry_price > 0 and close_last > 0 and entry_price < close_last:
-                r_mid = _risk_mid(entry_price, sl)
-                risk_txt = f"{r_mid:.1f}%" if np.isfinite(r_mid) else "-"
+                # Two-tier pullback limit to improve fill-rate (浅押し/深押し).
+                # Upper: zone high (shallower), Lower: zone low (deeper).
+                hi_p = entry_high if entry_high > 0 else entry_price
+                lo_p = entry_low if entry_low > 0 else entry_price
+                if hi_p > 0 and lo_p > 0:
+                    hi_p, lo_p = (max(hi_p, lo_p), min(hi_p, lo_p))
+
+                use_ladder = bool(
+                    hi_p > 0
+                    and lo_p > 0
+                    and (hi_p / lo_p - 1.0) >= 0.002  # 0.2% 以上差があるときだけ 2段表示
+                )
+
+                if use_ladder:
+                    order_line = f"指値（押し待ち） 上 {_fmt_yen(hi_p)} / 下 {_fmt_yen(lo_p)}"
+                    risk_txt = _risk_txt_for_entries(hi_p, lo_p, sl)
+                else:
+                    order_line = f"指値（押し待ち）{_fmt_yen(entry_price)}"
+                    r_mid = _risk_mid(entry_price, sl)
+                    risk_txt = f"{r_mid:.1f}%" if np.isfinite(r_mid) else "-"
+
                 order_items.append(
                     (
                         idx,
                         f"🟢 {ticker} {name}{tag_txt}",
-                        f"指値（押し待ち）{_fmt_yen(entry_price)}",
+                        order_line,
                         f"SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
                     )
                 )
@@ -265,13 +304,32 @@ def build_report(
 
             if in_band and entry_price > 0 and close_last > 0:
                 if entry_price <= close_last:
-                    r_mid = _risk_mid(entry_price, sl)
-                    risk_txt = f"{r_mid:.1f}%" if np.isfinite(r_mid) else "-"
+                    # In-zone: ladder within the pullback zone.
+                    # Upper: zone high (shallow), Lower: zone low (deep).
+                    hi_p = entry_high if entry_high > 0 else entry_price
+                    lo_p = entry_low if entry_low > 0 else entry_price
+                    if hi_p > 0 and lo_p > 0:
+                        hi_p, lo_p = (max(hi_p, lo_p), min(hi_p, lo_p))
+
+                    use_ladder = bool(
+                        hi_p > 0
+                        and lo_p > 0
+                        and (hi_p / lo_p - 1.0) >= 0.002
+                    )
+
+                    if use_ladder:
+                        order_line = f"指値（帯内） 上 {_fmt_yen(hi_p)} / 下 {_fmt_yen(lo_p)}"
+                        risk_txt = _risk_txt_for_entries(hi_p, lo_p, sl)
+                    else:
+                        order_line = f"指値（帯内）{_fmt_yen(entry_price)}"
+                        r_mid = _risk_mid(entry_price, sl)
+                        risk_txt = f"{r_mid:.1f}%" if np.isfinite(r_mid) else "-"
+
                     order_items.append(
                         (
                             idx,
                             f"🟢 {ticker} {name}{tag_txt}",
-                            f"指値（帯内）{_fmt_yen(entry_price)}",
+                            order_line,
                             f"SL {_fmt_yen(sl)} / TP1 {_fmt_yen(tp1)} / Risk {risk_txt}",
                         )
                     )
@@ -774,15 +832,14 @@ def build_report(
                 if not s:
                     return ""
 
-                # Many order strings are concatenated like "指値(押)1,489".
-                # Insert one space before the first digit to keep it readable.
-                s = re.sub(r"([^\s])([0-9])", r"\1 \2", s, count=1)
-
-                # slash 区切りは必ず改行
+                # slash 区切りは必ず改行（2段指値/上限など）
                 s = s.replace(" / ", "\n")
 
-                # stop注文: "逆指値 Trg 4,253" → "逆指値\nTrg 4,253"
+                # stop注文: "逆指値 Trg 4,253" → "逆指値\nTrg\n4,253"
                 s = s.replace("逆指値 Trg", "逆指値\nTrg")
+                s = re.sub(r"\bTrg\s*([0-9,]+)", r"Trg\n\1", s)
+                s = re.sub(r"\b上限\s*([0-9,]+)", r"上限\n\1", s)
+                s = re.sub(r"\b下限\s*([0-9,]+)", r"下限\n\1", s)
 
                 # レンジ注文: "指値 4,935〜5,003" → "指値\n4,935〜\n5,003"
                 if s.startswith("指値 ") and "〜" in s:
@@ -790,6 +847,15 @@ def build_report(
                     s = s.replace("〜", "〜\n", 1)
                 elif "〜" in s:
                     s = s.replace("〜", "〜\n", 1)
+
+                # Order-type と価格は必ず改行して、数値が途中で割れないようにする。
+                # 例: "成行(現) 1,506" -> "成行(現)\n1,506"
+                s = re.sub(r"^(成行\(現\)|指値\(押\)|指値\(帯\)|指値)\s*", r"\1\n", s)
+
+                # Many order strings are concatenated like "指値(押)1,489".
+                # If the above rule didn't trigger, insert a single newline before the first digit.
+                if "\n" not in s:
+                    s = re.sub(r"([^\s])([0-9])", r"\1\n\2", s, count=1)
 
                 return s.strip()
 
@@ -817,16 +883,16 @@ def build_report(
                 tp1 = (tp1 or "").strip()
                 risk = (risk or "").strip()
                 out: list[str] = []
-                if sl or tp1:
-                    left = f"SL {sl}" if sl else ""
-                    right = f"TP {tp1}" if tp1 else ""
-                    if left and right:
-                        out.append(f"{left}  {right}")
-                    else:
-                        out.append(left or right)
+                if sl:
+                    out.append(f"SL {sl}")
+                if tp1:
+                    out.append(f"TP {tp1}")
                 if risk:
                     # Keep '%' so the renderer can tint by risk.
-                    out.append(f"R {risk}")
+                    if risk.startswith("R"):
+                        out.append(risk)
+                    else:
+                        out.append(f"R {risk}")
                 return "\n".join([x for x in out if x])
 
             def _pretty_group_label(g: str) -> str:
