@@ -19,7 +19,43 @@ from utils.util import (
 from utils.setup import build_setup_info, liquidity_filters
 from utils.rr_ev import calc_ev, pass_thresholds
 from utils.diversify import apply_sector_cap, apply_corr_filter
-from utils.screen_logic import no_trade_conditions, max_display, rs_pct_min_by_market, rs_comp_min_by_market
+# NOTE: We import the module (not individual names) to avoid ImportError
+# when upgrading/merging branches (e.g. rs_pct_min_by_market added later).
+from utils import screen_logic as _sl
+
+def _rs_pct_min_fallback(_mkt_score: int) -> int:
+    """Fallback for rs_pct_min_by_market (when older screen_logic is loaded)."""
+    try:
+        s = int(_mkt_score)
+    except Exception:
+        s = 60
+    if s >= 70:
+        return 50
+    if s >= 60:
+        return 55
+    if s >= 50:
+        return 60
+    return 70
+
+def _rs_comp_min_fallback(_mkt_score: int) -> float:
+    """Fallback for rs_comp_min_by_market (when older screen_logic is loaded)."""
+    try:
+        s = int(_mkt_score)
+    except Exception:
+        s = 60
+    if s >= 70:
+        return -0.5
+    if s >= 60:
+        return 0.0
+    if s >= 50:
+        return 0.8
+    return 1.5
+
+# Backward-compatible accessors (provide safe fallbacks).
+no_trade_conditions = getattr(_sl, 'no_trade_conditions', lambda mkt_score, delta3, macro_warning=False: False)
+max_display = getattr(_sl, 'max_display', lambda macro_warning=False: 5)
+rs_pct_min_by_market = getattr(_sl, 'rs_pct_min_by_market', _rs_pct_min_fallback)
+rs_comp_min_by_market = getattr(_sl, 'rs_comp_min_by_market', _rs_comp_min_fallback)
 from utils.saucer import scan_saucers
 from utils.state import (
     in_cooldown,
