@@ -6,7 +6,18 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from utils.util import sma, rsi14, atr14, adv20, atr_pct_last, safe_float, clamp
+from utils.util import (
+    sma,
+    rsi14,
+    atr14,
+    adv20,
+    atr_pct_last,
+    safe_float,
+    clamp,
+    tick_size_jpx,
+    floor_to_tick,
+    ceil_to_tick,
+)
 
 @dataclass
 class SetupInfo:
@@ -157,35 +168,87 @@ def _gap_freq(df: pd.DataFrame, window: int = 20, thresh: float = 0.012) -> floa
     return float((gap.tail(window) > float(thresh)).mean())
 
 def detect_setup(df: pd.DataFrame) -> Tuple[str, int]:
-    if df is None or df.empty or len(df) < 120:
+    """Classify the *trend-following* setup.
+
+    This function should be conservative (precision-first):
+    - Confirm multi-timeframe trend (20/50/200 MA stack when available)
+    - Prefer pullbacks (RSI mid-range) for A1/A2
+    - Prefer near-breakout positioning for B
+
+    Screening (utils/screener.py) will apply additional cross-sectional filters.
+    """
+    if df is None or df.empty or len(df) < 140:
         return "NONE", 9
 
     c = df["Close"].astype(float)
     ma20 = sma(c, 20)
     ma50 = sma(c, 50)
+    ma200 = sma(c, 200) if len(c) >= 210 else None
     rsi = rsi14(c)
 
     c_last = safe_float(c.iloc[-1], np.nan)
     m20 = safe_float(ma20.iloc[-1], np.nan)
     m50 = safe_float(ma50.iloc[-1], np.nan)
     r = safe_float(rsi.iloc[-1], np.nan)
-    slope = safe_float(ma20.pct_change(fill_method=None).iloc[-1], 0.0)
+
+    if ma200 is not None:
+        m200 = safe_float(ma200.iloc[-1], np.nan)
+    else:
+        m200 = np.nan
 
     if not (np.isfinite(c_last) and np.isfinite(m20) and np.isfinite(m50) and np.isfinite(r)):
         return "NONE", 9
 
-    if c_last > m20 > m50 and slope > 0:
-        if (0.45 <= r/100.0 <= 0.58) and slope >= 0.002:
+    # --- Slopes (less noisy than 1-day pct_change) ---
+    # MA20 slope over 5 days
+    if len(ma20) >= 26 and np.isfinite(safe_float(ma20.iloc[-6], np.nan)):
+        slope20 = safe_float(ma20.iloc[-1] / ma20.iloc[-6] - 1.0, 0.0)
+    else:
+        slope20 = safe_float(ma20.pct_change(fill_method=None).iloc[-1], 0.0)
+
+    # MA50 slope over 20 days
+    if len(ma50) >= 71 and np.isfinite(safe_float(ma50.iloc[-21], np.nan)):
+        slope50 = safe_float(ma50.iloc[-1] / ma50.iloc[-21] - 1.0, 0.0)
+    else:
+        slope50 = safe_float(ma50.pct_change(fill_method=None).iloc[-1], 0.0)
+
+    # MA200 slope over 20 days (only when available)
+    if ma200 is not None and len(ma200) >= 221 and np.isfinite(safe_float(ma200.iloc[-21], np.nan)):
+        slope200 = safe_float(ma200.iloc[-1] / ma200.iloc[-21] - 1.0, 0.0)
+    else:
+        slope200 = 0.0
+
+    above200 = True
+    stack_ok = True
+    if np.isfinite(m200):
+        above200 = bool(c_last > m200)
+        stack_ok = bool(m50 > m200)
+
+    # --- Extension control (avoid chasing / over-extended pullbacks) ---
+    ext20 = safe_float(c_last / m20 - 1.0, 0.0)
+
+    # Conservative trend gate for A-setups
+    trend_gate = bool(above200 and stack_ok and slope50 > -0.002 and slope200 > -0.002)
+
+    # --- A1/A2: pullback entries in an existing uptrend ---
+    if c_last > m20 > m50 and slope20 > 0 and trend_gate:
+        # "Strong" = better slope + cleaner RSI zone
+        if (47 <= r <= 60) and slope20 >= 0.002 and slope50 >= 0 and ext20 <= 0.06:
             return "A1-Strong", 0
-        if 40 <= r <= 60:
+        # Normal A1: slightly wider RSI band
+        if (42 <= r <= 62) and ext20 <= 0.08:
             return "A1", 1
 
-    if c_last > m50 and slope > -0.001 and 35 <= r <= 60:
-        return "A2", 2
+    if c_last > m50 and m20 > m50 and trend_gate and (35 <= r <= 62):
+        # A2 is weaker/earlier; require not-too-extended and non-negative MA slopes
+        if ext20 <= 0.10 and slope20 > -0.002:
+            return "A2", 2
 
-    if len(c) >= 25:
+    # --- B: breakout / near-breakout (requires leadership bias) ---
+    if len(c) >= 25 and trend_gate:
         hh20 = float(c.tail(21).max())
-        if c_last >= hh20 * 0.997 and slope > 0:
+        # Near 20-day high + RSI higher (avoid weak bounces)
+        if c_last >= hh20 * 0.997 and slope20 > 0 and r >= 55:
             return "B", 2
 
     return "NONE", 9
@@ -318,10 +381,26 @@ def structure_sl_tp(
 def build_setup_info(df: pd.DataFrame, macro_on: bool, entry_override: float | None = None) -> SetupInfo:
     setup, tier = detect_setup(df)
     lo, hi, atr, breakout_line = entry_band(df, setup)
-    entry_price = float(entry_override) if entry_override is not None and np.isfinite(entry_override) and entry_override > 0 else (lo + hi) / 2.0
+    entry_price_raw = float(entry_override) if entry_override is not None and np.isfinite(entry_override) and entry_override > 0 else (lo + hi) / 2.0
+
+    # ---- JPX tick rounding (execution safety)
+    # Orders can fail if price is not aligned to tick size.
+    # We round band/entry/SL/TP to a practical tick schedule.
+    tick = tick_size_jpx(entry_price_raw if entry_price_raw > 0 else hi if hi > 0 else lo)
+    lo = float(floor_to_tick(lo, tick))
+    hi = float(floor_to_tick(hi, tick))
+    if hi < lo:
+        hi = lo
+    entry_price = float(floor_to_tick(entry_price_raw, tick))
+    entry_price = float(clamp(entry_price, lo, hi))
 
     gu = gu_flag(df, atr)
     sl, tp1, tp2, rr_tp2, exp_days = structure_sl_tp(df, entry_price, atr, macro_on=macro_on, setup=setup)
+
+    # Round SL/TPs as well
+    sl = float(floor_to_tick(sl, tick))
+    tp1 = float(ceil_to_tick(tp1, tick))
+    tp2 = float(ceil_to_tick(tp2, tick))
     # RR at TP1 defines expected R basis (TP1 fixed).
     denom = max(entry_price - sl, 1e-9)
     rr_tp1 = max((tp1 - entry_price) / denom, 0.0)
@@ -400,6 +479,12 @@ def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) ->
         macro_on=bool(macro_on),
         setup=str(setup),
     )
+
+    # JPX tick rounding (positions too)
+    tick = tick_size_jpx(float(entry_price))
+    sl = float(floor_to_tick(sl, tick))
+    tp1 = float(ceil_to_tick(tp1, tick))
+    tp2 = float(ceil_to_tick(tp2, tick))
 
     risk = max(1e-6, float(entry_price) - float(sl))
     rr_tp1 = float((float(tp1) - float(entry_price)) / risk)
