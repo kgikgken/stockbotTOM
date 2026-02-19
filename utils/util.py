@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,80 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+# Silence noisy yfinance logs by default.
+# (GitHub Actions のログが yfinance の警告で埋まるのを避ける)
+import logging
+
+
+def env_truthy(name: str, default: bool = False) -> bool:
+    """Parse a boolean-like environment variable."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    v = str(raw).strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def tick_size_jpx(price: float) -> float:
+    """Approx JPX tick size by price level.
+
+    NOTE:
+      - JPX tick sizes can vary by market/issue; this schedule covers typical cases.
+      - Used for rounding entry/SL/TP prices so orders don't fail due to invalid ticks.
+    """
+
+    try:
+        p = float(price)
+    except Exception:
+        return 1.0
+    if not np.isfinite(p) or p <= 0:
+        return 1.0
+
+    if p < 3000:
+        return 1.0
+    if p < 5000:
+        return 5.0
+    if p < 30000:
+        return 10.0
+    if p < 50000:
+        return 50.0
+    if p < 300000:
+        return 100.0
+    if p < 500000:
+        return 500.0
+    return 1000.0
+
+
+def floor_to_tick(price: float, tick: float) -> float:
+    """Floor price to the nearest valid tick."""
+
+    try:
+        p = float(price)
+        t = float(tick)
+        if not (np.isfinite(p) and np.isfinite(t)) or t <= 0:
+            return p
+        return float(np.floor(p / t) * t)
+    except Exception:
+        return float(price)
+
+
+def ceil_to_tick(price: float, tick: float) -> float:
+    """Ceil price to the nearest valid tick."""
+
+    try:
+        p = float(price)
+        t = float(tick)
+        if not (np.isfinite(p) and np.isfinite(t)) or t <= 0:
+            return p
+        return float(np.ceil(p / t) * t)
+    except Exception:
+        return float(price)
 
 JST = timezone(timedelta(hours=9))
 
@@ -94,17 +169,41 @@ def download_history_bulk(
     if not tickers:
         return out
 
+    # yfinance は欠損ティッカーが混ざると大量の WARNING/ERROR を標準出力に出す。
+    # Actions のログ可読性のため、デフォルトで抑制する。
+    quiet = env_truthy("YFINANCE_QUIET", default=True)
+    if quiet:
+        logging.getLogger("yfinance").setLevel(logging.ERROR)
+    else:
+        logging.getLogger("yfinance").setLevel(logging.INFO)
+
+    import contextlib
+    import io
+
     for i in range(0, len(tickers), group_size):
         chunk = tickers[i:i + group_size]
         try:
-            data = yf.download(
-                tickers=" ".join(chunk),
-                period=period,
-                auto_adjust=auto_adjust,
-                progress=False,
-                threads=True,
-                group_by="ticker",
-            )
+            if quiet:
+                _buf_out = io.StringIO()
+                _buf_err = io.StringIO()
+                with contextlib.redirect_stdout(_buf_out), contextlib.redirect_stderr(_buf_err):
+                    data = yf.download(
+                        tickers=" ".join(chunk),
+                        period=period,
+                        auto_adjust=auto_adjust,
+                        progress=False,
+                        threads=True,
+                        group_by="ticker",
+                    )
+            else:
+                data = yf.download(
+                    tickers=" ".join(chunk),
+                    period=period,
+                    auto_adjust=auto_adjust,
+                    progress=False,
+                    threads=True,
+                    group_by="ticker",
+                )
         except Exception:
             time.sleep(pause_sec)
             continue
