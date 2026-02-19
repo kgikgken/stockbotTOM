@@ -63,3 +63,35 @@ LINE Messaging API では画像を直接アップロードできず、**HTTPSで
 
 - Cloudflareの「Edit code」に貼り付けるなら `src/worker.js`（JS版）が楽です。
 - Wranglerでデプロイするなら `wrangler.toml` + `src/worker.js` を使います。
+## Screening tuning (optional)
+
+The default screening rules are designed to be conservative for short-term swing *trend-following*.
+If you want to tune strictness without touching code, you can use the following environment variables.
+
+### Trend template / regime
+- `TREND_LOOKBACK_DAYS` (default: `252`)
+- `TREND_MAX_DIST_52W_HIGH` (default: `25`)  
+  Max % distance from the 52-week high (smaller = stronger momentum).
+- `TREND_MIN_FROM_52W_LOW` (default: `30`)  
+  Min % above the 52-week low (bigger = stronger long-term uptrend).
+- `TREND_TEMPLATE_MIN_SCORE` (default: `0.70`)  
+  Minimum trend-template score (0..1) used as a baseline gate.
+- `TREND_MIN_A1` (default: `0.70`) / `TREND_MIN_A2` (default: `0.62`) / `TREND_MIN_B` (default: `0.72`)  
+  Setup-specific minimum scores.
+- `TREND_WEAK_MKT_SCORE` (default: `65`) and `TREND_WEAK_BONUS` (default: `0.05`)  
+  When the market score is below this, the required trend score is tightened.
+
+### Volatility / tightness
+- `BB_RATIO_LOOKBACK` (default: `60`)  
+  BB width ratio lookback (20d BB width vs its median).
+
+### Gap risk (ATR-based)
+- `GAP_ATR_LOOKBACK` (default: `60`)
+- `GAP_ATR_MULT` (default: `1.0`)  
+  A gap is counted when `|Open - prevClose| > GAP_ATR_MULT * ATR(14)`.
+
+### Volume dry-up (pullback quality)
+- `VOL_DRY_LOOKBACK` (default: `10`)
+- `VOL_DRY_WARN` (default: `1.35`)  
+  Down-volume / up-volume ratio above this adds noise.
+
