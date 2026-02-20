@@ -199,7 +199,19 @@ def build_report(
                 and (close_last >= entry_low * (1.0 - band_tol))
                 and (close_last <= entry_high * (1.0 + band_tol))
             )
-            market_in_ok = bool(entry_mode == "MARKET_OK" and in_band and (not macro_on) and (not no_trade))
+            # Market-in is only allowed when the tape is supportive.
+            # - Require Risk-ON day to avoid catching knives on weak index days.
+            # - Optionally require futures not too negative (env: MARKET_IN_MIN_FUTURES).
+            min_fut = safe_float(os.getenv("MARKET_IN_MIN_FUTURES", "-0.50"), -0.50)
+            fut_ok = True if futures_chg is None else (float(futures_chg) >= float(min_fut))
+            market_in_ok = bool(
+                entry_mode == "MARKET_OK"
+                and in_band
+                and (not macro_on)
+                and (not no_trade)
+                and bool(risk_on)
+                and fut_ok
+            )
 
             # Liquidity summary tags (beginner-first): keep only categorical info.
             # We intentionally hide numeric liquidity metrics (ADV/Impact) to avoid clutter.
@@ -240,13 +252,19 @@ def build_report(
             if macro_on:
                 skip_items.append((idx, f"🔴 {ticker} {name}{tag_txt} 見送り（イベント）"))
                 continue
+
+            blackout = str(c.get("blackout_reason", "") or "").strip()
+            if blackout:
+                skip_items.append((idx, f"🔴 {ticker} {name}{tag_txt} 見送り（イベント:{blackout}）"))
+                continue
             if gu:
                 skip_items.append((idx, f"🔴 {ticker} {name}{tag_txt} 見送り（GU）"))
                 continue
             if weekly_ok is False and setup in ("A1-Strong", "A1"):
                 skip_items.append((idx, f"🔴 {ticker} {name}{tag_txt} 見送り（週足NG）"))
                 continue
-            if in_band and np.isfinite(ns) and ns >= 2:
+            noise_skip = safe_float(os.getenv("REPORT_NOISE_SKIP_SCORE", "2"), 2.0)
+            if in_band and np.isfinite(ns) and ns >= float(noise_skip):
                 skip_items.append((idx, f"🔴 {ticker} {name}{tag_txt} 見送り（ノイズ{int(ns)}）"))
                 continue
             if in_band and np.isfinite(vr) and vr > 1.35:
@@ -272,6 +290,26 @@ def build_report(
                     )
                 )
                 continue
+
+
+            # If price is far above the pullback band, auto-placing limit orders often
+            # results in low fill-rate. In that case, downgrade to WATCH (no order).
+            if above_band and close_last > 0 and entry_high > 0:
+                max_wait_pct = safe_float(os.getenv("PULLBACK_WAIT_MAX_PCT", "4.0"), 4.0)
+                max_wait_atr = safe_float(os.getenv("PULLBACK_WAIT_MAX_ATR", "1.8"), 1.8)
+                dist_pct = (close_last / entry_high - 1.0) * 100.0
+                atrp = safe_float(c.get("atrp"), 0.0)
+                atr_yen = (close_last * atrp / 100.0) if (close_last > 0 and atrp > 0) else 0.0
+                dist_atr = ((close_last - entry_high) / atr_yen) if atr_yen > 0 else float("nan")
+                if dist_pct > float(max_wait_pct) or (np.isfinite(dist_atr) and dist_atr > float(max_wait_atr)):
+                    watch_items.append(
+                        (
+                            idx,
+                            f"🟡 {ticker} {name}{tag_txt}",
+                            f"監視（伸びすぎ：帯まで +{dist_pct:.1f}%）",
+                        )
+                    )
+                    continue
 
             if above_band and entry_price > 0 and close_last > 0 and entry_price < close_last:
                 # Pullback limit ladder to improve fill-rate.
