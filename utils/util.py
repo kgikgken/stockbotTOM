@@ -30,11 +30,14 @@ def env_truthy(name: str, default: bool = False) -> bool:
 
 
 def tick_size_jpx(price: float) -> float:
-    """Approx JPX tick size by price level.
+    """Return the JPX tick size (呼値) for a given price.
 
-    NOTE:
-      - JPX tick sizes can vary by market/issue; this schedule covers typical cases.
-      - Used for rounding entry/SL/TP prices so orders don't fail due to invalid ticks.
+    This follows JPX's official *"その他の銘柄"* table.
+
+    Why this matters:
+      - Wrong tick sizes can produce invalid limit prices (order rejected).
+      - Even if accepted, coarse/incorrect rounding can shift entry/SL/zone and
+        distort the intended risk.
     """
 
     try:
@@ -44,19 +47,29 @@ def tick_size_jpx(price: float) -> float:
     if not np.isfinite(p) or p <= 0:
         return 1.0
 
-    if p < 3000:
+    # JPX 呼値（その他の銘柄）
+    # https://www.jpx.co.jp/equities/trading/domestic/01.html
+    if p <= 3000:
         return 1.0
-    if p < 5000:
+    if p <= 5000:
         return 5.0
-    if p < 30000:
+    if p <= 30000:
         return 10.0
-    if p < 50000:
+    if p <= 50000:
         return 50.0
-    if p < 300000:
+    if p <= 300000:
         return 100.0
-    if p < 500000:
+    if p <= 500000:
         return 500.0
-    return 1000.0
+    if p <= 3000000:
+        return 1000.0
+    if p <= 5000000:
+        return 5000.0
+    if p <= 30000000:
+        return 10000.0
+    if p <= 50000000:
+        return 50000.0
+    return 100000.0
 
 
 def floor_to_tick(price: float, tick: float) -> float:
