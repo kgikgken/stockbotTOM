@@ -22,6 +22,7 @@ from utils.diversify import apply_sector_cap, apply_corr_filter
 # NOTE: We import the module (not individual names) to avoid ImportError
 # when upgrading/merging branches (e.g. rs_pct_min_by_market added later).
 from utils import screen_logic as _sl
+from utils.blackout import blackout_reason, load_blackouts_from_env
 
 def _rs_pct_min_fallback(_mkt_score: int) -> int:
     """Fallback for rs_pct_min_by_market (when older screen_logic is loaded)."""
@@ -512,6 +513,42 @@ def _filter_earnings(uni: pd.DataFrame, today_date) -> pd.DataFrame:
             keep.append(True)
     return uni[keep]
 
+
+def _filter_blackouts(uni: pd.DataFrame, today_date) -> pd.DataFrame:
+    """Optional manual blackout filter (earnings / major event / etc.).
+
+    Controlled by env:
+      - BLACKOUT_CSV: path to CSV (default: data/blackout.csv if exists)
+      - BLACKOUT_BEFORE_DAYS / BLACKOUT_AFTER_DAYS
+      - BLACKOUT_EXCLUDE: 1=exclude from universe (default), 0=keep but annotate
+
+    The CSV is offline-friendly; see utils/blackout.py.
+    """
+
+    events, bdays, adays = load_blackouts_from_env(str(today_date))
+    if not events or uni is None or len(uni) == 0:
+        return uni
+
+    exclude = os.getenv("BLACKOUT_EXCLUDE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+    tcol = _get_ticker_col(uni)
+    if not tcol:
+        return uni
+
+    reasons: list[str] = []
+    keep: list[bool] = []
+    for t in uni[tcol].tolist():
+        r = blackout_reason(str(t), today_date, events, bdays, adays)
+        reasons.append(str(r) if r else "")
+        keep.append(False if (exclude and r) else True)
+
+    out = uni.copy()
+    out["blackout_reason"] = reasons
+    if exclude:
+        out = out[pd.Series(keep, index=out.index)].reset_index(drop=True)
+    return out
+
+
 def run_screen(
     today_str: str,
     today_date,
@@ -537,6 +574,7 @@ def run_screen(
         return [], {"raw": 0, "final": 0, "avgAdjEV": 0.0, "GU": 0.0}, {}
 
     uni = _filter_earnings(uni, today_date)
+    uni = _filter_blackouts(uni, today_date)
     tickers = uni[tcol].astype(str).tolist()
     ohlc_map = download_history_bulk(tickers, period="780d", auto_adjust=True, group_size=200)
 
@@ -1111,8 +1149,18 @@ def run_screen(
             except Exception:
                 risk_now = risk_pct
 
+        # --- Market-in (現値IN) gating ---------------------------------------------
+        # Prefer market-in only when price is in the *lower/middle* part of the buy band.
+        # If price is already near the top edge of the band, it tends to be "chase-y".
+        band_pos = float("nan")
+        if in_band and (entry_high > entry_low) and close_last > 0:
+            band_pos = (close_last - entry_low) / (entry_high - entry_low)
+        band_pos_max = safe_float(os.getenv("MARKET_OK_BAND_POS_MAX"), 0.60)  # 0=band bottom, 1=band top
+        band_pos_ok = (not np.isfinite(band_pos)) or (band_pos <= band_pos_max)
+
         market_ok = bool(
             in_band
+            and band_pos_ok
             and (not bool(info.gu))
             and (not bool(macro_on))
             and (int(mkt_score) >= 60)
@@ -1156,6 +1204,7 @@ def run_screen(
                 "amihud_bps100m": float(amihud_bps100m) if np.isfinite(amihud_bps100m) else float("nan"),
                 "atrp": float(atrp),
                 "entry_mode": str(entry_mode),
+                "band_pos": float(band_pos) if np.isfinite(band_pos) else float("nan"),
                 "close_last": float(close_last),
                 "risk_pct": float(risk_pct),
                 "risk_pct_low": float(risk_pct_low),
