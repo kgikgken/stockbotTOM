@@ -8,7 +8,7 @@ import pandas as pd
 
 import math
 
-from utils.util import safe_float, adv20, atr_pct_last
+from utils.util import safe_float, adv20, atr_pct_last, tick_size_jpx
 
 
 # ---------------------------------------------------------------------
@@ -89,44 +89,6 @@ def _lin_slope(y: np.ndarray) -> float:
         return float("nan")
     return float(((x * (y - y.mean())).sum()) / denom)
 
-
-
-def _tick_size_jpx(price: float) -> float:
-    """Approximate JPX (TSE) tick size table by price range.
-
-    This is used to snap suggested levels so that rounding does not violate the risk cap.
-    """
-    try:
-        p = float(price)
-    except Exception:
-        return 1.0
-    if not np.isfinite(p) or p <= 0:
-        return 1.0
-
-    # Most common ranges for cash equities
-    if p < 10_000:
-        return 1.0
-    if p < 30_000:
-        return 5.0
-    if p < 50_000:
-        return 10.0
-    if p < 100_000:
-        return 10.0
-    if p < 300_000:
-        return 50.0
-    if p < 500_000:
-        return 100.0
-    if p < 1_000_000:
-        return 100.0
-    if p < 3_000_000:
-        return 500.0
-    if p < 5_000_000:
-        return 1_000.0
-    if p < 10_000_000:
-        return 1_000.0
-    if p < 30_000_000:
-        return 5_000.0
-    return 10_000.0
 
 
 def _floor_to_tick(price: float, tick: float) -> float:
@@ -248,6 +210,9 @@ def _cup_with_handle_metrics(
     handle_near_rim: float,
     handle_min_pb: float,
     handle_max_pb: float,
+    # additional false-positive guard: handle pullback should be a fraction of the cup depth
+    # (deep handles are often just congestion and tend to fail)
+    handle_pb_to_depth_ratio: float | None = None,
     handle_max_range: float,
     handle_min_upper_frac: float,
     handle_vol_ratio_max: float,
@@ -295,6 +260,10 @@ def _cup_with_handle_metrics(
         return None
     idx_bottom = idx_left + int(np.nanargmin(after.values))
 
+    # Cup depth (needed for dynamic handle-depth filter).
+    # NOTE: validated against (min_depth, max_depth) later after symmetry checks.
+    depth = float((rim - bottom) / rim) if rim > 0 else float("nan")
+
     # Require some descent duration
     if (idx_bottom - idx_left) < int(max(6, round(n * 0.05))):
         return None
@@ -330,7 +299,18 @@ def _cup_with_handle_metrics(
         return None
 
     handle_pb = float((rim - handle_low_close) / rim) if rim > 0 else float("nan")
-    if not (np.isfinite(handle_pb) and handle_min_pb <= handle_pb <= handle_max_pb):
+    # Dynamic handle depth cap: handle should generally be shallower than the cup.
+    # Empirical rule of thumb: handle depth ≈ cup depth * (1/3).
+    handle_max_dyn = float(handle_max_pb)
+    if (
+        handle_pb_to_depth_ratio is not None
+        and np.isfinite(handle_pb_to_depth_ratio)
+        and np.isfinite(depth)
+        and depth > 0
+    ):
+        handle_max_dyn = min(handle_max_dyn, float(handle_pb_to_depth_ratio) * float(depth))
+
+    if not (np.isfinite(handle_pb) and handle_min_pb <= handle_pb <= handle_max_dyn):
         return None
 
     handle_range = float((handle_high_close - handle_low_close) / rim) if rim > 0 else float("nan")
@@ -373,7 +353,6 @@ def _cup_with_handle_metrics(
     # ------------------
     # 6) Cup depth and completion
     # ------------------
-    depth = float((rim - bottom) / rim)
     if not (np.isfinite(depth) and min_depth <= depth <= max_depth):
         return None
 
@@ -464,7 +443,7 @@ def _cup_with_handle_metrics(
     
     # Snap levels to tradable ticks (conservative) so that report rounding does not
     # accidentally push the effective risk above the cap (e.g. 8.01% due to rounding).
-    tick = _tick_size_jpx(rim)
+    tick = tick_size_jpx(rim)
     if np.isfinite(tick) and tick > 0:
         entry_low = _floor_to_tick(entry_low, tick)
         entry_high = _floor_to_tick(entry_high, tick)
@@ -622,6 +601,7 @@ def scan_saucers(
             handle_near_rim=0.045,
             handle_min_pb=0.02,
             handle_max_pb=0.18,
+	            handle_pb_to_depth_ratio=0.35,
             handle_max_range=0.14,
             handle_min_upper_frac=0.45,
             handle_vol_ratio_max=1.00,
@@ -655,6 +635,7 @@ def scan_saucers(
                 handle_near_rim=0.06,
                 handle_min_pb=0.02,
                 handle_max_pb=0.22,
+                handle_pb_to_depth_ratio=0.35,
                 handle_max_range=0.18,
                 handle_min_upper_frac=0.40,
                 handle_vol_ratio_max=1.05,
@@ -720,6 +701,7 @@ def scan_saucers(
                 handle_near_rim=0.06,
                 handle_min_pb=0.03,
                 handle_max_pb=0.22,
+                handle_pb_to_depth_ratio=0.42,
                 handle_max_range=0.20,
                 handle_min_upper_frac=0.40,
                 handle_vol_ratio_max=1.05,
@@ -752,6 +734,7 @@ def scan_saucers(
                     handle_near_rim=0.07,
                     handle_min_pb=0.03,
                     handle_max_pb=0.25,
+                handle_pb_to_depth_ratio=0.45,
                     handle_max_range=0.24,
                     handle_min_upper_frac=0.38,
                     handle_vol_ratio_max=1.10,
@@ -821,6 +804,7 @@ def scan_saucers(
                 handle_near_rim=0.06,
                 handle_min_pb=0.02,
                 handle_max_pb=0.30,
+                handle_pb_to_depth_ratio=0.45,
                 handle_max_range=0.30,
                 handle_min_upper_frac=0.40,
                 handle_vol_ratio_max=1.10,
