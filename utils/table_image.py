@@ -313,9 +313,46 @@ def _render_table_png_pil(
     max_inner_w = max(200, style.max_total_px - style.margin * 2)
     if table_inner_w > max_inner_w and table_inner_w > 0:
         scale = max_inner_w / table_inner_w
-        # keep columns usable even after scaling
-        min_col = max(64, int(max_inner_w / max(1, n_cols) * 0.45))
-        col_px = [max(min_col, int(w * scale)) for w in col_px]
+
+        def _min_col_for_header(h: str) -> int:
+            hs = (h or "").replace("\n", "").strip()
+            hs_u = hs.upper()
+            # Heuristic minimum widths to keep mobile tables readable.
+            # Tuned for Japanese text + comma-separated prices.
+            if hs in {"#", "No", "№"}:
+                return 64
+            if "銘柄" in hs:
+                return max(260, int(max_inner_w * 0.32))
+            if "注文" in hs:
+                return max(180, int(max_inner_w * 0.19))
+            if ("SL" in hs_u) or ("TP" in hs_u) or ("RISK" in hs_u) or (hs_u in {"R", "RR"}):
+                return max(200, int(max_inner_w * 0.20))
+            if ("状態" in hs) or ("メモ" in hs):
+                return max(110, int(max_inner_w * 0.10))
+            return max(120, int(max_inner_w * 0.12))
+
+        min_cols = [_min_col_for_header(h) for h in headers_s]
+        # If mins exceed available width, scale them down proportionally.
+        sum_min = sum(min_cols)
+        if sum_min > max_inner_w and sum_min > 0:
+            f = max_inner_w / sum_min
+            min_cols = [max(48, int(w * f)) for w in min_cols]
+
+        scaled = [int(w * scale) for w in col_px]
+        col_px = [max(min_cols[j], scaled[j]) for j in range(n_cols)]
+
+        # If still too wide, shrink columns above their minimums.
+        over = sum(col_px) - max_inner_w
+        if over > 0 and n_cols > 0:
+            slack = [col_px[j] - min_cols[j] for j in range(n_cols)]
+            while over > 0:
+                j = max(range(n_cols), key=lambda i: slack[i])
+                if slack[j] <= 0:
+                    break
+                col_px[j] -= 1
+                slack[j] -= 1
+                over -= 1
+
         # Fix rounding drift to match max_inner_w exactly.
         diff = max_inner_w - sum(col_px)
         j = 0
@@ -324,7 +361,8 @@ def _render_table_png_pil(
                 col_px[j] += 1
                 diff -= 1
             else:
-                if col_px[j] > min_col:
+                # Don't shrink below the per-column minimum.
+                if col_px[j] > min_cols[j]:
                     col_px[j] -= 1
                     diff += 1
             j = (j + 1) % n_cols
