@@ -784,6 +784,19 @@ def run_screen(
         gap_atr_freq = safe_float(gap_atr.get("freq"), np.nan)
         gap_atr_max = safe_float(gap_atr.get("max"), np.nan)
 
+
+        # Hard exclude: one-off extreme overnight gap (earnings/IR risk) even if freq is low.
+        # This reduces 'risk mismatch' accidents (gap-through-stop) in real execution.
+        if not is_pos and np.isfinite(gap_atr_max):
+            gap_max_a = _env_float("GAP_ATR_MAX_LIMIT_A", 3.6)
+            gap_max_b = _env_float("GAP_ATR_MAX_LIMIT_B", 4.2)
+            gap_lim = gap_max_b if info.setup == "B" else gap_max_a
+            # In weaker tape, be stricter.
+            if mkt_score < _env_float("GAP_ATR_MAX_WEAK_MKT_SCORE", 65.0):
+                gap_lim = max(0.5, gap_lim - _env_float("GAP_ATR_MAX_WEAK_TIGHTEN", 0.3))
+            if gap_atr_max > gap_lim:
+                continue
+
         ext_atr = np.nan
         try:
             c_ser = df["Close"].astype(float)
@@ -834,6 +847,44 @@ def run_screen(
         er60 = safe_float(efficiency_ratio(df["Close"], 60), np.nan)
         chop14 = safe_float(choppiness_index(df, 14), np.nan)
         adx14v = safe_float(adx(df, 14), np.nan)
+
+
+        # Hard filters (precision mode): trend smoothness + choppiness.
+        # Noise score already penalizes these, but hard filters cut the worst false positives.
+        if not is_pos:
+            er_base = _env_float("ER60_MIN_BASE", 0.16)
+            er_bonus_a1s = _env_float("ER60_MIN_BONUS_A1S", 0.04)
+            er_bonus_a1 = _env_float("ER60_MIN_BONUS_A1", 0.02)
+            er_bonus_b = _env_float("ER60_MIN_BONUS_B", 0.02)
+            er_min = er_base
+            if info.setup == "A1-Strong":
+                er_min += er_bonus_a1s
+            elif info.setup == "A1":
+                er_min += er_bonus_a1
+            elif info.setup == "B":
+                er_min += er_bonus_b
+
+            chop_base = _env_float("CHOP14_MAX_BASE", 68.0)
+            chop_bonus_a1s = _env_float("CHOP14_TIGHTEN_A1S", 4.0)
+            chop_bonus_a1 = _env_float("CHOP14_TIGHTEN_A1", 2.0)
+            chop_bonus_b = _env_float("CHOP14_TIGHTEN_B", 3.0)
+            chop_max = chop_base
+            if info.setup == "A1-Strong":
+                chop_max -= chop_bonus_a1s
+            elif info.setup == "A1":
+                chop_max -= chop_bonus_a1
+            elif info.setup == "B":
+                chop_max -= chop_bonus_b
+
+            # In weaker tape, tighten a bit further.
+            if mkt_score < _env_float("TREND_QUALITY_WEAK_MKT_SCORE", 65.0):
+                er_min += _env_float("TREND_QUALITY_WEAK_ER_ADD", 0.02)
+                chop_max -= _env_float("TREND_QUALITY_WEAK_CHOP_SUB", 1.0)
+
+            if np.isfinite(er60) and er60 < er_min:
+                continue
+            if np.isfinite(chop14) and chop14 > chop_max:
+                continue
 
         # --- RS Line (stock / benchmark): slope + proximity to 60D high --------
         rs_line_pos60 = np.nan  # 1.0 = RS line at 60D high
