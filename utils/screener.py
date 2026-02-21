@@ -628,27 +628,23 @@ def run_screen(
     cands: List[Dict] = []
     gu_cnt = 0
 
+    # Currently held positions (normalized tickers).
+    # main.py updates state["positions_last"] from data/positions.csv.
+    # We relax some filters for existing holdings (e.g., gap filters).
+    pos_set = set(
+        str(x).strip() for x in (state.get("positions_last") or []) if str(x).strip()
+    )
+
     # Cross-sectional RS percentile pool (computed after scanning)
     rs_pool_syms: List[str] = []
     rs_pool_vals: List[float] = []
-
-    # Held positions (from state) - used to relax some entry-only filters.
-    # NOTE: run_screen() is primarily for NEW candidates, but the universe may
-    # include held tickers; in that case we avoid falsely rejecting them.
-    pos_set = set()
-    try:
-        for _t in (state.get("positions_last") or []):
-            _s = str(_t).strip()
-            if _s:
-                pos_set.add(_s)
-    except Exception:
-        pos_set = set()
 
     for _, row in uni.iterrows():
         ticker = str(row.get(tcol, "")).strip()
         if not ticker:
             continue
 
+        # Whether this ticker is currently held (position)
         is_pos = ticker in pos_set
         df = ohlc_map.get(ticker)
         if df is None or df.empty or len(df) < 120:
