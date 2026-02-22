@@ -550,6 +550,7 @@ def _filter_blackouts(uni: pd.DataFrame, today_date) -> pd.DataFrame:
 
 
 def run_screen(
+
     today_str: str,
     today_date,
     mkt_score: int,
@@ -578,11 +579,23 @@ def run_screen(
     tickers = uni[tcol].astype(str).tolist()
     ohlc_map = download_history_bulk(tickers, period="780d", auto_adjust=True, group_size=200)
 
+    # Data coverage guardrail: if Yahoo/yfinance is partially down, freeze new trades
+    try:
+        min_cov = float(os.environ.get("MIN_DATA_COVERAGE", "0.75"))
+    except Exception:
+        min_cov = 0.75
+    data_total = len(syms)
+    data_ok = len(ohlc_map)
+    data_cov = (data_ok / data_total) if data_total else 0.0
+    if data_cov < min_cov:
+        no_trade_force = True
+        no_trade_reason_force = f"データ取得不足 {data_ok}/{data_total} ({data_cov*100:.0f}%)"
+
     # --- Index telemetry (for relative strength / RS)
     # yfinance is unreliable for ^TOPX, so we prefer stable Japan ETFs.
     # Default:
     #   1306.T (TOPIX ETF) -> ^N225 (Nikkei) -> ^TOPX
-    rs_bench_syms = [s.strip() for s in os.getenv("RS_BENCH_TICKERS", "1306.T,^N225,^TOPX").split(",") if s.strip()]
+    rs_bench_syms = [s.strip() for s in os.getenv("RS_BENCH_TICKERS", "998405.T,1306.T,^N225,^TOPX").split(",") if s.strip()]
     topx_ret20 = float("nan")
     topx_ret60 = float("nan")
     topx_ret120 = float("nan")
@@ -623,17 +636,10 @@ def run_screen(
         if (kpi["median_r"] < -0.10) or (kpi["exp_gap"] < -0.30) or (kpi["neg_streak"] >= 3):
             set_cooldown_days(state, "distortion_until", days=4)
 
-    no_trade = no_trade_conditions(int(mkt_score), float(delta3))
+    no_trade = no_trade_conditions(int(mkt_score), float(delta3)) or no_trade_force
 
     cands: List[Dict] = []
     gu_cnt = 0
-
-    # Currently held positions (normalized tickers).
-    # main.py updates state["positions_last"] from data/positions.csv.
-    # We relax some filters for existing holdings (e.g., gap filters).
-    pos_set = set(
-        str(x).strip() for x in (state.get("positions_last") or []) if str(x).strip()
-    )
 
     # Cross-sectional RS percentile pool (computed after scanning)
     rs_pool_syms: List[str] = []
@@ -643,9 +649,6 @@ def run_screen(
         ticker = str(row.get(tcol, "")).strip()
         if not ticker:
             continue
-
-        # Whether this ticker is currently held (position)
-        is_pos = ticker in pos_set
         df = ohlc_map.get(ticker)
         if df is None or df.empty or len(df) < 120:
             continue
@@ -1485,11 +1488,22 @@ def run_screen(
     gu_ratio = float(gu_cnt / max(1, raw_n)) if raw_n > 0 else 0.0
 
     meta = {
+    # Data health stats (useful for audits / outages)
+
         "raw": int(raw_n),
         "final": int(len(final)),
         "avgAdjEV": float(avg_adj),
         "GU": float(gu_ratio),
         "saucers": scan_saucers(ohlc_map, uni, tcol, max_each=5),
     }
+
+    # Data health stats (useful for audits / outages)
+    meta["data_coverage"] = round(data_cov, 4)
+    meta["data_symbols_total"] = data_total
+    meta["data_symbols_ok"] = data_ok
+
+
+    if no_trade_force and no_trade_reason_force:
+        meta["no_trade_reason"] = no_trade_reason_force
 
     return final, meta, ohlc_map
