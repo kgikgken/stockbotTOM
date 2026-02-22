@@ -30,6 +30,17 @@ def env_truthy(name: str, default: bool = False) -> bool:
     return default
 
 
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    """Backward-compatible alias for :func:`env_truthy`.
+
+    Some modules historically used the private name ``_env_truthy``.
+    Keeping this alias prevents NameError regressions.
+    """
+
+    return env_truthy(name, default)
+
+
 def tick_size_jpx(price: float) -> float:
     """JPX tick size (呼値の単位) for the standard 'その他銘柄' table.
 
