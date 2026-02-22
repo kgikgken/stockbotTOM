@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
@@ -30,45 +31,73 @@ def env_truthy(name: str, default: bool = False) -> bool:
 
 
 def tick_size_jpx(price: float) -> float:
-    """Return the JPX tick size (呼値) for a given price.
+    """JPX tick size (呼値の単位) for the standard 'その他銘柄' table.
 
-    This follows JPX's official *"その他の銘柄"* table.
-
-    Why this matters:
-      - Wrong tick sizes can produce invalid limit prices (order rejected).
-      - Even if accepted, coarse/incorrect rounding can shift entry/SL/zone and
-        distort the intended risk.
+    Notes
+    -----
+    * JPX has different tick tables for some liquid constituents / ETFs.
+      This function intentionally follows the *standard/others* table.
+      If a symbol actually has *smaller* tick sizes, using this larger tick
+      is still a valid price (multiple of the smaller tick) and avoids
+      "order rejected due to invalid tick" incidents.
+    * Price is assumed to be JPY (Tokyo Stock Exchange cash equities).
     """
-
     try:
         p = float(price)
     except Exception:
         return 1.0
+
     if not np.isfinite(p) or p <= 0:
         return 1.0
 
-    # JPX 呼値（その他の銘柄）
-    # https://www.jpx.co.jp/equities/trading/domestic/01.html
+    # ---- Standard/others table (JPY) ----
+    # <=1,000: 1
+    if p <= 1000:
+        return 1.0
+    # 1,000< - 3,000: 1
     if p <= 3000:
         return 1.0
+    # 3,000< - 5,000: 5
     if p <= 5000:
         return 5.0
+    # 5,000< - 10,000: 10
+    if p <= 10000:
+        return 10.0
+    # 10,000< - 30,000: 10
     if p <= 30000:
         return 10.0
+    # 30,000< - 50,000: 50
     if p <= 50000:
         return 50.0
+    # 50,000< - 100,000: 100
+    if p <= 100000:
+        return 100.0
+    # 100,000< - 300,000: 100
     if p <= 300000:
         return 100.0
+    # 300,000< - 500,000: 500
     if p <= 500000:
         return 500.0
+    # 500,000< - 1,000,000: 1,000
+    if p <= 1000000:
+        return 1000.0
+    # 1,000,000< - 3,000,000: 1,000
     if p <= 3000000:
         return 1000.0
+    # 3,000,000< - 5,000,000: 5,000
     if p <= 5000000:
         return 5000.0
+    # 5,000,000< - 10,000,000: 10,000
+    if p <= 10000000:
+        return 10000.0
+    # 10,000,000< - 30,000,000: 10,000
     if p <= 30000000:
         return 10000.0
+    # 30,000,000< - 50,000,000: 50,000
     if p <= 50000000:
         return 50000.0
+
+    # >50,000,000
     return 100000.0
 
 
@@ -144,6 +173,27 @@ def safe_float(x, default=np.nan) -> float:
     except Exception:
         return float(default)
 
+def append_csv_row(path: str, fieldnames: list[str], row: dict) -> None:
+    """Append a row to a CSV file (create with header if missing).
+
+    This is used for lightweight logging (e.g., probability calibration logs)
+    without adding any new dependencies.
+    """
+    try:
+        p = Path(path)
+        if p.parent and str(p.parent) not in ('.', ''):
+            p.parent.mkdir(parents=True, exist_ok=True)
+        exists = p.exists()
+        with p.open('a', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            if not exists:
+                w.writeheader()
+            w.writerow({k: row.get(k, '') for k in fieldnames})
+    except Exception:
+        # never break the screener because of logging
+        return
+
+
 def clamp(v: float, lo: float, hi: float) -> float:
     return float(max(lo, min(hi, v)))
 
@@ -167,20 +217,189 @@ def _normalize_tickers(tickers: Iterable[str]) -> List[str]:
     return uniq
 
 def download_history_bulk(
-    tickers: Iterable[str],
+    tickers: list[str],
     period: str = "260d",
-    auto_adjust: bool = True,
+    interval: str = "1d",
+    *,
     group_size: int = 200,
-    pause_sec: float = 0.15,
-) -> Dict[str, pd.DataFrame]:
+    pause_sec: float = 1.0,
+    auto_adjust: bool = True,
+    min_bars: int = 60,
+    cache_dir: str | None = None,
+    cache_max_age_days: int | None = None,
+    retries: int | None = None,
+    retry_base_sec: float | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Bulk download OHLCV via yfinance with retries + per-symbol cache.
+
+    Why this exists
+    ---------------
+    * Yahoo/yfinance is prone to rate limits and intermittent empty responses.
+    * A cache (optionally persisted via CI cache) dramatically reduces API hits.
+    * Retries + backoff improves resilience without changing the strategy logic.
+
+    Returns
+    -------
+    dict[symbol, DataFrame]
+        Each DF has columns: Open, High, Low, Close, Volume.
     """
-    yfinance.download を chunk で回す。
-    返り値: {ticker: df} (Open/High/Low/Close/Volume)
-    """
-    tickers = _normalize_tickers(tickers)
-    out: Dict[str, pd.DataFrame] = {}
+
     if not tickers:
-        return out
+        return {}
+
+    # de-duplicate while keeping order
+    seen: set[str] = set()
+    syms: list[str] = []
+    for t in tickers:
+        s = str(t).strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        syms.append(s)
+
+    if not syms:
+        return {}
+
+    # defaults from env
+    if cache_dir is None:
+        cache_dir = os.environ.get("YF_CACHE_DIR", "out/cache/yf")
+    if cache_max_age_days is None:
+        cache_max_age_days = int(os.environ.get("YF_CACHE_MAX_AGE_DAYS", "7"))
+    if retries is None:
+        retries = int(os.environ.get("YF_RETRY", "3"))
+    if retry_base_sec is None:
+        retry_base_sec = float(os.environ.get("YF_RETRY_BASE_SEC", "1.5"))
+
+    use_cache = _env_truthy("YF_CACHE", True)
+
+    cache_root = Path(cache_dir) if cache_dir else None
+    if use_cache and cache_root is not None:
+        cache_root.mkdir(parents=True, exist_ok=True)
+
+    def _cache_path(sym: str) -> Path:
+        safe = re.sub(r"[^0-9A-Za-z._^=\-]+", "_", sym)
+        adj = "adj" if auto_adjust else "raw"
+        return cache_root / f"{safe}_{period}_{interval}_{adj}.pkl"  # type: ignore[arg-type]
+
+    def _cache_get(sym: str) -> pd.DataFrame | None:
+        if not use_cache or cache_root is None:
+            return None
+        p = _cache_path(sym)
+        if not p.exists():
+            return None
+        if cache_max_age_days and cache_max_age_days > 0:
+            age_sec = max(0.0, time.time() - p.stat().st_mtime)
+            if age_sec > float(cache_max_age_days) * 86400.0:
+                return None
+        try:
+            df = pd.read_pickle(p)
+            if df is None or df.empty:
+                return None
+            if len(df) < min_bars:
+                return None
+            return df
+        except Exception:
+            return None
+
+    def _cache_put(sym: str, df: pd.DataFrame) -> None:
+        if not use_cache or cache_root is None:
+            return
+        try:
+            p = _cache_path(sym)
+            df.to_pickle(p)
+        except Exception:
+            pass
+
+    def _yf_download(chunk: list[str]) -> pd.DataFrame | None:
+        # retry/backoff on hard failures
+        last_err: Exception | None = None
+        for attempt in range(max(0, retries) + 1):
+            try:
+                data = yf.download(
+                    tickers=chunk,
+                    period=period,
+                    interval=interval,
+                    auto_adjust=auto_adjust,
+                    group_by="ticker",
+                    threads=True,
+                    progress=False,
+                )
+                return data
+            except Exception as e:
+                last_err = e
+                if attempt >= max(0, retries):
+                    break
+                sleep_s = float(retry_base_sec) * (2.0 ** attempt)
+                # small jitter to avoid thundering herd in CI
+                sleep_s += random.random() * 0.25
+                time.sleep(sleep_s)
+        if last_err is not None:
+            logger.warning(f"yfinance download failed (chunk={len(chunk)}): {last_err}")
+        return None
+
+    # 1) try cache first
+    out: dict[str, pd.DataFrame] = {}
+    need: list[str] = []
+    for s in syms:
+        cached = _cache_get(s)
+        if cached is not None:
+            out[s] = cached
+        else:
+            need.append(s)
+
+    # 2) download missing in chunks
+    for i in range(0, len(need), max(1, group_size)):
+        chunk = need[i : i + max(1, group_size)]
+        if not chunk:
+            continue
+
+        data = _yf_download(chunk)
+        if data is None or getattr(data, "empty", True):
+            # fallback: try per-ticker (salvage)
+            for sym in chunk:
+                d1 = _yf_download([sym])
+                if d1 is None or getattr(d1, "empty", True):
+                    continue
+                # normalize
+                if isinstance(getattr(d1, "columns", None), pd.MultiIndex):
+                    try:
+                        df1 = d1[sym].copy().dropna(how="all")
+                    except Exception:
+                        continue
+                else:
+                    df1 = d1.copy().dropna(how="all")
+                if df1 is None or df1.empty or len(df1) < min_bars:
+                    continue
+                out[sym] = df1
+                _cache_put(sym, df1)
+            time.sleep(pause_sec)
+            continue
+
+        # normalize: multi/single
+        if isinstance(getattr(data, "columns", None), pd.MultiIndex):
+            for sym in chunk:
+                try:
+                    df = data[sym].copy().dropna(how="all")
+                except Exception:
+                    continue
+                if df is None or df.empty or len(df) < min_bars:
+                    continue
+                out[sym] = df
+                _cache_put(sym, df)
+        else:
+            # sometimes yfinance returns a single-table even when chunk>1 (rare)
+            if len(chunk) == 1:
+                sym = chunk[0]
+                df = data.copy().dropna(how="all")
+                if df is not None and (not df.empty) and len(df) >= min_bars:
+                    out[sym] = df
+                    _cache_put(sym, df)
+
+        time.sleep(pause_sec)
+
+    return out
 
     # yfinance は欠損ティッカーが混ざると大量の WARNING/ERROR を標準出力に出す。
     # Actions のログ可読性のため、デフォルトで抑制する。
