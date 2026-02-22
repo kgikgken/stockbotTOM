@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from utils.util import sma, returns, safe_float, clamp
+from utils.util import sma, returns, safe_float, clamp, download_history_bulk
 
 # NOTE:
 #  - yfinance does *not* reliably provide "^TOPX" (TOPIX index).
@@ -22,13 +22,24 @@ def _parse_csv_env(name: str, default: str) -> list[str]:
 
 
 def _fetch_index(symbol: str, period: str = "260d") -> pd.DataFrame:
+    """Fetch an index/ETF series resiliently.
+
+    Uses utils.util.download_history_bulk() to inherit retry/backoff and caching.
+    """
     try:
-        df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
+        m = download_history_bulk(
+            [symbol],
+            period=period,
+            interval="1d",
+            group_size=1,
+            pause_sec=0.0,
+            auto_adjust=True,
+            min_bars=20,
+        )
+        df = m.get(symbol)
         return df if df is not None else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
-
-
 def _fetch_any(symbols: Iterable[str], period: str = "260d") -> tuple[str, pd.DataFrame]:
     for sym in symbols:
         df = _fetch_index(sym, period=period)
@@ -102,7 +113,7 @@ def _vol_gap_penalty(df: pd.DataFrame) -> float:
 
 def market_score() -> Dict[str, float]:
     # Prefer ETFs for stability. Users can override via env vars.
-    topx_syms = _parse_csv_env("MARKET_TOPX_TICKERS", "1306.T,^TOPX")
+    topx_syms = _parse_csv_env("MARKET_TOPX_TICKERS", "998405.T,1306.T,^TOPX")
     n225_syms = _parse_csv_env("MARKET_N225_TICKERS", "^N225,1321.T")
 
     _, n225 = _fetch_any(n225_syms)
@@ -137,8 +148,21 @@ def market_score() -> Dict[str, float]:
 
 
 def futures_risk_on() -> Tuple[bool, float]:
+    """Simple risk-on proxy using Nikkei futures.
+
+    Returns (risk_on, change_percent).
+    """
     try:
-        df = yf.Ticker("NKD=F").history(period="6d", auto_adjust=True)
+        m = download_history_bulk(
+            ["NKD=F"],
+            period="6d",
+            interval="1d",
+            group_size=1,
+            pause_sec=0.0,
+            auto_adjust=True,
+            min_bars=2,
+        )
+        df = m.get("NKD=F")
         if df is None or df.empty or len(df) < 2:
             return False, 0.0
         chg = float(df["Close"].iloc[-1] / df["Close"].iloc[0] - 1.0) * 100.0
