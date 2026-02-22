@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
+import os
 from dataclasses import dataclass
 from typing import Tuple
 
 from utils.screen_logic import rr_min_by_market, rday_min_by_setup
-from utils.util import clamp
+from utils.util import clamp, append_csv_row
 from utils.setup import SetupInfo
 import numpy as np
 
