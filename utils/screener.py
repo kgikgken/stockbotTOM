@@ -584,7 +584,12 @@ def run_screen(
         min_cov = float(os.environ.get("MIN_DATA_COVERAGE", "0.75"))
     except Exception:
         min_cov = 0.75
-    data_total = len(syms)
+
+    # Initialize fail-safe flags (set only when data coverage is insufficient)
+    no_trade_force = False
+    no_trade_reason_force = ""
+
+    data_total = len(tickers)
     data_ok = len(ohlc_map)
     data_cov = (data_ok / data_total) if data_total else 0.0
     if data_cov < min_cov:
