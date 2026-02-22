@@ -31,6 +31,15 @@ jobs:
         run: |
           python -m compileall -q .
 
+      - name: Cache yfinance data
+        uses: actions/cache@v4
+        with:
+          path: |
+            out/cache/yf
+          key: ${{ runner.os }}-yfcache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-yfcache-
+
       - name: Run stockbot
         run: python main.py
         env:
