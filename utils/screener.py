@@ -650,10 +650,19 @@ def run_screen(
     rs_pool_syms: List[str] = []
     rs_pool_vals: List[float] = []
 
+    # Current positions snapshot (set in main via update_weekly_from_positions)
+    # Used to relax some "new entry" hard-filters for held names.
+    pos_set = set(
+        str(x).strip() for x in (state.get("positions_last") or []) if str(x).strip()
+    )
+
     for _, row in uni.iterrows():
         ticker = str(row.get(tcol, "")).strip()
         if not ticker:
             continue
+
+        # Held position? (affects hard-filters / gap guard / different RR minima)
+        is_pos = ticker in pos_set
         df = ohlc_map.get(ticker)
         if df is None or df.empty or len(df) < 120:
             continue
