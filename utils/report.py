@@ -87,6 +87,7 @@ def build_report(
     policy_lines: List[str],
     cands: List[Dict],
     pos_text: str,
+    no_trade_reason: str | None = None,
     saucers: Dict[str, List[Dict]] | List[Dict] | None = None,
 ) -> str:
     mkt_score = int(market.get("score", 50))
@@ -115,7 +116,7 @@ def build_report(
             lines.append("")
     # Header
     if no_trade:
-        reason = "重要イベント警戒" if macro_on else "地合い条件"
+        reason = no_trade_reason or ("重要イベント警戒" if macro_on else "地合い条件")
         lines.append(f"新規：🛑 NO（{reason}）")
     else:
         lines.append("新規：✅ OK（指値 / 現値INは銘柄別）")
