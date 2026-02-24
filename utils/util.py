@@ -9,7 +9,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+# yfinance is required for market data download, but we keep it as an optional
+# import so that non-data modules (e.g. LINE notification, formatting, tests)
+# can be imported even when yfinance is missing in the environment.
+try:
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover
+    yf = None  # type: ignore
 
 # Silence noisy yfinance logs by default.
 # (GitHub Actions のログが yfinance の警告で埋まるのを避ける)
@@ -213,6 +219,11 @@ def download_history_bulk(
       - YF_GROUP_SLEEP      : chunk 間の待ち秒 (default: pause_sec)
       - YF_GROUP_SIZE       : group_size の上書き (optional)
     """
+    if yf is None:
+        raise ImportError(
+            "yfinance is not available. Install yfinance to enable market data download (download_history_bulk)."
+        )
+
     tickers = _normalize_tickers(tickers)
     out: Dict[str, pd.DataFrame] = {}
     if not tickers:
