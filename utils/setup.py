@@ -54,6 +54,16 @@ class SetupInfo:
     # レンジ収縮（(H-L)/Close の直近5本平均 / 直近20本平均）
     range_contr: Optional[float] = None
 
+    # --- Execution helpers (for better fill-rate in pullback limit orders)
+    # "浅/中/深" の3段階の指値（買い）を、entry band 内で提示する。
+    # shallow: band上限寄り（浅押し） / mid: 中央（従来の中心値） / deep: band下限寄り（深押し）
+    entry_shallow: Optional[float] = None
+    entry_mid: Optional[float] = None
+    entry_deep: Optional[float] = None
+    risk_shallow: Optional[float] = None
+    risk_mid: Optional[float] = None
+    risk_deep: Optional[float] = None
+
 
 def _trend_strength(c: pd.Series, ma20: pd.Series, ma50: pd.Series) -> float:
     c_last = safe_float(c.iloc[-1], np.nan)
@@ -255,6 +265,7 @@ def detect_setup(df: pd.DataFrame) -> Tuple[str, int]:
 
 def entry_band(df: pd.DataFrame, setup: str) -> Tuple[float, float, float, Optional[float]]:
     c = df["Close"].astype(float)
+    ma10 = sma(c, 10)
     ma20 = sma(c, 20)
     ma50 = sma(c, 50)
     a = atr14(df)
@@ -262,18 +273,24 @@ def entry_band(df: pd.DataFrame, setup: str) -> Tuple[float, float, float, Optio
     if not np.isfinite(atr) or atr <= 0:
         atr = safe_float(c.iloc[-1], 0.0) * 0.015
 
+    m10 = safe_float(ma10.iloc[-1], safe_float(c.iloc[-1], 0.0))
     m20 = safe_float(ma20.iloc[-1], safe_float(c.iloc[-1], 0.0))
     m50 = safe_float(ma50.iloc[-1], safe_float(c.iloc[-1], 0.0))
     breakout_line = None
 
-    if setup in ("A1-Strong", "A1"):
-        k = 0.4 if setup == "A1-Strong" else 0.5
-        lo = m20 - k * atr
-        hi = m20 + k * atr
+    if setup == "A1-Strong":
+        # Shallow pullback for strong leaders: MA10-centered zone.
+        center = m10 if (np.isfinite(m10) and m10 > 0) else m20
+        lo = center - 0.25 * atr
+        hi = center + 0.20 * atr
+    elif setup == "A1":
+        # Standard pullback: MA20 zone (slightly biased down to avoid chasing).
+        lo = m20 - 0.55 * atr
+        hi = m20 + 0.15 * atr
     elif setup == "A2":
         center = (m20 + m50) / 2.0
-        lo = center - 0.6 * atr
-        hi = center + 0.6 * atr
+        lo = center - 0.55 * atr
+        hi = center + 0.55 * atr
     elif setup == "B":
         hh20 = float(c.tail(21).max())
         breakout_line = hh20
@@ -406,6 +423,30 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool, entry_override: float | N
     rr_tp1 = max((tp1 - entry_price) / denom, 0.0)
     rday = rr_tp1 / max(exp_days, 1e-6)
 
+    # ---- Execution helper: 3-level limit ladder (浅/中/深)
+    # For better fill rate, we keep the band endpoints as shallow/deep and the computed entry_price as mid.
+    entry_deep = float(lo)
+    entry_mid = float(entry_price)
+    entry_shallow = float(hi)
+    # Ensure ordering after tick rounding
+    if entry_shallow < entry_deep:
+        entry_shallow = entry_deep
+    entry_mid = float(clamp(entry_mid, entry_deep, entry_shallow))
+
+    def _risk_pct(entry: float, sl_: float) -> Optional[float]:
+        try:
+            e = float(entry)
+            s = float(sl_)
+        except Exception:
+            return None
+        if not (e > 0) or not (s > 0) or not np.isfinite(e) or not np.isfinite(s) or e <= s:
+            return None
+        return float((e - s) / e * 100.0)
+
+    risk_deep = _risk_pct(entry_deep, sl)
+    risk_mid = _risk_pct(entry_mid, sl)
+    risk_shallow = _risk_pct(entry_shallow, sl)
+
     c = df["Close"].astype(float)
     ma20 = sma(c, 20)
     ma50 = sma(c, 50)
@@ -441,6 +482,14 @@ def build_setup_info(df: pd.DataFrame, macro_on: bool, entry_override: float | N
         atr_contr=float(atr_contr) if np.isfinite(atr_contr) else None,
         gap_freq=float(gap_freq) if np.isfinite(gap_freq) else None,
         range_contr=float(range_contr) if np.isfinite(range_contr) else None,
+
+        # ladder
+        entry_deep=float(entry_deep),
+        entry_mid=float(entry_mid),
+        entry_shallow=float(entry_shallow),
+        risk_deep=float(risk_deep) if risk_deep is not None else None,
+        risk_mid=float(risk_mid) if risk_mid is not None else None,
+        risk_shallow=float(risk_shallow) if risk_shallow is not None else None,
     )
 
 
