@@ -15,6 +15,7 @@ from utils.util import (
     choppiness_index,
     adx,
     clamp,
+    tick_size_jpx,
 )
 from utils.setup import build_setup_info, liquidity_filters
 from utils.rr_ev import calc_ev, pass_thresholds
@@ -550,7 +551,6 @@ def _filter_blackouts(uni: pd.DataFrame, today_date) -> pd.DataFrame:
 
 
 def run_screen(
-
     today_str: str,
     today_date,
     mkt_score: int,
@@ -579,28 +579,19 @@ def run_screen(
     tickers = uni[tcol].astype(str).tolist()
     ohlc_map = download_history_bulk(tickers, period="780d", auto_adjust=True, group_size=200)
 
-    # Data coverage guardrail: if Yahoo/yfinance is partially down, freeze new trades
-    try:
-        min_cov = float(os.environ.get("MIN_DATA_COVERAGE", "0.75"))
-    except Exception:
-        min_cov = 0.75
-
-    # Initialize fail-safe flags (set only when data coverage is insufficient)
-    no_trade_force = False
-    no_trade_reason_force = ""
-
+    # Data coverage (yfinance失敗/レート制限の検知用)
     data_total = len(tickers)
     data_ok = len(ohlc_map)
-    data_cov = (data_ok / data_total) if data_total else 0.0
-    if data_cov < min_cov:
-        no_trade_force = True
-        no_trade_reason_force = f"データ取得不足 {data_ok}/{data_total} ({data_cov*100:.0f}%)"
+    data_coverage = (data_ok / data_total) if data_total else 0.0
+    coverage_min = _env_float("DATA_COVERAGE_MIN", 0.85)
+    data_warn = (data_total > 0) and (data_coverage < coverage_min)
+
 
     # --- Index telemetry (for relative strength / RS)
     # yfinance is unreliable for ^TOPX, so we prefer stable Japan ETFs.
     # Default:
     #   1306.T (TOPIX ETF) -> ^N225 (Nikkei) -> ^TOPX
-    rs_bench_syms = [s.strip() for s in os.getenv("RS_BENCH_TICKERS", "998405.T,1306.T,^N225,^TOPX").split(",") if s.strip()]
+    rs_bench_syms = [s.strip() for s in os.getenv("RS_BENCH_TICKERS", "1306.T,^N225,^TOPX").split(",") if s.strip()]
     topx_ret20 = float("nan")
     topx_ret60 = float("nan")
     topx_ret120 = float("nan")
@@ -641,7 +632,7 @@ def run_screen(
         if (kpi["median_r"] < -0.10) or (kpi["exp_gap"] < -0.30) or (kpi["neg_streak"] >= 3):
             set_cooldown_days(state, "distortion_until", days=4)
 
-    no_trade = no_trade_conditions(int(mkt_score), float(delta3)) or no_trade_force
+    no_trade = no_trade_conditions(int(mkt_score), float(delta3))
 
     cands: List[Dict] = []
     gu_cnt = 0
@@ -650,19 +641,10 @@ def run_screen(
     rs_pool_syms: List[str] = []
     rs_pool_vals: List[float] = []
 
-    # Current positions snapshot (set in main via update_weekly_from_positions)
-    # Used to relax some "new entry" hard-filters for held names.
-    pos_set = set(
-        str(x).strip() for x in (state.get("positions_last") or []) if str(x).strip()
-    )
-
     for _, row in uni.iterrows():
         ticker = str(row.get(tcol, "")).strip()
         if not ticker:
             continue
-
-        # Held position? (affects hard-filters / gap guard / different RR minima)
-        is_pos = ticker in pos_set
         df = ohlc_map.get(ticker)
         if df is None or df.empty or len(df) < 120:
             continue
@@ -734,6 +716,13 @@ def run_screen(
         entry_high = float(info.entry_high)
         entry_price = float(info.entry_price if info.entry_price is not None else (entry_low + entry_high) / 2.0)
         sl = float(info.sl)
+        tp1 = float(info.tp1)
+
+        # Safety: invalid geometry should never pass.
+        # - SL must be below the entry band (buy setup)
+        # - TP1 must be above the chosen entry price
+        if not (sl > 0 and entry_low > 0 and sl < entry_low and tp1 > entry_price):
+            continue
         # リスク幅（%）
         # - entry band がある以上、最悪ケース（=band上限）でもルールを満たす必要がある
         # - 表示は中央(=entry_price)を維持しつつ、除外判定は band上限 を使用
@@ -746,6 +735,12 @@ def run_screen(
         # - 8%超はギャップ/滑りで想定損失が破綻しやすいため、候補自体を落とす
         if risk_pct_high >= MAX_RISK_PCT:
             continue
+
+        # Too-tight stops: penalize (not a hard filter)
+        tick = tick_size_jpx(entry_price) if entry_price > 0 else tick_size_jpx(close_last)
+        stop_ticks = (entry_price - sl) / tick if (tick > 0 and entry_price > sl) else 0.0
+        min_stop_ticks = _env_float("MIN_STOP_TICKS", 3.0)
+        tight_stop = bool(stop_ticks > 0 and stop_ticks < min_stop_ticks)
 
 
 
@@ -810,6 +805,8 @@ def run_screen(
         )
         gap_atr_freq = safe_float(gap_atr.get("freq"), np.nan)
         gap_atr_max = safe_float(gap_atr.get("max"), np.nan)
+
+        is_pos = False  # NOTE: positions are handled outside this screener
 
 
         # Hard exclude: one-off extreme overnight gap (earnings/IR risk) even if freq is low.
@@ -1197,6 +1194,10 @@ def run_screen(
             elif up_ratio20 <= 0.42:
                 quality -= 0.01
 
+        # Tight stop penalty (noise-trigger risk)
+        if tight_stop:
+            quality -= _env_float("TIGHT_STOP_PENALTY", 0.06)
+
         quality = float(np.clip(quality, -0.30, 0.30))
 
         # 現値IN判定（運用ルールに沿って“現実的にOK”な条件に限定）
@@ -1262,6 +1263,13 @@ def run_screen(
                 "entry_low": float(entry_low),
                 "entry_high": float(entry_high),
                 "entry_price": float(entry_price),
+                # 3-level limit ladder (浅/中/深) for better fill rate
+                "entry_shallow": float(info.entry_shallow) if info.entry_shallow is not None else float(entry_high),
+                "entry_mid": float(info.entry_mid) if info.entry_mid is not None else float(entry_price),
+                "entry_deep": float(info.entry_deep) if info.entry_deep is not None else float(entry_low),
+                "risk_shallow": float(info.risk_shallow) if info.risk_shallow is not None else float("nan"),
+                "risk_mid": float(info.risk_mid) if info.risk_mid is not None else float("nan"),
+                "risk_deep": float(info.risk_deep) if info.risk_deep is not None else float("nan"),
                 "sl": float(sl),
                 "tp1": float(info.tp1),
                 "tp2": float(info.tp2),
@@ -1285,6 +1293,8 @@ def run_screen(
                 "band_pos": float(band_pos) if np.isfinite(band_pos) else float("nan"),
                 "close_last": float(close_last),
                 "risk_pct": float(risk_pct),
+                "tight_stop": bool(tight_stop),
+                "stop_ticks": float(stop_ticks),
                 "risk_pct_low": float(risk_pct_low),
                 "risk_pct_high": float(risk_pct_high),
                 "risk_now": float(risk_now),
@@ -1502,22 +1512,16 @@ def run_screen(
     gu_ratio = float(gu_cnt / max(1, raw_n)) if raw_n > 0 else 0.0
 
     meta = {
-    # Data health stats (useful for audits / outages)
-
         "raw": int(raw_n),
         "final": int(len(final)),
         "avgAdjEV": float(avg_adj),
         "GU": float(gu_ratio),
+        "data_total": int(data_total),
+        "data_ok": int(data_ok),
+        "data_coverage": float(data_coverage),
+        "data_warn": bool(data_warn),
+        "data_coverage_min": float(coverage_min),
         "saucers": scan_saucers(ohlc_map, uni, tcol, max_each=5),
     }
-
-    # Data health stats (useful for audits / outages)
-    meta["data_coverage"] = round(data_cov, 4)
-    meta["data_symbols_total"] = data_total
-    meta["data_symbols_ok"] = data_ok
-
-
-    if no_trade_force and no_trade_reason_force:
-        meta["no_trade_reason"] = no_trade_reason_force
 
     return final, meta, ohlc_map
