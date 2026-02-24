@@ -12,6 +12,7 @@ preserves the existing contract: `send_line(text: str) -> None`.
 from __future__ import annotations
 
 import os
+import traceback
 from pathlib import Path
 
 import pandas as pd
@@ -194,6 +195,10 @@ def main() -> None:
 
     # New entry gate: include macro caution days as 'no new' while still showing a watchlist.
     no_trade = no_trade_conditions(mkt_score, delta3, macro_warn=macro_on)
+    # Data coverage gating (yfinance instability)
+    data_warn = bool(meta.get("data_warn", False))
+    if data_warn:
+        no_trade = True
     policy_lines = []
     if macro_on:
         policy_lines += [
@@ -210,6 +215,13 @@ def main() -> None:
             "リスク幅8%超は除外",
             "GUは寄り後再判定",
         ]
+    if data_warn:
+        ok = int(meta.get("data_ok", 0))
+        tot = int(meta.get("data_total", 0))
+        cov = float(meta.get("data_coverage", 0.0))
+        cov_min = float(meta.get("data_coverage_min", 0.0))
+        policy_lines.insert(0, f"DATA:{ok}/{tot} ({cov*100:.0f}%) < {cov_min*100:.0f}%")
+
     # positions
     pos_text, _asset = analyze_positions(pos_df, mkt_score=mkt_score, macro_on=macro_on, new_tickers=new_tickers)
 
@@ -299,5 +311,18 @@ def main() -> None:
 
     save_state(state)
 
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # Fail-safe: still notify LINE so you notice breakages quickly.
+        tb = traceback.format_exc()
+        print(tb)
+        try:
+            msg = f"stockbotTOM ERROR\n{type(e).__name__}: {e}\n\n(GitHub Actions log)"
+            # send text even if LINE_SEND_TEXT is false
+            send_line(msg, force_text=True)
+        except Exception as ee:
+            print(f"[WARN] Failed to notify LINE: {ee}")
+        raise
