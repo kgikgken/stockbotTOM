@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import csv
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -133,6 +134,45 @@ def safe_float(x, default=np.nan) -> float:
 
 def clamp(v: float, lo: float, hi: float) -> float:
     return float(max(lo, min(hi, v)))
+
+
+def append_csv_row(
+    path: str,
+    row: Dict[str, Any] | List[Any] | Tuple[Any, ...],
+    header: Optional[List[str]] = None,
+    encoding: str = "utf-8",
+) -> None:
+    """Append a single row to a CSV file.
+
+    Backward-compat helper: some modules / forks still import this.
+    Keeps the runner from failing with ImportError.
+
+    - Creates parent directories automatically.
+    - Writes header when the file is new and (row is dict or header is provided).
+    - For dict rows, column order follows `header` if provided.
+    """
+
+    if not path:
+        return
+
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
+    file_exists = os.path.exists(path)
+
+    with open(path, "a", newline="", encoding=encoding) as f:
+        if isinstance(row, dict):
+            cols = header or list(row.keys())
+            w = csv.DictWriter(f, fieldnames=cols)
+            if (not file_exists) and cols:
+                w.writeheader()
+            w.writerow({k: row.get(k, "") for k in cols})
+        else:
+            w = csv.writer(f)
+            if (not file_exists) and header:
+                w.writerow(list(header))
+            w.writerow(list(row))
 
 @dataclass
 class OHLCV:
