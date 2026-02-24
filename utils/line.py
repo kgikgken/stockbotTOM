@@ -18,6 +18,11 @@ def send_line(
     text: str = "",
     image_paths: Optional[Sequence[str]] = None,
     *,
+    # Backward/forward compatibility:
+    # - Some callers historically used `image_path="..."` (single image).
+    # - Current implementation prefers `image_paths=[...]`.
+    # Accept both to avoid runtime TypeError in CI.
+    image_path: Optional[str] = None,
     force_text: bool = False,
     force_image: bool = False,
 ) -> None:
@@ -26,6 +31,7 @@ def send_line(
     Args:
         text: Message text.
         image_paths: Local file paths to images to send.
+        image_path: Single local image path (alias for image_paths=[...]).
         force_text: If True, send text even when LINE_SEND_TEXT is false.
         force_image: If True, send images even when LINE_SEND_IMAGE is false.
 
@@ -47,9 +53,24 @@ def send_line(
 
     headers = {"Authorization": f"Bearer {token}"}
 
+    # Normalize image path inputs (preserve order; de-dup)
+    paths: list[str] = []
+    if image_paths:
+        paths.extend([p for p in image_paths if p])
+    if image_path:
+        paths.append(image_path)
+
+    seen: set[str] = set()
+    norm_paths: list[str] = []
+    for p in paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        norm_paths.append(p)
+
     # 1) Send images first (if enabled)
-    if send_image and image_paths:
-        for path in image_paths:
+    if send_image and norm_paths:
+        for path in norm_paths:
             if not path or not os.path.exists(path):
                 continue
             try:
