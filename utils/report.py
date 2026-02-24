@@ -87,7 +87,6 @@ def build_report(
     policy_lines: List[str],
     cands: List[Dict],
     pos_text: str,
-    no_trade_reason: str | None = None,
     saucers: Dict[str, List[Dict]] | List[Dict] | None = None,
 ) -> str:
     mkt_score = int(market.get("score", 50))
@@ -116,7 +115,7 @@ def build_report(
             lines.append("")
     # Header
     if no_trade:
-        reason = no_trade_reason or ("重要イベント警戒" if macro_on else "地合い条件")
+        reason = "重要イベント警戒" if macro_on else "地合い条件"
         lines.append(f"新規：🛑 NO（{reason}）")
     else:
         lines.append("新規：✅ OK（指値 / 現値INは銘柄別）")
@@ -178,8 +177,10 @@ def build_report(
         order_items: List[Tuple[int, str, str, str]] = []
         watch_items: List[Tuple[int, str, str]] = []
         skip_items: List[Tuple[int, str]] = []
+        cand_by_rank: Dict[int, Dict] = {}
 
         for idx, c in enumerate(cands, 1):
+            cand_by_rank[idx] = c
             ticker = str(c.get("ticker", ""))
             name = str(c.get("name", ticker))
             setup = str(c.get("setup", "")).strip()
@@ -483,7 +484,7 @@ def build_report(
                         sl_txt,
                         tp1_txt,
                         risk_txt,
-                        "",
+                        "SLタイト" if bool(cand_by_rank.get(_rank, {}).get("tight_stop")) else "",
                     ]
                 )
 
