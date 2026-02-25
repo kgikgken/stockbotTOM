@@ -1,198 +1,228 @@
-# utils/line.py
-# Minimal LINE Notify wrapper.
-#
-# Default behavior (for daily ops): send images, skip text.
-# In error/fail-safe mode you can force text delivery via send_line(..., force_text=True).
-#
-# Compatibility:
-# - Accept both image_path and image_paths.
-# - Accept image_caption (caption attached to the image upload).
-# - Ignore unexpected kwargs (warn) to prevent CI/runtime crashes when callers evolve.
+"""LINE delivery helper (via Cloudflare Worker).
+
+This repository is designed to run on GitHub Actions.
+
+- Text delivery:
+    POST JSON to WORKER_URL: {"text": "..."}
+
+- Image delivery:
+    POST multipart/form-data to WORKER_URL with field "image" (file)
+    and optional fields:
+        - text: optional caption
+        - key : optional storage key (e.g. report_table_YYYY-MM-DD.png)
+
+The Cloudflare Worker then stores the image (e.g. R2) and pushes it to LINE.
+
+Env vars used:
+- WORKER_URL: Cloudflare Worker endpoint
+- WORKER_AUTH_TOKEN: Bearer token (required for image uploads if Worker enforces auth)
+
+Important:
+- This module MUST NOT raise; it returns a status dict so the caller can decide
+  whether to fail the workflow.
+"""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional, Sequence
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from utils.util import env_truthy
+
+def _auth_headers() -> Dict[str, str]:
+    token = os.getenv("WORKER_AUTH_TOKEN") or os.getenv("WORKER_TOKEN")
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _chunk_text(text: str, max_len: int = 4500) -> List[str]:
+    """Split text into chunks to avoid LINE message length errors."""
+
+    if not text:
+        return []
+
+    text = text.replace("\r\n", "\n")
+
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: List[str] = []
+    buf: List[str] = []
+    buf_len = 0
+
+    for line in text.split("\n"):
+        add_len = len(line) + (1 if buf else 0)
+        if buf_len + add_len <= max_len:
+            if buf:
+                buf.append("\n")
+                buf_len += 1
+            buf.append(line)
+            buf_len += len(line)
+            continue
+
+        if buf:
+            chunks.append("".join(buf))
+            buf = []
+            buf_len = 0
+
+        while len(line) > max_len:
+            chunks.append(line[:max_len])
+            line = line[max_len:]
+        buf.append(line)
+        buf_len = len(line)
+
+    if buf:
+        chunks.append("".join(buf))
+
+    return chunks
+
+
+def _post_text(worker_url: str, text: str, timeout: int = 25) -> Tuple[bool, str]:
+    """Send one text chunk."""
+
+    try:
+        r = requests.post(
+            worker_url,
+            json={"text": text},
+            headers={"Content-Type": "application/json", **_auth_headers()},
+            timeout=timeout,
+        )
+        if r.ok:
+            return True, ""
+        return False, f"HTTP {r.status_code}: {r.text[:200]}"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def _upload_image(
+    worker_url: str,
+    image_path: str,
+    *,
+    caption: str = "",
+    key: Optional[str] = None,
+    timeout: int = 40,
+) -> Tuple[bool, str]:
+    """Upload one image (multipart/form-data)."""
+
+    if not image_path or not os.path.exists(image_path):
+        return False, f"image not found: {image_path}"
+
+    data: Dict[str, str] = {}
+    if caption:
+        data["text"] = caption
+    if key:
+        data["key"] = key
+
+    headers = _auth_headers()
+
+    try:
+        with open(image_path, "rb") as f:
+            files = {"image": (os.path.basename(image_path), f)}
+            r = requests.post(worker_url, files=files, data=data, headers=headers, timeout=timeout)
+        if r.ok:
+            return True, ""
+        return False, f"HTTP {r.status_code}: {r.text[:200]}"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
 
 
 def send_line(
-    text: str = "",
-    image_paths: Optional[Sequence[str]] = None,
+    text: str,
     *,
-    # Backward/forward compatibility:
-    # - Some callers historically used `image_path="..."` (single image).
-    # - Current implementation prefers `image_paths=[...]`.
-    # Accept both to avoid runtime TypeError in CI.
     image_path: Optional[str] = None,
-    # Some callers pass `image_caption` (caption text for image upload).
-    # LINE Notify requires the "message" field even for image uploads.
     image_caption: str = "",
-    # Caller hint (used only for logging / diagnostics)
     image_key: Optional[str] = None,
     force_text: bool = False,
-    force_image: bool = False,
-    # Swallow extra kwargs for compatibility (print a warning so bugs are still visible).
-    **_ignored: Any,
 ) -> Dict[str, Any]:
-    """Send a LINE Notify message (text and/or images).
+    """Send to LINE via Worker.
 
     Args:
-        text:
-            Text body.
-            - Normal mode: used as fallback when images fail to send.
-            - force_text=True: always sent (for fail-safe/error notifications).
-        image_paths: Local file paths to images to send.
-        image_path: Single local image path (alias for image_paths=[...]).
-        image_caption:
-            Caption attached to the image upload.
-            LINE Notify requires the "message" field even for image uploads.
-        force_text: Force text sending regardless of LINE_SEND_TEXT.
-        force_image: Force image sending regardless of LINE_SEND_IMAGE.
+        text: message body (used for text-only send, or as fallback when image upload fails)
+        image_path: optional local image path (PNG) to upload
+        image_caption: optional short caption to attach (Worker sends it after the image)
+        image_key: optional storage key passed to Worker
+        force_text: if True, ignore image_path and send text only
 
-    Env:
-        LINE_NOTIFY_TOKEN: required.
-        LINE_SEND_IMAGE: default True.
-        LINE_SEND_TEXT : default False.
-
-    Notes:
-        - When images are provided and LINE_SEND_TEXT is false, `text` is used only as a
-          fallback if *no* image could be delivered (prevents "text + image spam").
-        - Unknown kwargs are ignored with a warning to avoid runtime crashes.
+    Returns:
+        dict with keys: ok, skipped, reason, image_ok, text_ok
     """
 
-    if _ignored:
-        try:
-            keys = ", ".join(sorted(_ignored.keys()))
-            print(f"[WARN] send_line: ignoring unknown kwargs: {keys}")
-        except Exception:
-            pass
-
-    token = os.getenv("LINE_NOTIFY_TOKEN", "").strip()
-    if not token:
-        print("[WARN] LINE_NOTIFY_TOKEN is not set. Skipping LINE notify.")
+    worker_url = os.getenv("WORKER_URL")
+    if not worker_url:
+        print("[WARN] WORKER_URL is not set. Skipping LINE notify.")
         return {
             "ok": False,
             "skipped": True,
-            "reason": "LINE_NOTIFY_TOKEN is not set",
+            "reason": "WORKER_URL is not set",
             "image_ok": False,
             "text_ok": False,
-            "image_key": image_key or "notify",
         }
 
-    # Default: image-only. Allow force_* override for fail-safe notifications.
-    send_image = env_truthy("LINE_SEND_IMAGE", True) or force_image
-    send_text = env_truthy("LINE_SEND_TEXT", False) or force_text
-
-    headers = {"Authorization": f"Bearer {token}"}
-
-    # Normalize image path inputs (preserve order; de-dup)
-    paths: list[str] = []
-    if image_paths:
-        paths.extend([p for p in image_paths if p])
-    if image_path:
-        paths.append(image_path)
-
-    seen: set[str] = set()
-    norm_paths: list[str] = []
-    for p in paths:
-        if p in seen:
-            continue
-        seen.add(p)
-        norm_paths.append(p)
-
-    image_attempted = False
-    image_sent = False
-    image_sent_count = 0
-    errors: list[str] = []
-
-    # 1) Send images first (if enabled)
-    if send_image and norm_paths:
-        image_attempted = True
-        for idx, path in enumerate(norm_paths):
-            if not path or not os.path.exists(path):
-                continue
-
-            # Attach caption only to the first image to avoid repetition.
-            cap = str(image_caption or "") if idx == 0 else ""
-
-            try:
-                with open(path, "rb") as f:
-                    files = {"imageFile": f}
-                    payload = {"message": cap}  # must include message key
-                    r = requests.post(
-                        "https://notify-api.line.me/api/notify",
-                        headers=headers,
-                        data=payload,
-                        files=files,
-                        timeout=30,
-                    )
-                if r.status_code == 200:
-                    image_sent = True
-                    image_sent_count += 1
-                else:
-                    print(f"[WARN] LINE image notify failed: {r.status_code} {r.text}")
-                    errors.append(f"image HTTP {r.status_code}: {str(r.text)[:200]}")
-            except Exception as e:
-                print(f"[WARN] LINE image notify exception: {e}")
-                errors.append(f"image exception: {e}")
-
-    # 2) Send text (if enabled OR fail-safe fallback)
-    # - force_text: always
-    # - send_text (LINE_SEND_TEXT): enabled
-    # - fallback: image attempted but none succeeded -> send text even if LINE_SEND_TEXT is false
-    should_send_text = False
-    if force_text:
-        should_send_text = True
-    elif send_text:
-        should_send_text = True
-    elif image_attempted and (not image_sent) and text.strip():
-        should_send_text = True
-
-    if should_send_text and text.strip():
-        try:
-            payload = {"message": text}
-            r = requests.post(
-                "https://notify-api.line.me/api/notify",
-                headers=headers,
-                data=payload,
-                timeout=30,
-            )
-            if r.status_code != 200:
-                print(f"[WARN] LINE text notify failed: {r.status_code} {r.text}")
-                errors.append(f"text HTTP {r.status_code}: {str(r.text)[:200]}")
-        except Exception as e:
-            print(f"[WARN] LINE text notify exception: {e}")
-            errors.append(f"text exception: {e}")
-
-    # --- Build a structured result for callers (main.py uses this) ---
-    # image_ok / text_ok mean "requested delivery succeeded".
-    # If that channel was not requested, we return True to avoid false negatives.
     image_ok = True
-    if send_image and norm_paths:
-        image_ok = bool(image_sent)
-
     text_ok = True
-    if should_send_text and text.strip():
-        # In current implementation, we do not explicitly track success beyond HTTP 200.
-        # If there were text-related errors recorded, mark as failed.
-        text_ok = not any(e.startswith("text ") for e in errors)
+    reason_parts: List[str] = []
 
-    # Overall ok: both channels that were requested must be ok.
-    ok = bool(image_ok and text_ok)
+    # 1) Image upload (optional)
+    if image_path and (not force_text):
+        ok, err = _upload_image(worker_url, image_path, caption=image_caption.strip(), key=image_key)
+        if not ok:
+            image_ok = False
+            reason_parts.append(f"image: {err}")
+
+            # Fallback to text (if provided)
+            txt = (text or "").strip()
+            if txt:
+                text_ok = True
+                for chunk in _chunk_text(txt):
+                    ok2, err2 = _post_text(worker_url, chunk)
+                    if not ok2:
+                        text_ok = False
+                        reason_parts.append(f"text: {err2}")
+                        break
+                    time.sleep(0.2)
+            else:
+                text_ok = False
+        else:
+            # image sent successfully; text is not sent by default in this mode
+            text_ok = True
+
+    # 2) Text-only mode
+    else:
+        txt = (text or "").strip()
+        if txt:
+            for chunk in _chunk_text(txt):
+                ok, err = _post_text(worker_url, chunk)
+                if not ok:
+                    text_ok = False
+                    reason_parts.append(f"text: {err}")
+                    break
+                time.sleep(0.2)
+        else:
+            # Nothing to send (treat as OK)
+            text_ok = True
+
+    # Overall success condition:
+    # - If we attempted image delivery and it succeeded -> success (even if we didn't send text).
+    # - If image delivery failed but we had non-empty text and successfully fell back to text -> success.
+    # - Otherwise (text-only) -> success iff text_ok.
+    ok_all = True
+    if image_path and (not force_text):
+        if image_ok:
+            ok_all = True
+        else:
+            # We only consider the fallback successful if there was actually text to send.
+            had_text = bool((text or "").strip())
+            ok_all = had_text and bool(text_ok)
+    else:
+        ok_all = bool(text_ok)
 
     return {
-        "ok": ok,
+        "ok": bool(ok_all),
         "skipped": False,
-        "image_ok": bool(image_ok),
+        "reason": " / ".join(reason_parts),
+        "image_ok": bool(image_ok) if (image_path and not force_text) else True,
         "text_ok": bool(text_ok),
-        "image_attempted": bool(image_attempted),
-        "image_sent": bool(image_sent),
-        "image_sent_count": int(image_sent_count),
-        "text_attempted": bool(should_send_text and text.strip()),
-        "errors": errors,
-        "image_key": image_key or "notify",
     }
