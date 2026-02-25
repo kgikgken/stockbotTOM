@@ -167,7 +167,21 @@ def send_line(
 
     # 1) Image upload (optional)
     if image_path and (not force_text):
-        ok, err = _upload_image(worker_url, image_path, caption=image_caption.strip(), key=image_key)
+        # NOTE:
+        # Many LINE delivery backends (including LINE Notify) require a non-empty
+        # message field even when an image is attached. Our Worker uses `caption`
+        # for that purpose.
+        #
+        # When the bot is configured as "images only" (LINE_SEND_TEXT=0), the
+        # caller passes an empty caption. That can cause delivery to fail.
+        #
+        # To keep the message visually blank while satisfying the requirement,
+        # we substitute a zero-width space (U+200B) when caption is empty.
+        caption = (image_caption or "").strip()
+        if not caption:
+            caption = "\u200b"  # zero-width space
+
+        ok, err = _upload_image(worker_url, image_path, caption=caption, key=image_key)
         if not ok:
             image_ok = False
             reason_parts.append(f"image: {err}")
