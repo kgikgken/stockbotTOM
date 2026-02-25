@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import requests
 
@@ -31,11 +31,13 @@ def send_line(
     # Some callers pass `image_caption` (caption text for image upload).
     # LINE Notify requires the "message" field even for image uploads.
     image_caption: str = "",
+    # Caller hint (used only for logging / diagnostics)
+    image_key: Optional[str] = None,
     force_text: bool = False,
     force_image: bool = False,
     # Swallow extra kwargs for compatibility (print a warning so bugs are still visible).
     **_ignored: Any,
-) -> None:
+) -> Dict[str, Any]:
     """Send a LINE Notify message (text and/or images).
 
     Args:
@@ -72,7 +74,14 @@ def send_line(
     token = os.getenv("LINE_NOTIFY_TOKEN", "").strip()
     if not token:
         print("[WARN] LINE_NOTIFY_TOKEN is not set. Skipping LINE notify.")
-        return
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "LINE_NOTIFY_TOKEN is not set",
+            "image_ok": False,
+            "text_ok": False,
+            "image_key": image_key or "notify",
+        }
 
     # Default: image-only. Allow force_* override for fail-safe notifications.
     send_image = env_truthy("LINE_SEND_IMAGE", True) or force_image
@@ -97,6 +106,8 @@ def send_line(
 
     image_attempted = False
     image_sent = False
+    image_sent_count = 0
+    errors: list[str] = []
 
     # 1) Send images first (if enabled)
     if send_image and norm_paths:
@@ -121,10 +132,13 @@ def send_line(
                     )
                 if r.status_code == 200:
                     image_sent = True
+                    image_sent_count += 1
                 else:
                     print(f"[WARN] LINE image notify failed: {r.status_code} {r.text}")
+                    errors.append(f"image HTTP {r.status_code}: {str(r.text)[:200]}")
             except Exception as e:
                 print(f"[WARN] LINE image notify exception: {e}")
+                errors.append(f"image exception: {e}")
 
     # 2) Send text (if enabled OR fail-safe fallback)
     # - force_text: always
@@ -149,5 +163,36 @@ def send_line(
             )
             if r.status_code != 200:
                 print(f"[WARN] LINE text notify failed: {r.status_code} {r.text}")
+                errors.append(f"text HTTP {r.status_code}: {str(r.text)[:200]}")
         except Exception as e:
             print(f"[WARN] LINE text notify exception: {e}")
+            errors.append(f"text exception: {e}")
+
+    # --- Build a structured result for callers (main.py uses this) ---
+    # image_ok / text_ok mean "requested delivery succeeded".
+    # If that channel was not requested, we return True to avoid false negatives.
+    image_ok = True
+    if send_image and norm_paths:
+        image_ok = bool(image_sent)
+
+    text_ok = True
+    if should_send_text and text.strip():
+        # In current implementation, we do not explicitly track success beyond HTTP 200.
+        # If there were text-related errors recorded, mark as failed.
+        text_ok = not any(e.startswith("text ") for e in errors)
+
+    # Overall ok: both channels that were requested must be ok.
+    ok = bool(image_ok and text_ok)
+
+    return {
+        "ok": ok,
+        "skipped": False,
+        "image_ok": bool(image_ok),
+        "text_ok": bool(text_ok),
+        "image_attempted": bool(image_attempted),
+        "image_sent": bool(image_sent),
+        "image_sent_count": int(image_sent_count),
+        "text_attempted": bool(should_send_text and text.strip()),
+        "errors": errors,
+        "image_key": image_key or "notify",
+    }
