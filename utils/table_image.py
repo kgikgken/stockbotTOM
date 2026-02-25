@@ -559,7 +559,13 @@ def _render_table_png_pil(
     outer_w = max(style.line_width, 2)
     draw.rectangle([x0, y0, x1, y0 + table_h], outline=style.grid_color, width=outer_w)
 
-    img.save(out_path)
+    # Optimize output size for reliable delivery (e.g., LINE image upload limits)
+    # without changing the visual layout.
+    try:
+        img.save(out_path, optimize=True)
+    except Exception:
+        # Fallback: keep the old behavior if the Pillow backend rejects params
+        img.save(out_path)
     return out_path
 def _render_table_png_mpl(
     title: str,
