@@ -270,10 +270,11 @@ def main() -> None:
         try:
             result: dict = {}
             if image_paths:
-                # Send the first image with report text as fallback (only used when the image upload fails).
+                # Images-only delivery in LINE.
+                # (The summary/title is embedded in the PNG, so we intentionally send NO text.)
                 first = image_paths[0]
                 result = send_line(
-                    report,
+                    "",  # IMPORTANT: images-only
                     image_path=first,
                     image_caption="",  # image only (no caption text)
                     image_key=os.path.basename(first),
@@ -295,6 +296,14 @@ def main() -> None:
                     if r.get("image_ok") is False:
                         image_ok_all = False
                 result["image_ok_all"] = image_ok_all
+
+                # Fail-safe: if any image failed, also send the text report so LINE still arrives.
+                if not image_ok_all:
+                    print("[WARN] One or more images failed to send. Falling back to text report.")
+                    try:
+                        send_line(report)
+                    except Exception as ee:
+                        print(f"[WARN] Failed to send fallback text: {ee}")
             else:
                 # No images → fallback to text
                 result = send_line(report)
