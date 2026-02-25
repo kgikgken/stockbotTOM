@@ -261,6 +261,10 @@ def main() -> None:
         image_paths = [str(p) for p in candidates if p.exists()]
 
     require_delivery = _env_truthy("REQUIRE_LINE_DELIVERY", False)
+    # If True, fail the run when at least one image page could not be delivered.
+    # Default is False: it's usually better to still deliver the text report
+    # (or a partial set of images) than to hard-fail the whole workflow.
+    require_images = _env_truthy("REQUIRE_LINE_IMAGES", False)
 
     if send_line:
         try:
@@ -299,11 +303,18 @@ def main() -> None:
 
             if require_delivery:
                 if image_paths:
-                    if not result.get("image_ok_all", False):
-                        raise RuntimeError("LINE delivery failed (one or more images)")
+                    # Require that at least the *first* message (report + first image)
+                    # was delivered. Additional image pages are best-effort unless
+                    # REQUIRE_LINE_IMAGES=1.
+                    if not result.get("ok", False):
+                        raise RuntimeError("LINE delivery failed")
                 else:
                     if not result.get("text_ok", False):
                         raise RuntimeError("LINE delivery failed (text)")
+
+            if require_images and image_paths:
+                if not result.get("image_ok_all", False):
+                    raise RuntimeError("LINE delivery failed (one or more images)")
         except Exception as e:
             print("LINE delivery error:", e)
             if require_delivery:
