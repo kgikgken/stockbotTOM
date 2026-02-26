@@ -261,6 +261,7 @@ def send_line(
     *,
     image_path: Optional[str] = None,
     image_caption: Optional[str] = None,
+    image_key: Optional[str] = None,
     force_text: bool = False,
     timeout: float = 30.0,
 ) -> Dict[str, object]:
@@ -311,7 +312,9 @@ def send_line(
 
         # 1) Try image upload (worker will also push caption text if provided).
         if image_path and not force_text:
-            img_key = os.path.basename(image_path)
+            # main.py may provide a stable key (e.g. report_table_YYYY-MM-DD.png)
+            # to make retries idempotent. Otherwise fallback to basename.
+            img_key = (str(image_key).strip() if image_key else "") or os.path.basename(image_path)
             max_bytes = _line_image_max_bytes()
             upload_path, is_tmp = _ensure_line_image_bytes(image_path, max_bytes=max_bytes)
             if upload_path != image_path:
