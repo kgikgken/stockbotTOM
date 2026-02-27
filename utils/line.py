@@ -1,433 +1,488 @@
-"""utils.line
+"""LINE delivery helper.
 
-LINE delivery helper.
+This project supports two delivery backends:
 
-This repo supports two delivery paths:
+1) A custom "worker" endpoint (recommended for GitHub Actions) that forwards
+   text/images to LINE.
+   - Config via env:
+       WORKER_URL         (required)
+       WORKER_AUTH_TOKEN  (optional)
 
-1) Cloudflare Worker (preferred)
-   - Env: WORKER_URL (or LINE_WORKER_URL), WORKER_AUTH_TOKEN (or LINE_WORKER_AUTH_TOKEN)
-   - POST JSON: {"text": "..."}  -> text only
-   - POST multipart/form-data: field "image" (+ optional "text"/"caption", "key")
-     -> worker uploads image to R2 and pushes via LINE Messaging API (push).
+   The worker implementations seen in the wild vary. This module is intentionally
+   backward-compatible with both styles:
 
-2) LINE Notify (fallback)
-   - Env: LINE_NOTIFY_TOKEN
+   A. Single endpoint:
+      - POST JSON  {"text": "..."}
+      - POST multipart form-data with fields:
+          image=<file>, text=<caption>, key=<optional key>
 
-Important:
-- In LINE Messaging API image messages, previewImageUrl has a 1MB limit.
-- This repo's worker currently uses the *same* URL for previewImageUrl and originalContentUrl.
-  Therefore any uploaded image must be <= ~1MB or the LINE API may reject the push.
+   B. Split endpoints:
+      - POST <WORKER_URL>/notify with JSON {"text": "..."}
+      - POST <WORKER_URL>/image with multipart.
 
-To avoid "LINE push failed" in production, this module automatically shrinks images to
-<= LINE_IMAGE_MAX_BYTES (default: 1,000,000 bytes) before uploading.
+2) LINE Notify API directly.
+   - Config via env:
+       LINE_NOTIFY_TOKEN
 
+This module returns structured results instead of raising, so callers can decide
+whether to fail the workflow.
 """
 
 from __future__ import annotations
 
-import mimetypes
 import os
 import time
-import uuid
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import requests
 
 try:
-    import requests  # type: ignore
-except Exception as e:  # pragma: no cover
-    requests = None
-    _requests_import_error = e
-else:
-    _requests_import_error = None
-
-try:
-    # Pillow is installed in this project (used for table image rendering).
-    from PIL import Image  # type: ignore
+    from PIL import Image
 except Exception:  # pragma: no cover
     Image = None  # type: ignore
 
-
-@dataclass
-class LineResult:
-    ok: bool
-    status: int
-    reason: str
-    image_url: Optional[str] = None
+LINE_NOTIFY_API = "https://notify-api.line.me/api/notify"
 
 
-_DEFAULT_LINE_IMAGE_MAX_BYTES = 1_000_000
-
-
-def _env_int(name: str, default: int) -> int:
-    v = (os.getenv(name) or "").strip()
-    if not v:
+def _env_truthy(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None:
         return default
-    try:
-        return int(v)
-    except Exception:
-        return default
+    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _line_image_max_bytes() -> int:
-    # Allow overrides in emergencies.
-    # - LINE_IMAGE_MAX_BYTES is preferred
-    # - LINE_PREVIEW_MAX_BYTES kept for compatibility
-    return _env_int("LINE_IMAGE_MAX_BYTES", _env_int("LINE_PREVIEW_MAX_BYTES", _DEFAULT_LINE_IMAGE_MAX_BYTES))
+def _headers_bearer(token: Optional[str], extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    h: Dict[str, str] = {}
+    if extra:
+        h.update(extra)
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
 
 
-def _ensure_line_image_bytes(src_path: str, max_bytes: int) -> Tuple[str, bool]:
-    """Return a file path that is <= max_bytes.
+def _post_with_retries(
+    *,
+    url: str,
+    headers: Dict[str, str],
+    timeout: float,
+    data: Optional[Dict[str, Any]] = None,
+    json: Optional[Dict[str, Any]] = None,
+    files: Optional[Dict[str, Any]] = None,
+    max_retries: int = 3,
+) -> Tuple[bool, int, str]:
+    """POST wrapper with minimal retries for transient failures."""
 
-    If src_path already fits, returns (src_path, False).
-    Otherwise, writes a reduced PNG into /tmp and returns (tmp_path, True).
+    last_status = 0
+    last_text = ""
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(url, headers=headers, data=data, json=json, files=files, timeout=timeout)
+            last_status = int(getattr(r, "status_code", 0) or 0)
+            last_text = getattr(r, "text", "") or ""
 
-    Strategy (in order):
-      1) Lossless PNG re-save with strong compression.
-      2) Palette quantization (256 colors, no dithering).
-      3) Progressive downscale + compress.
+            if last_status == 200:
+                return True, last_status, last_text
 
-    For the report table images (flat UI + text), this typically keeps readability.
+            # Retry on rate limit / transient server errors
+            if last_status in {429, 500, 502, 503, 504} and attempt < max_retries - 1:
+                time.sleep(1.0 * (2**attempt))
+                continue
+
+            return False, last_status, last_text
+        except Exception as e:
+            last_status = 0
+            last_text = str(e)
+            if attempt < max_retries - 1:
+                time.sleep(1.0 * (2**attempt))
+                continue
+            return False, last_status, last_text
+
+    return False, last_status, last_text
+
+
+def _guess_mime(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    if ext == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _ensure_image_under_limit(path: Path, *, max_bytes: int, workdir: Path) -> Path:
+    """Ensure the file is below max_bytes.
+
+    Strategy:
+    - If already small enough: return original.
+    - If Pillow is unavailable: return original (best effort).
+    - Try re-saving PNG with higher compression.
+    - If still too big, convert to JPEG and downscale gradually.
+
+    Returns a path to the (possibly) re-encoded file.
     """
 
     try:
-        if os.path.getsize(src_path) <= max_bytes:
-            return src_path, False
+        if path.stat().st_size <= max_bytes:
+            return path
     except Exception:
-        return src_path, False
+        return path
 
     if Image is None:
-        return src_path, False
+        return path
+
+    workdir.mkdir(parents=True, exist_ok=True)
 
     try:
-        img = Image.open(src_path)
-        img.load()
+        im = Image.open(path)
     except Exception:
-        return src_path, False
+        return path
 
-    tmp_base = f"/tmp/line_img_{uuid.uuid4().hex}"
-
-    def _save_png(im: "Image.Image", out_path: str) -> bool:
+    # 1) If PNG, try to re-save optimized PNG first
+    if path.suffix.lower() == ".png":
         try:
-            im.save(out_path, format="PNG", optimize=True, compress_level=9)
-            return os.path.getsize(out_path) <= max_bytes
-        except Exception:
-            return False
-
-    # (1) Lossless re-save (sometimes original isn't fully optimized)
-    tmp1 = tmp_base + ".png"
-    if _save_png(img, tmp1):
-        return tmp1, True
-
-    # Prepare an RGB base for quantize/downscale
-    try:
-        if img.mode in ("RGBA", "LA") or ("transparency" in getattr(img, "info", {})):
-            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-            bg.paste(img, mask=img.split()[-1])
-            base = bg.convert("RGB")
-        else:
-            base = img.convert("RGB")
-    except Exception:
-        base = img
-
-    # (2) Quantize (palette PNG) is very effective for UI-like images
-    try:
-        q = base.quantize(colors=256, dither=Image.Dither.NONE)
-        tmp2 = tmp_base + "_q.png"
-        if _save_png(q, tmp2):
-            return tmp2, True
-    except Exception:
-        pass
-
-    # (3) Downscale progressively until it fits
-    w, h = base.size
-
-    # Pillow >= 9 uses Image.Resampling.*
-    try:
-        lanczos = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover
-        lanczos = getattr(Image, "LANCZOS", 1)  # type: ignore
-
-    for scale in [
-        0.95,
-        0.90,
-        0.85,
-        0.80,
-        0.75,
-        0.70,
-        0.65,
-        0.60,
-        0.55,
-        0.50,
-        0.45,
-        0.40,
-        0.35,
-        0.30,
-        0.25,
-        0.20,
-    ]:
-        try:
-            nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-            resized = base.resize((nw, nh), resample=lanczos)
-        except Exception:
-            continue
-
-        tmp3 = tmp_base + f"_{int(scale * 100)}.png"
-        if _save_png(resized, tmp3):
-            return tmp3, True
-
-        # Also try quantized resized
-        try:
-            rq = resized.quantize(colors=256, dither=Image.Dither.NONE)
-            tmp4 = tmp_base + f"_{int(scale * 100)}_q.png"
-            if _save_png(rq, tmp4):
-                return tmp4, True
+            tmp_png = workdir / f"{path.stem}.line.png"
+            im.save(tmp_png, format="PNG", optimize=True, compress_level=9)
+            if tmp_png.stat().st_size <= max_bytes:
+                return tmp_png
         except Exception:
             pass
 
-    return src_path, False
-
-
-def _auth_headers(worker_auth_token: str | None) -> Dict[str, str]:
-    headers: Dict[str, str] = {}
-    token = (worker_auth_token or "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
-
-
-def _post_text(worker_url: str, headers: Dict[str, str], text: str, timeout: float) -> LineResult:
-    if requests is None:  # pragma: no cover
-        return LineResult(False, 0, f"requests import error: {_requests_import_error}")
-
+    # 2) Convert to JPEG with gradual downscale/quality
     try:
-        r = requests.post(worker_url, json={"text": text}, headers=headers, timeout=timeout)
-        if r.ok:
-            return LineResult(True, r.status_code, "ok")
-        return LineResult(False, r.status_code, f"HTTP {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        return LineResult(False, 0, f"exception: {e}")
+        rgb = im.convert("RGB")
+    except Exception:
+        return path
+
+    w0, h0 = rgb.size
+    # Guard against weird sizes
+    if w0 <= 0 or h0 <= 0:
+        return path
+
+    for scale in [1.0, 0.95, 0.9, 0.85, 0.8, 0.75]:
+        w = max(1, int(w0 * scale))
+        h = max(1, int(h0 * scale))
+        if (w, h) != rgb.size:
+            try:
+                resized = rgb.resize((w, h))
+            except Exception:
+                resized = rgb
+        else:
+            resized = rgb
+
+        for quality in [92, 88, 85, 80, 75]:
+            try:
+                tmp_jpg = workdir / f"{path.stem}.line.q{quality}.s{int(scale*100)}.jpg"
+                resized.save(tmp_jpg, format="JPEG", quality=quality, optimize=True)
+                if tmp_jpg.stat().st_size <= max_bytes:
+                    return tmp_jpg
+            except Exception:
+                continue
+
+    return path
 
 
-def _upload_image(
+def _normalize_worker_urls(worker_url: str) -> Tuple[str, str]:
+    """Return (raw_url, base_url).
+
+    raw_url: as provided (rstrip '/')
+    base_url: without trailing '/notify' or '/image' if present.
+    """
+    raw = worker_url.rstrip("/")
+    base = raw
+    if base.endswith("/notify") or base.endswith("/image"):
+        base = base.rsplit("/", 1)[0]
+    return raw, base
+
+
+def _worker_post_text(worker_url: str, auth_token: Optional[str], text: str, timeout: float) -> Tuple[bool, int, str]:
+    raw, base = _normalize_worker_urls(worker_url)
+
+    headers = _headers_bearer(auth_token, {"Content-Type": "application/json"})
+
+    candidates = []
+    # Try raw first (supports both base and explicit /notify)
+    candidates.append(raw)
+    # Then try base/notify
+    if base and (base + "/notify") not in candidates:
+        candidates.append(base + "/notify")
+
+    payloads = [
+        {"text": text},
+        {"message": text},
+    ]
+
+    last: Tuple[bool, int, str] = (False, 0, "")
+    for url in candidates:
+        for payload in payloads:
+            ok, status, body = _post_with_retries(url=url, headers=headers, json=payload, timeout=timeout)
+            if ok:
+                return True, status, body
+            last = (ok, status, body)
+            # If endpoint doesn't exist, try next url
+            if status in {404, 405}:
+                break
+
+    return last
+
+
+def _worker_post_image(
     worker_url: str,
-    headers: Dict[str, str],
-    image_path: str,
-    caption: str | None,
-    image_key: str | None,
+    auth_token: Optional[str],
+    path: Path,
+    caption: str,
+    image_key: Optional[str],
     timeout: float,
-) -> LineResult:
-    if requests is None:  # pragma: no cover
-        return LineResult(False, 0, f"requests import error: {_requests_import_error}")
+) -> Tuple[bool, int, str]:
+    raw, base = _normalize_worker_urls(worker_url)
 
-    if not os.path.exists(image_path):
-        return LineResult(False, 0, f"image not found: {image_path}")
+    headers = _headers_bearer(auth_token)
 
-    # MIME for the multipart upload (worker stores content-type in R2)
-    mime, _ = mimetypes.guess_type(image_path)
-    if not mime:
-        mime = "application/octet-stream"
+    # Decide endpoints to try.
+    # Try raw first (supports both base and explicit /image), then base/image.
+    urls = [raw]
+    if base and (base + "/image") not in urls:
+        urls.append(base + "/image")
 
-    filename = os.path.basename(image_path)
-    key = image_key or filename
+    # Limit for worker/LINE image size. Default ~950KB.
+    max_bytes = int(os.getenv("LINE_IMAGE_MAX_BYTES", "950000"))
+    tmp_dir = Path(os.getenv("LINE_IMAGE_TMP_DIR", "out/_line_tmp"))
 
-    data = {"key": key}
-    # Worker reads text from either "text" or "caption". Use "text".
-    if caption is not None:
-        data["text"] = caption
+    safe_path = _ensure_image_under_limit(path, max_bytes=max_bytes, workdir=tmp_dir)
+    mime = _guess_mime(safe_path)
+
+    # Try a few schema variants (field names differ across worker implementations).
+    attempts = [
+        # Newer/"reference" schema (used by 2/24 working version)
+        ("image", {"text": caption, "key": image_key or ""}),
+        # Alternative schema
+        ("file", {"caption": caption, "image_key": image_key or ""}),
+        # LINE Notify-like schema
+        ("imageFile", {"message": caption}),
+    ]
+
+    last: Tuple[bool, int, str] = (False, 0, "")
+    for url in urls:
+        for file_field, form in attempts:
+            # Remove empty optional fields to avoid strict validators rejecting them
+            form2 = {k: v for k, v in form.items() if isinstance(v, str) and v != ""}
+
+            try:
+                with open(safe_path, "rb") as f:
+                    files = {file_field: (safe_path.name, f, mime)}
+                    ok, status, body = _post_with_retries(
+                        url=url,
+                        headers=headers,
+                        data=form2,
+                        files=files,
+                        timeout=timeout,
+                        max_retries=3,
+                    )
+            except Exception as e:
+                ok, status, body = False, 0, str(e)
+
+            if ok:
+                return True, status, body
+
+            last = (ok, status, body)
+
+            # If endpoint is wrong, move to next url
+            if status in {404, 405}:
+                break
+
+    return last
+
+
+def _notify_post_text(token: str, text: str, timeout: float) -> Tuple[bool, int, str]:
+    headers = {"Authorization": f"Bearer {token}"}
+    data = {"message": text}
+    return _post_with_retries(url=LINE_NOTIFY_API, headers=headers, data=data, timeout=timeout)
+
+
+def _notify_post_image(token: str, path: Path, caption: str, timeout: float) -> Tuple[bool, int, str]:
+    headers = {"Authorization": f"Bearer {token}"}
+
+    max_bytes = int(os.getenv("LINE_IMAGE_MAX_BYTES", "950000"))
+    tmp_dir = Path(os.getenv("LINE_IMAGE_TMP_DIR", "out/_line_tmp"))
+
+    safe_path = _ensure_image_under_limit(path, max_bytes=max_bytes, workdir=tmp_dir)
+    mime = _guess_mime(safe_path)
+
+    data = {"message": caption or " "}
 
     try:
-        with open(image_path, "rb") as f:
-            files = {"image": (filename, f, mime)}
-            r = requests.post(worker_url, headers=headers, data=data, files=files, timeout=timeout)
-        if not r.ok:
-            return LineResult(False, r.status_code, f"HTTP {r.status_code}: {r.text[:200]}")
-        try:
-            js = r.json()
-        except Exception:
-            js = {}
-        ok = bool(js.get("ok")) if isinstance(js, dict) else True
-        image_url = js.get("imageUrl") if isinstance(js, dict) else None
-        if ok:
-            return LineResult(True, r.status_code, "ok", image_url=image_url)
-        # worker returns ok:false with 200 sometimes; keep reason.
-        reason = js.get("error") if isinstance(js, dict) else "unknown"
-        return LineResult(False, r.status_code, f"worker error: {reason}")
+        with open(safe_path, "rb") as f:
+            files = {"imageFile": (safe_path.name, f, mime)}
+            return _post_with_retries(
+                url=LINE_NOTIFY_API,
+                headers=headers,
+                data=data,
+                files=files,
+                timeout=timeout,
+                max_retries=3,
+            )
     except Exception as e:
-        return LineResult(False, 0, f"exception: {e}")
+        return False, 0, str(e)
 
 
 def send_line(
-    text: str,
+    text: str = "",
     *,
     image_path: Optional[str] = None,
+    image_paths: Optional[list[str]] = None,
     image_caption: Optional[str] = None,
     image_key: Optional[str] = None,
     force_text: bool = False,
+    force_image: bool = False,
     timeout: float = 30.0,
-) -> Dict[str, object]:
-    """Send to LINE.
+) -> Dict[str, Any]:
+    """Send a LINE notification.
 
-    Returns a dict for main.py to decide whether to fail the job.
+    - If image_path/image_paths is provided and image delivery succeeds, this
+      function **does not** send the text by default (same behaviour as the
+      2026-02-24 working version).
+    - If image delivery fails, it falls back to sending text (unless force_image).
 
-    Keys:
-      ok: bool
-      skipped: bool
-      reason: str
-      text_ok: bool
-      image_ok: bool
-      image_url: str|None
+    Returns a dict with keys: ok, text_ok, image_ok, skipped, reason.
     """
 
-    message = text or ""
-
-    # For images we usually want a short caption as the message (instead of the full report).
-    # main.py passes report text for the first image, and captions for the others.
-    # Keep backward-compat: only override when a non-empty caption is provided.
-    if image_path and image_caption and not force_text:
-        message = image_caption
-
-    token = (os.getenv("LINE_NOTIFY_TOKEN") or "").strip()
-    worker_url = (os.getenv("WORKER_URL") or os.getenv("LINE_WORKER_URL") or "").strip()
-    worker_auth_token = (os.getenv("WORKER_AUTH_TOKEN") or os.getenv("LINE_WORKER_AUTH_TOKEN") or "").strip()
-
-    if not (token or worker_url):
+    # Backward compatibility: allow list via image_paths
+    if image_paths and not image_path:
+        # Send first image with text fallback, remaining images without.
+        overall_ok = True
+        any_image_fail = False
+        any_text_sent = False
+        for i, p in enumerate(image_paths):
+            sub_text = text if i == 0 else ""
+            res = send_line(
+                sub_text,
+                image_path=p,
+                image_caption=image_caption,
+                image_key=image_key if i == 0 else None,
+                force_text=force_text,
+                force_image=force_image,
+                timeout=timeout,
+            )
+            overall_ok = overall_ok and bool(res.get("ok"))
+            any_image_fail = any_image_fail or (not bool(res.get("image_ok", True)))
+            any_text_sent = any_text_sent or bool(res.get("text_ok"))
         return {
-            "ok": False,
-            "skipped": True,
-            "reason": "LINE_NOTIFY_TOKEN and WORKER_URL are not set",
-            "text_ok": False,
-            "image_ok": False,
-            "image_url": None,
+            "ok": overall_ok,
+            "text_ok": any_text_sent,
+            "image_ok": not any_image_fail,
+            "skipped": False,
+            "reason": "batch",
         }
 
-    # Prefer worker when configured.
+    send_text = _env_truthy("LINE_SEND_TEXT", True)
+    send_image = _env_truthy("LINE_SEND_IMAGE", True)
+
+    if force_text:
+        send_image = False
+        send_text = True
+    if force_image:
+        send_text = False
+        send_image = True
+
+    worker_url = os.getenv("WORKER_URL")
+    worker_token = os.getenv("WORKER_AUTH_TOKEN")
+    notify_token = os.getenv("LINE_NOTIFY_TOKEN")
+
+    backend = "none"
     if worker_url:
-        headers = _auth_headers(worker_auth_token)
+        backend = "worker"
+    elif notify_token:
+        backend = "notify"
 
-        had_text = bool((message or "").strip())
-        text_ok = True
-        image_ok = False
-        image_url: Optional[str] = None
-        reason_parts = []
-
-        # 1) Try image upload (worker will also push caption text if provided).
-        if image_path and not force_text:
-            # main.py may provide a stable key (e.g. report_table_YYYY-MM-DD.png)
-            # to make retries idempotent. Otherwise fallback to basename.
-            img_key = (str(image_key).strip() if image_key else "") or os.path.basename(image_path)
-            max_bytes = _line_image_max_bytes()
-            upload_path, is_tmp = _ensure_line_image_bytes(image_path, max_bytes=max_bytes)
-            if upload_path != image_path:
-                try:
-                    orig_sz = os.path.getsize(image_path)
-                    new_sz = os.path.getsize(upload_path)
-                    print(f"[INFO] LINE image shrink: {orig_sz} -> {new_sz} bytes (limit={max_bytes})")
-                except Exception:
-                    pass
-
-            res_img = _upload_image(worker_url, headers, upload_path, caption=message, image_key=img_key, timeout=timeout)
-            if is_tmp:
-                try:
-                    os.remove(upload_path)
-                except Exception:
-                    pass
-
-            image_ok = res_img.ok
-            image_url = res_img.image_url
-            if not res_img.ok:
-                reason_parts.append(f"image: {res_img.reason}")
-
-                # If image fails, fall back to posting text so at least something arrives.
-                if had_text:
-                    res_text = _post_text(worker_url, headers, message, timeout=timeout)
-                    text_ok = res_text.ok
-                    if not res_text.ok:
-                        reason_parts.append(f"text: {res_text.reason}")
-                else:
-                    text_ok = True
-
-            else:
-                # Image upload succeeded. If we had text, worker already delivered it.
-                text_ok = True
-
-        else:
-            # Text-only path
-            res_text = _post_text(worker_url, headers, message, timeout=timeout)
-            text_ok = res_text.ok
-            if not res_text.ok:
-                reason_parts.append(f"text: {res_text.reason}")
-
-        ok_all = (text_ok if had_text else True) and (image_ok if (image_path and not force_text) else True)
-        return {
-            "ok": bool(ok_all),
-            "skipped": False,
-            "reason": "; ".join(reason_parts) if reason_parts else "ok",
-            "text_ok": bool(text_ok),
-            "image_ok": bool(image_ok),
-            "image_url": image_url,
-        }
-
-    # --- LINE Notify fallback (no worker) ---
-    if requests is None:  # pragma: no cover
+    if backend == "none":
         return {
             "ok": False,
-            "skipped": False,
-            "reason": f"requests import error: {_requests_import_error}",
             "text_ok": False,
             "image_ok": False,
-            "image_url": None,
+            "skipped": True,
+            "reason": "WORKER_URL and LINE_NOTIFY_TOKEN are not set",
         }
 
-    api = "https://notify-api.line.me/api/notify"
-    headers = {"Authorization": f"Bearer {token}"}
+    caption = (image_caption if image_caption is not None else "").strip()
 
-    # LINE Notify requires a message field; send a single space for "image only".
-    notify_message = message if (message or "").strip() else " "
+    ok_image = True
+    ok_text = True
 
-    try:
-        if image_path and not force_text and os.path.exists(image_path):
-            max_bytes = _line_image_max_bytes()
-            upload_path, is_tmp = _ensure_line_image_bytes(image_path, max_bytes=max_bytes)
-            files = {"imageFile": open(upload_path, "rb")}
-            data = {"message": notify_message}
-            r = requests.post(api, headers=headers, data=data, files=files, timeout=timeout)
-            try:
-                files["imageFile"].close()
-            except Exception:
-                pass
-            if is_tmp:
-                try:
-                    os.remove(upload_path)
-                except Exception:
-                    pass
-            ok = bool(r.ok)
+    # --- Image first (if requested) ---
+    if send_image and image_path:
+        path = Path(image_path)
+        if not path.exists():
+            ok_image = False
+            status, body = 0, f"image file not found: {image_path}"
+        else:
+            if backend == "worker":
+                ok, status, body = _worker_post_image(worker_url, worker_token, path, caption, image_key, timeout)
+            else:
+                ok, status, body = _notify_post_image(notify_token, path, caption, timeout)  # type: ignore[arg-type]
+            ok_image = bool(ok)
+
+        if not ok_image:
+            print(f"LINE image delivery error: {status} {body}")
+
+            # Fallback to text when image failed (unless force_image)
+            if (not force_image) and send_text and text.strip():
+                if backend == "worker":
+                    ok, status, body = _worker_post_text(worker_url, worker_token, text, timeout)
+                else:
+                    ok, status, body = _notify_post_text(notify_token, text, timeout)  # type: ignore[arg-type]
+                ok_text = bool(ok)
+                if not ok_text:
+                    print(f"LINE text delivery error (fallback): {status} {body}")
+                return {
+                    "ok": ok_text,
+                    "text_ok": ok_text,
+                    "image_ok": False,
+                    "skipped": False,
+                    "reason": "image_failed_text_fallback",
+                }
+
             return {
-                "ok": ok,
+                "ok": False,
+                "text_ok": False,
+                "image_ok": False,
                 "skipped": False,
-                "reason": "ok" if ok else f"HTTP {r.status_code}: {r.text[:200]}",
-                "text_ok": ok,
-                "image_ok": ok,
-                "image_url": None,
+                "reason": "image_failed",
             }
 
-        # Text only
-        r = requests.post(api, headers=headers, data={"message": notify_message}, timeout=timeout)
-        ok = bool(r.ok)
+        # Image succeeded. Skip text unless force_text.
+        if not force_text:
+            return {
+                "ok": True,
+                "text_ok": True,
+                "image_ok": True,
+                "skipped": False,
+                "reason": "image_only",
+            }
+
+    # --- Text (normal path) ---
+    if send_text and text.strip():
+        if backend == "worker":
+            ok, status, body = _worker_post_text(worker_url, worker_token, text, timeout)
+        else:
+            ok, status, body = _notify_post_text(notify_token, text, timeout)  # type: ignore[arg-type]
+        ok_text = bool(ok)
+        if not ok_text:
+            print(f"LINE text delivery error: {status} {body}")
         return {
-            "ok": ok,
+            "ok": ok_text,
+            "text_ok": ok_text,
+            "image_ok": True,
             "skipped": False,
-            "reason": "ok" if ok else f"HTTP {r.status_code}: {r.text[:200]}",
-            "text_ok": ok,
-            "image_ok": False,
-            "image_url": None,
+            "reason": "text_only",
         }
 
-    except Exception as e:
-        return {
-            "ok": False,
-            "skipped": False,
-            "reason": f"exception: {e}",
-            "text_ok": False,
-            "image_ok": False,
-            "image_url": None,
-        }
+    # Nothing to send
+    return {
+        "ok": True,
+        "text_ok": True,
+        "image_ok": True,
+        "skipped": True,
+        "reason": "no_content",
+    }
