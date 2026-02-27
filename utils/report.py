@@ -866,14 +866,17 @@ def build_report(
                     lines.append("")
     # Optional: export a shareable PNG/CSV table.
     #
-    # NOTE:
-    #   Users often expect "it changed" without setting env vars, so we default
-    #   this ON when table_rows exist.
     #
-    # Disable explicitly with:
+    # NOTE:
+    #   PNG generation is ON by default when table_rows exist.
+    #   Showing local output paths in the report text is OFF by default (to keep LINE clean).
+    #
+    # Disable PNG generation explicitly with:
     #   REPORT_TABLE_IMAGE=0   (or REPORT_IMAGE=0)
     img_enabled = _env_truthy("REPORT_TABLE_IMAGE", default=_env_truthy("REPORT_IMAGE", default=True))
-    note_enabled = _env_truthy("REPORT_IMAGE_NOTE", default=True)
+    # Do not spam LINE text with local file paths by default.
+    # Enable only when you explicitly want the paths shown in the report text.
+    note_enabled = _env_truthy("REPORT_IMAGE_NOTE", default=False)
 
     if table_rows and img_enabled:
         outdir = os.getenv("REPORT_OUTDIR", "out")
