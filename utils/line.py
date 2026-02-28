@@ -66,6 +66,7 @@ def _post_with_retries(
     url: str,
     headers: Dict[str, str],
     timeout: float,
+    params: Optional[Dict[str, Any]] = None,
     data: Optional[Dict[str, Any]] = None,
     json: Optional[Dict[str, Any]] = None,
     files: Optional[Dict[str, Any]] = None,
@@ -77,11 +78,11 @@ def _post_with_retries(
     last_text = ""
     for attempt in range(max_retries):
         try:
-            r = requests.post(url, headers=headers, data=data, json=json, files=files, timeout=timeout)
+            r = requests.post(url, headers=headers, params=params, data=data, json=json, files=files, timeout=timeout)
             last_status = int(getattr(r, "status_code", 0) or 0)
             last_text = getattr(r, "text", "") or ""
 
-            if last_status == 200:
+            if 200 <= last_status < 300:
                 return True, last_status, last_text
 
             # Retry on rate limit / transient server errors
@@ -230,59 +231,58 @@ def _worker_post_text(worker_url: str, auth_token: Optional[str], text: str, tim
 
 def _worker_post_image(
     worker_url: str,
-    auth_token: Optional[str],
-    path: Path,
+    auth_token: str,
+    image_path: str,
     caption: str,
-    image_key: Optional[str],
-    timeout: float,
+    image_key: str,
+    timeout: int = 20,
 ) -> Tuple[bool, int, str]:
+    """Post an image to the worker backend.
+
+    We may try multiple URL/payload variants for backward compatibility.
+    Do NOT reuse a single file handle across attempts (it gets consumed on the
+    first request). We send bytes instead so retries stay correct.
+    """
+
+    worker_url = worker_url.rstrip("/")
     raw, base = _normalize_worker_urls(worker_url)
 
-    headers = _headers_bearer(auth_token)
+    candidates = [f"{base}{_LINE_WORKER_IMAGE_PATH}", f"{base}/image", raw]
 
-    # Decide endpoints to try.
-    # Try raw first (supports both base and explicit /image), then base/image.
-    urls = [raw]
-    if base and (base + "/image") not in urls:
-        urls.append(base + "/image")
+    caption = (caption or "").strip()
+    key = (image_key or "").strip()
 
-    # Limit for worker/LINE image size. Default ~950KB.
-    max_bytes = int(os.getenv("LINE_IMAGE_MAX_BYTES", "950000"))
-    tmp_dir = Path(os.getenv("LINE_IMAGE_TMP_DIR", "out/_line_tmp"))
-
-    safe_path = _ensure_image_under_limit(path, max_bytes=max_bytes, workdir=tmp_dir)
-    mime = _guess_mime(safe_path)
-
-    # Try a few schema variants (field names differ across worker implementations).
-    attempts = [
-        # Newer/"reference" schema (used by 2/24 working version)
-        ("image", {"text": caption, "key": image_key or ""}),
-        # Alternative schema
-        ("file", {"caption": caption, "image_key": image_key or ""}),
-        # LINE Notify-like schema
-        ("imageFile", {"message": caption}),
+    payloads: List[Tuple[str, Dict[str, str]]] = [
+        ("params", {"caption": caption, "key": key}),
+        ("data", {"text": caption, "key": key}),
+        ("data", {"text": caption}),
+        ("data", {"key": key}),
     ]
 
     last: Tuple[bool, int, str] = (False, 0, "")
-    for url in urls:
-        for file_field, form in attempts:
-            # Remove empty optional fields to avoid strict validators rejecting them
-            form2 = {k: v for k, v in form.items() if isinstance(v, str) and v != ""}
 
-            try:
-                with open(safe_path, "rb") as f:
-                    files = {file_field: (safe_path.name, f, mime)}
-                    ok, status, body = _post_with_retries(
-                        url=url,
-                        headers=headers,
-                        data=form2,
-                        files=files,
-                        timeout=timeout,
-                        max_retries=3,
-                    )
-            except Exception as e:
-                ok, status, body = False, 0, str(e)
+    max_bytes = int(os.getenv("LINE_IMAGE_MAX_BYTES", "900000"))
+    workdir = Path(os.getenv("LINE_IMAGE_WORKDIR", "/tmp/stockbot_line_img"))
+    p = _ensure_image_under_limit(Path(image_path), max_bytes=max_bytes, workdir=workdir)
+    basename = p.name
+    mime = _mime_for_path(str(p))
+    try:
+        img_bytes = p.read_bytes()
+    except Exception as e:
+        return False, 0, f"read_image_failed: {e}"
 
+    for url in candidates:
+        for mode, payload in payloads:
+            files = {"image": (basename, img_bytes, mime)}
+            kwargs = {"params": dict(payload)} if mode == "params" else {"data": dict(payload)}
+
+            ok, status, body = _post_with_retries(
+                url=url,
+                headers=_auth_headers(auth_token),
+                timeout=timeout,
+                files=files,
+                **kwargs,
+            )
             if ok:
                 return True, status, body
 
@@ -301,30 +301,39 @@ def _notify_post_text(token: str, text: str, timeout: float) -> Tuple[bool, int,
     return _post_with_retries(url=LINE_NOTIFY_API, headers=headers, data=data, timeout=timeout)
 
 
-def _notify_post_image(token: str, path: Path, caption: str, timeout: float) -> Tuple[bool, int, str]:
-    headers = {"Authorization": f"Bearer {token}"}
+def _notify_post_image(
+    notify_token: str,
+    caption: str,
+    image_path: str,
+    timeout: int = 20,
+) -> Tuple[bool, int, str]:
+    url = "https://notify-api.line.me/api/notify"
 
-    max_bytes = int(os.getenv("LINE_IMAGE_MAX_BYTES", "950000"))
-    tmp_dir = Path(os.getenv("LINE_IMAGE_TMP_DIR", "out/_line_tmp"))
-
-    safe_path = _ensure_image_under_limit(path, max_bytes=max_bytes, workdir=tmp_dir)
-    mime = _guess_mime(safe_path)
-
-    data = {"message": caption or " "}
+    max_bytes = int(os.getenv("LINE_IMAGE_MAX_BYTES", "900000"))
+    workdir = Path(os.getenv("LINE_IMAGE_WORKDIR", "/tmp/stockbot_line_img"))
+    p = _ensure_image_under_limit(Path(image_path), max_bytes=max_bytes, workdir=workdir)
+    basename = p.name
+    mime = _mime_for_path(str(p))
 
     try:
-        with open(safe_path, "rb") as f:
-            files = {"imageFile": (safe_path.name, f, mime)}
-            return _post_with_retries(
-                url=LINE_NOTIFY_API,
-                headers=headers,
-                data=data,
-                files=files,
-                timeout=timeout,
-                max_retries=3,
-            )
+        img_bytes = p.read_bytes()
     except Exception as e:
-        return False, 0, str(e)
+        return False, 0, f"read_image_failed: {e}"
+
+    files = {"imageFile": (basename, img_bytes, mime)}
+
+    payload = {
+        # LINE Notify requires a message field; send a single space if empty.
+        "message": caption if caption else " ",
+    }
+
+    return _post_with_retries(
+        url=url,
+        headers={"Authorization": f"Bearer {notify_token}"},
+        timeout=timeout,
+        data=payload,
+        files=files,
+    )
 
 
 def send_line(
