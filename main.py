@@ -270,42 +270,23 @@ def main() -> None:
         try:
             result: dict = {}
             if image_paths:
-                # Send the first image with report text as fallback (only used when the image upload fails).
-                first = image_paths[0]
+                # Daily operation: images only.
+                # Do not send the long text report as a fallback here; users asked for image-only delivery.
+                # If image delivery fails, the workflow may still fail depending on REQUIRE_LINE_DELIVERY / REQUIRE_LINE_IMAGES.
                 result = send_line(
-                    report,
-                    image_path=first,
-                    image_caption="",  # image only (no caption text)
-                    image_key=os.path.basename(first),
+                    "",
+                    image_paths=image_paths,
+                    image_caption="",
+                    force_image=True,
                 )
-                others: list[dict] = []
-                for p in image_paths[1:]:
-                    others.append(
-                        send_line(
-                            "",
-                            image_path=p,
-                            image_caption="",  # image only (no caption text)
-                            image_key=os.path.basename(p),
-                        )
-                    )
-
-                # Aggregate status across pages
-                image_ok_all = bool(result.get("image_ok"))
-                for r in others:
-                    if r.get("image_ok") is False:
-                        image_ok_all = False
-                result["image_ok_all"] = image_ok_all
             else:
-                # No images → fallback to text
-                result = send_line(report)
+                # No images were generated, so fall back to a text report.
+                result = send_line(report, force_text=True)
 
             print("LINE result:", result)
 
             if require_delivery:
                 if image_paths:
-                    # Require that at least the *first* message (report + first image)
-                    # was delivered. Additional image pages are best-effort unless
-                    # REQUIRE_LINE_IMAGES=1.
                     if not result.get("ok", False):
                         raise RuntimeError("LINE delivery failed")
                 else:
@@ -313,7 +294,7 @@ def main() -> None:
                         raise RuntimeError("LINE delivery failed (text)")
 
             if require_images and image_paths:
-                if not result.get("image_ok_all", False):
+                if not result.get("image_ok", False):
                     raise RuntimeError("LINE delivery failed (one or more images)")
         except Exception as e:
             print("LINE delivery error:", e)
