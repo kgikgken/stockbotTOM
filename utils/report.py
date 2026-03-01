@@ -984,6 +984,8 @@ def build_report(
                 if tags:
                     lines_out.append(tags)
                 if note:
+                    note = note.replace("Entry ", "建 ")
+                    note = note.replace("Setup ", "型 ")
                     note = note.replace(" / ", "\n")
                     for part in [x.strip() for x in note.splitlines() if x.strip()]:
                         lines_out.append(part)
@@ -1013,9 +1015,9 @@ def build_report(
                     return "\n".join(out)
 
                 # Limit range
-                mrange = re.match(r"^(指値(?:\(押\)|\(帯\))?)\s*([0-9,]+〜[0-9,]+)$", s)
+                mrange = re.match(r"^(指値(?:\(押\)|\(帯\))?)\s*([0-9,]+)〜([0-9,]+)$", s)
                 if mrange:
-                    return f"{mrange.group(1)}\n{mrange.group(2)}"
+                    return f"{mrange.group(1)}\n下 {mrange.group(2)}\n上 {mrange.group(3)}"
 
                 # Plain price after action
                 mone = re.match(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*([0-9,]+)$", s)
@@ -1049,14 +1051,14 @@ def build_report(
 
             def _pretty_group_label(g: str) -> str:
                 if g == "狙える":
-                    return "✅ 今日の注文"
+                    return "■ 今日の注文"
                 if g == "見送り":
-                    return "⛔ 見送り"
+                    return "■ 見送り"
                 if g == "ポジ":
-                    return "📌 ポジション"
+                    return "■ ポジション"
                 if g.startswith("ソーサー"):
-                    return f"🥣 {g}"
-                return f"☑ {g}"
+                    return f"■ {g}"
+                return f"■ {g}"
 
             def _format_status_cell(memo: str) -> str:
                 memo = _strip_icons(memo or "")
@@ -1065,6 +1067,7 @@ def build_report(
                 memo = memo.replace("状態：", "")
                 memo = memo.replace("ゾーンまで ", "")
                 memo = memo.replace("成行禁止（指値待ち）", "指値待ち")
+                memo = memo.replace("出来高⚠", "出来高")
                 memo = memo.replace(" / ", " | ")
                 memo = " ".join(memo.split())
 
@@ -1081,6 +1084,10 @@ def build_report(
                 if "出来高" in memo and "下" in memo and "上" not in memo:
                     return "出来高\n下"
                 if "ゾーン内" in memo or "帯内" in memo:
+                    if "上" in memo and "下" not in memo:
+                        return "帯内\n上"
+                    if "下" in memo and "上" not in memo:
+                        return "帯内\n下"
                     return "帯内"
                 if "下" in memo and "上" not in memo:
                     return "下"
@@ -1143,45 +1150,45 @@ def build_report(
             style_main = TableImageStyle(
                 max_total_px=1000,
                 max_col_px=520,
-                margin=20,
+                margin=18,
                 pad_x=16,
-                pad_y=14,
-                font_size=31,
-                title_font_size=38,
+                pad_y=13,
+                font_size=30,
+                title_font_size=36,
                 section_font_size=32,
                 line_width=1,
-                line_spacing=5,
+                line_spacing=4,
                 header_bg="#F8FAFC",
-                zebra_bg="#FCFCFD",
+                zebra_bg="#FBFCFE",
                 section_bg="#DBEAFE",
                 text_color="#111827",
                 grid_color="#CBD5E1",
                 wrap_cells=True,
                 max_lines=4,
-                preferred_col_ratios={"#": 0.06, "銘柄": 0.47, "注文": 0.19, "sl/tpr": 0.28},
-                preferred_col_mins={"#": 60, "銘柄": 360, "注文": 185, "sl/tpr": 240},
+                preferred_col_ratios={"#": 0.06, "銘柄": 0.50, "注文": 0.19, "sl/tpr": 0.25},
+                preferred_col_mins={"#": 58, "銘柄": 390, "注文": 180, "sl/tpr": 220},
             )
 
             style_saucer = TableImageStyle(
                 max_total_px=1000,
                 max_col_px=520,
-                margin=20,
-                pad_x=16,
-                pad_y=14,
-                font_size=31,
-                title_font_size=38,
+                margin=18,
+                pad_x=15,
+                pad_y=13,
+                font_size=29,
+                title_font_size=36,
                 section_font_size=32,
                 line_width=1,
-                line_spacing=5,
+                line_spacing=4,
                 header_bg="#F8FAFC",
-                zebra_bg="#FCFCFD",
+                zebra_bg="#FBFCFE",
                 section_bg="#DBEAFE",
                 text_color="#111827",
                 grid_color="#CBD5E1",
                 wrap_cells=True,
                 max_lines=4,
-                preferred_col_ratios={"#": 0.06, "銘柄": 0.40, "注文": 0.20, "sl/tpr": 0.22, "状態": 0.12},
-                preferred_col_mins={"#": 60, "銘柄": 320, "注文": 180, "sl/tpr": 220, "状態": 110},
+                preferred_col_ratios={"#": 0.06, "銘柄": 0.42, "注文": 0.20, "sl/tpr": 0.21, "状態": 0.11},
+                preferred_col_mins={"#": 58, "銘柄": 340, "注文": 175, "sl/tpr": 200, "状態": 100},
             )
 
             png_paths: list[str] = []
@@ -1190,7 +1197,7 @@ def build_report(
             if rows_orders:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR"]
                 img_rows = _build_main_img_rows(rows_orders)
-                title_orders = f"stockbotTOM {today_str} 注文サマリ"
+                title_orders = f"stockbotTOM {today_str}\n注文サマリ"
                 try:
                     render_table_png(title_orders, img_headers, img_rows, png_main, style=style_main)
                     png_paths.append(png_main)
@@ -1203,7 +1210,7 @@ def build_report(
             if rows_saucer_d:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_saucer_img_rows(rows_saucer_d)
-                title_d = f"stockbotTOM {today_str} ソーサー（日足）"
+                title_d = f"stockbotTOM {today_str}\nソーサー（日足）"
                 try:
                     render_table_png(title_d, img_headers, img_rows, png_d, style=style_saucer)
                     png_paths.append(png_d)
@@ -1216,7 +1223,7 @@ def build_report(
             if rows_saucer_w:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_saucer_img_rows(rows_saucer_w)
-                title_w = f"stockbotTOM {today_str} ソーサー（週足）"
+                title_w = f"stockbotTOM {today_str}\nソーサー（週足）"
                 try:
                     render_table_png(title_w, img_headers, img_rows, png_w, style=style_saucer)
                     png_paths.append(png_w)
@@ -1229,7 +1236,7 @@ def build_report(
             if rows_saucer_m:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_saucer_img_rows(rows_saucer_m)
-                title_m = f"stockbotTOM {today_str} ソーサー（月足）"
+                title_m = f"stockbotTOM {today_str}\nソーサー（月足）"
                 try:
                     render_table_png(title_m, img_headers, img_rows, png_m, style=style_saucer)
                     png_paths.append(png_m)
