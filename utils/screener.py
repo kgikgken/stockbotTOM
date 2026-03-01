@@ -741,8 +741,10 @@ def run_screen(
         stop_ticks = (entry_price - sl) / tick if (tick > 0 and entry_price > sl) else 0.0
         min_stop_ticks = _env_float("MIN_STOP_TICKS", 3.0)
         tight_stop = bool(stop_ticks > 0 and stop_ticks < min_stop_ticks)
-
-
+        min_stop_ticks_hard = _env_float("MIN_STOP_TICKS_HARD", 2.0)
+        min_mid_risk_hard = _env_float("MIN_MID_RISK_PCT_HARD", 0.6)
+        if (stop_ticks > 0 and stop_ticks < min_stop_ticks_hard) or (risk_pct_mid < min_mid_risk_hard):
+            continue
 
         # エントリー帯までの距離（%）：実行可能性（fillability）を優先するための補助指標
         band_dist_pct = 0.0
@@ -843,6 +845,9 @@ def run_screen(
         r2_60 = np.nan
         uv_ratio20 = np.nan
         dist_days20 = 0
+        hh_age20 = np.nan
+        hh_age60 = np.nan
+        pullback_from_hh20 = np.nan
         try:
             c_ser = df["Close"].astype(float)
             if len(c_ser) >= 61:
@@ -864,6 +869,20 @@ def run_screen(
             # Volume pattern (accumulation / distribution)
             uv_ratio20 = _up_down_volume_ratio(df, 20)
             dist_days20 = _distribution_days(df, 20)
+
+            # Freshness of the latest impulse leg: short-swing pullbacks work best when the
+            # prior high is still recent. We keep these as soft signals plus a light stale filter.
+            if len(c_ser) >= 21:
+                win20 = c_ser.iloc[-21:]
+                arr20 = win20.to_numpy(dtype=float)
+                hh_age20 = float((len(arr20) - 1) - int(np.argmax(arr20)))
+                hh20 = float(np.nanmax(arr20)) if len(arr20) else np.nan
+                if np.isfinite(hh20) and hh20 > 0:
+                    pullback_from_hh20 = safe_float((hh20 / c_ser.iloc[-1] - 1.0) * 100.0, np.nan)
+            if len(c_ser) >= 61:
+                win60 = c_ser.iloc[-61:]
+                arr60 = win60.to_numpy(dtype=float)
+                hh_age60 = float((len(arr60) - 1) - int(np.argmax(arr60)))
         except Exception:
             pass
 
@@ -944,6 +963,14 @@ def run_screen(
         if np.isfinite(trend_score) and trend_score < trend_min:
             continue
         if info.setup in ("A1-Strong", "A1") and np.isfinite(ret60) and ret60 < 0:
+            continue
+
+        # Freshness guard: short-swing pullbacks get stale quickly.
+        stale_a1 = int(os.getenv("PULLBACK_STALE_DAYS_A1", "12"))
+        stale_a2 = int(os.getenv("PULLBACK_STALE_DAYS_A2", "18"))
+        if info.setup in ("A1-Strong", "A1") and np.isfinite(hh_age20) and hh_age20 > stale_a1 and (not np.isfinite(pb_atr) or pb_atr > 0.4):
+            continue
+        if info.setup == "A2" and np.isfinite(hh_age20) and hh_age20 > stale_a2 and (not np.isfinite(pb_atr) or pb_atr > 0.6):
             continue
 
         # Relative Strength: composite (20/60/120) vs benchmark.
@@ -1198,6 +1225,23 @@ def run_screen(
         if tight_stop:
             quality -= _env_float("TIGHT_STOP_PENALTY", 0.06)
 
+        # Fresh pullbacks are preferred for 1–7 day swings.
+        if info.setup in ("A1-Strong", "A1", "A2") and np.isfinite(hh_age20):
+            if hh_age20 <= 3:
+                quality += 0.02
+            elif hh_age20 <= 8:
+                quality += 0.01
+            elif hh_age20 >= 12:
+                quality -= 0.03
+
+        # Very strong recent run + stretched ATR often behaves like exhaustion rather than a clean pullback.
+        if np.isfinite(r20) and np.isfinite(ext_atr) and r20 >= 18.0 and ext_atr >= 2.0:
+            quality -= 0.04
+
+        # Synergy bonus: strong leader + weekly agreement + contraction = best short-swing candidates.
+        if weekly_ok is True and np.isfinite(rs_comp) and rs_comp >= 6.0 and np.isfinite(ac) and ac <= 0.98 and np.isfinite(vr) and vr <= 1.0:
+            quality += 0.03
+
         quality = float(np.clip(quality, -0.30, 0.30))
 
         # 現値IN判定（運用ルールに沿って“現実的にOK”な条件に限定）
@@ -1324,6 +1368,9 @@ def run_screen(
                 "rs_line_slope20": float(rs_line_slope20) if np.isfinite(rs_line_slope20) else float("nan"),
                 "uv_ratio20": float(uv_ratio20) if np.isfinite(uv_ratio20) else float("nan"),
                 "dist_days20": int(dist_days20),
+                "hh_age20": float(hh_age20) if np.isfinite(hh_age20) else float("nan"),
+                "hh_age60": float(hh_age60) if np.isfinite(hh_age60) else float("nan"),
+                "pullback_from_hh20": float(pullback_from_hh20) if np.isfinite(pullback_from_hh20) else float("nan"),
                 "noise_score": int(noise_score),
                 "trend_score": float(trend_score) if np.isfinite(trend_score) else float("nan"),
                 "dist_52w_high": float(dist_52w_high) if np.isfinite(dist_52w_high) else float("nan"),
