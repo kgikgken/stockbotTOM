@@ -21,38 +21,33 @@ except Exception:  # pragma: no cover
 @dataclass
 class TableImageStyle:
     """Styling knobs for the PNG/SVG table renderer.
-    Notes
-    -----
-    This bot is mainly consumed on mobile (LINE chat). If the image becomes too wide,
-    LINE scales it down to fit the chat bubble and the text becomes unreadable.
-    So we intentionally cap the width and prefer wrapping (taller image) over truncation.
+
+    Optimized for narrow mobile previews (LINE). We prefer a slightly taller image
+    to tiny text, and use light semantic tints so the user can scan actions and
+    risk quickly.
     """
-    # Target width for mobile (LINE chat). Keep this modest so text stays large in the preview.
-    max_total_px: int = 960
-    # Per-column cap (before global scaling). Larger values help long text columns.
-    max_col_px: int = 480
-    margin: int = 20
-    # Slightly larger padding improves legibility (touch/phone viewing).
+    max_total_px: int = 1000
+    max_col_px: int = 500
+    margin: int = 22
     pad_x: int = 18
-    pad_y: int = 14
-    # Bump base font sizes a bit; we prefer a slightly taller image to tiny text.
-    font_size: int = 30
-    title_font_size: int = 42
-    section_font_size: int = 32
-    # Thinner grid lines reduce visual noise.
+    pad_y: int = 15
+    font_size: int = 31
+    title_font_size: int = 40
+    section_font_size: int = 33
     line_width: int = 1
-    line_spacing: int = 8  # between multiline lines
-    # Colors
-    header_bg: str = "#F2F2F2"
+    line_spacing: int = 6
+    header_bg: str = "#F3F4F6"
     zebra_bg: str = "#FAFAFA"
-    section_bg: str = "#DCEBFF"
-    text_color: str = "#101010"
-    grid_color: str = "#909090"
-    # Text wrapping
+    section_bg: str = "#DBEAFE"
+    section_bg_order: str = "#DCFCE7"
+    section_bg_skip: str = "#FEE2E2"
+    section_bg_position: str = "#EDE9FE"
+    section_bg_saucer: str = "#E0F2FE"
+    text_color: str = "#111827"
+    muted_text_color: str = "#334155"
+    grid_color: str = "#CBD5E1"
     wrap_cells: bool = True
     max_lines: int = 5
-
-
 
 def _first_existing(paths: Sequence[str]) -> Optional[str]:
     for p in paths:
@@ -62,19 +57,13 @@ def _first_existing(paths: Sequence[str]) -> Optional[str]:
         except Exception:
             continue
     return None
-
-
 def _load_pil_font(size: int, *, bold: bool = False):
     """Load a Japanese-capable font with Pillow.
-
     GitHub Actions (ubuntu) typically has Noto CJK installed.
     """
-
     if not _HAVE_PIL:
         raise RuntimeError("Pillow (PIL) is not installed")
-
     from PIL import ImageFont
-
     reg = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
@@ -87,16 +76,13 @@ def _load_pil_font(size: int, *, bold: bool = False):
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
-
     chosen = _first_existing(bld if bold else reg) or _first_existing(reg)
     if not chosen:
         return ImageFont.load_default()
-
     try:
         return ImageFont.truetype(chosen, size=size, index=0)
     except TypeError:
         return ImageFont.truetype(chosen, size=size)
-
 def _text_bbox(draw, text: str, font, spacing: int = 0) -> Tuple[int, int]:
     """Return (w, h) for a possibly-multiline text."""
     s = "" if text is None else str(text)
@@ -313,7 +299,6 @@ def _render_table_png_pil(
     max_inner_w = max(200, style.max_total_px - style.margin * 2)
     if table_inner_w > max_inner_w and table_inner_w > 0:
         scale = max_inner_w / table_inner_w
-
         def _min_col_for_header(h: str) -> int:
             hs = (h or "").replace("\n", "").strip()
             hs_u = hs.upper()
@@ -330,17 +315,14 @@ def _render_table_png_pil(
             if ("状態" in hs) or ("メモ" in hs):
                 return max(110, int(max_inner_w * 0.10))
             return max(120, int(max_inner_w * 0.12))
-
         min_cols = [_min_col_for_header(h) for h in headers_s]
         # If mins exceed available width, scale them down proportionally.
         sum_min = sum(min_cols)
         if sum_min > max_inner_w and sum_min > 0:
             f = max_inner_w / sum_min
             min_cols = [max(48, int(w * f)) for w in min_cols]
-
         scaled = [int(w * scale) for w in col_px]
         col_px = [max(min_cols[j], scaled[j]) for j in range(n_cols)]
-
         # If still too wide, shrink columns above their minimums.
         over = sum(col_px) - max_inner_w
         if over > 0 and n_cols > 0:
@@ -352,7 +334,6 @@ def _render_table_png_pil(
                 col_px[j] -= 1
                 slack[j] -= 1
                 over -= 1
-
         # Fix rounding drift to match max_inner_w exactly.
         diff = max_inner_w - sum(col_px)
         j = 0
@@ -376,10 +357,8 @@ def _render_table_png_pil(
         ht = (h or "").replace("\n", " ").lower()
         if ("risk" in ht) or (("sl" in ht or "tp" in ht) and ("r" in ht)):
             risk_cols.add(j)
-
     _re_risk_range = re.compile(r"\bR\s*([-+]?\d+(?:\.\d+)?)\s*(?:~|〜|–|-|ー)\s*([-+]?\d+(?:\.\d+)?)\s*%")
     _re_risk_single = re.compile(r"\bR\s*([-+]?\d+(?:\.\d+)?)\s*%")
-
     def _risk_tint(cell_text: str) -> Optional[str]:
         s = (cell_text or "").replace(",", "")
         m = _re_risk_range.search(s)
@@ -396,10 +375,8 @@ def _render_table_png_pil(
                     pct = float(m2.group(1))
                 except Exception:
                     pct = None
-
         if pct is None or pct < 0:
             return None
-
         # Tune for typical stockbot ranges: 0–3% (low), 3–6% (mid), 6–8% (high), >8% (very high)
         if pct <= 3.0:
             return "#ECFDF5"  # green-50
@@ -408,6 +385,39 @@ def _render_table_png_pil(
         if pct <= 8.0:
             return "#FEF2F2"  # red-50
         return "#FFE4E6"      # red-100
+    def _section_tint(section_text: str) -> str:
+        t = (section_text or "").strip()
+        if "見送り" in t:
+            return style.section_bg_skip
+        if "ポジ" in t:
+            return style.section_bg_position
+        if "ソーサー" in t:
+            return style.section_bg_saucer
+        return style.section_bg_order if ("狙える" in t or "注文" in t) else style.section_bg
+    def _semantic_tint(header_text: str, cell_text: str) -> Optional[str]:
+        ht = (header_text or "").replace("\n", " ").lower()
+        ct = (cell_text or "").strip()
+        if not ct:
+            return None
+        # Order/action column
+        if ("注文" in ht) or ("action" in ht):
+            if "見送り" in ct:
+                return "#FEE2E2"
+            if "成行" in ct:
+                return "#DBEAFE"
+            if "逆指値" in ct:
+                return "#EDE9FE"
+            if "指値" in ct:
+                return "#DCFCE7"
+        # Status / memo column
+        if ("状態" in ht) or ("メモ" in ht):
+            if "成行禁止" in ct or "見送り" in ct or "SLタイト" in ct:
+                return "#FEE2E2"
+            if "注文有効" in ct or "保有" in ct or "帯内" in ct:
+                return "#DCFCE7"
+            if "待ち" in ct or "監視" in ct:
+                return "#FFFBEB"
+        return None
     for j, h in enumerate(headers_s):
         max_w = max(10, col_px[j] - style.pad_x * 2)
         headers_fit.append(fit_cell(h, header_font, max_w, max_lines=2))
@@ -500,10 +510,9 @@ def _render_table_png_pil(
     for i, (kind, cells) in enumerate(rows_fit):
         rh = row_heights[i]
         if kind == "section":
-            draw.rectangle([x0, y, x1, y + rh], fill=style.section_bg)
+            draw.rectangle([x0, y, x1, y + rh], fill=_section_tint(cells[0]))
             draw_cell(int(x0), int(y), int(table_inner_w), int(rh), cells[0], section_font, align="left", fill=style.text_color)
             y += rh
-            # Reset zebra stripes at each section boundary (easier to scan on mobile).
             data_row_index = 0
             continue
         if data_row_index % 2 == 1:
@@ -516,12 +525,13 @@ def _render_table_png_pil(
                 align = "right"
             else:
                 align = "left"
-            # Per-cell tint (Risk heatmap)
+            tint = None
             if j in risk_cols:
                 tint = _risk_tint(c)
-                if tint:
-                    draw.rectangle([int(cx), int(y), int(cx + col_px[j]), int(y + rh)], fill=tint)
-
+            if tint is None:
+                tint = _semantic_tint(headers_s[j], c)
+            if tint:
+                draw.rectangle([int(cx), int(y), int(cx + col_px[j]), int(y + rh)], fill=tint)
             draw_cell(int(cx), int(y), int(col_px[j]), int(rh), c, body_font, align=align, fill=style.text_color)
             cx += col_px[j]
         data_row_index += 1
@@ -558,7 +568,6 @@ def _render_table_png_pil(
     # Outer border slightly thicker (looks clearer in LINE preview)
     outer_w = max(style.line_width, 2)
     draw.rectangle([x0, y0, x1, y0 + table_h], outline=style.grid_color, width=outer_w)
-
     # Optimize output size for reliable delivery (e.g., LINE image upload limits)
     # without changing the visual layout.
     try:
