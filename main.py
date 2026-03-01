@@ -145,7 +145,9 @@ def main() -> None:
 
     no_trade = no_trade_conditions(mkt_score, delta3, macro_warn=macro_on)
     data_warn = bool(meta.get("data_warn", False))
-    if data_warn:
+    breadth_warn = bool(meta.get("breadth_warn", False))
+    breadth_score = int(meta.get("breadth_score", 50) or 50)
+    if data_warn or (breadth_warn and mkt_score < 55):
         no_trade = True
 
     policy_lines = [
@@ -168,6 +170,11 @@ def main() -> None:
         cov = float(meta.get("data_coverage", 0.0))
         cov_min = float(meta.get("data_coverage_min", 0.0))
         policy_lines.insert(0, f"DATA:{ok}/{tot} ({cov*100:.0f}%) < {cov_min*100:.0f}%")
+    if breadth_warn:
+        regime = str(meta.get("breadth_regime", "weak"))
+        a20 = float(meta.get("breadth_above20", 0.0) or 0.0)
+        a50 = float(meta.get("breadth_above50", 0.0) or 0.0)
+        policy_lines.insert(0, f"BREADTH:{breadth_score} ({regime}) / >20MA {a20:.0f}% / >50MA {a50:.0f}%")
 
     pos_text, _asset = analyze_positions(pos_df, mkt_score=mkt_score, macro_on=macro_on, new_tickers=new_tickers)
 
