@@ -48,6 +48,14 @@ class TableImageStyle:
     grid_color: str = "#CBD5E1"
     wrap_cells: bool = True
     max_lines: int = 5
+    preferred_col_ratios: Optional[dict[str, float]] = None
+    preferred_col_mins: Optional[dict[str, int]] = None
+
+def _header_key(text: str) -> str:
+    s = "" if text is None else str(text)
+    s = s.replace("\n", " ").strip().lower()
+    s = re.sub(r"\s+", "", s)
+    return s
 
 def _first_existing(paths: Sequence[str]) -> Optional[str]:
     for p in paths:
@@ -276,10 +284,11 @@ def _render_table_png_pil(
     center_cols: set[int] = set()
     for j, h in enumerate(headers_s):
         ht = h.strip().replace("\n", "")
-        if ht in {"#", "No", "№"}:
+        key = _header_key(h)
+        if ht in {"#", "No", "№"} or key in {"状態"}:
             center_cols.add(j)
             continue
-        if ht in {"SL", "TP1", "TP", "TP1/リム", "Risk", "R"}:
+        if ht in {"SL", "TP1", "TP", "TP1/リム", "Risk", "R"} or key in {"sl/tpr", "sl/tp/r"}:
             right_cols.add(j)
     # ---- Compute column widths (content-aware, then clamp)
     col_content_px: list[int] = [0] * n_cols
@@ -294,28 +303,54 @@ def _render_table_png_pil(
                 max_w = w
         max_w = min(max_w, style.max_col_px)
         col_content_px[j] = max_w
-    col_px = [w + style.pad_x * 2 for w in col_content_px]
-    table_inner_w = sum(col_px)
+
     max_inner_w = max(200, style.max_total_px - style.margin * 2)
+
+    def _min_col_for_header(h: str) -> int:
+        hs = (h or "").replace("\n", "").strip()
+        hs_u = hs.upper()
+        key = _header_key(h)
+        if hs in {"#", "No", "№"}:
+            return 60
+        if key == "銘柄":
+            return max(250, int(max_inner_w * 0.30))
+        if key == "注文":
+            return max(160, int(max_inner_w * 0.17))
+        if key in {"sl/tpr", "sl/tp/r"} or ("SL" in hs_u) or ("TP" in hs_u) or ("RISK" in hs_u) or (hs_u in {"R", "RR"}):
+            return max(190, int(max_inner_w * 0.19))
+        if key in {"状態", "メモ"} or ("状態" in hs) or ("メモ" in hs):
+            return max(100, int(max_inner_w * 0.10))
+        return max(110, int(max_inner_w * 0.11))
+
+    col_px: list[int]
+    pref_ratios = {
+        _header_key(k): float(v)
+        for k, v in (style.preferred_col_ratios or {}).items()
+        if v is not None and float(v) > 0
+    }
+    pref_mins = {
+        _header_key(k): int(v)
+        for k, v in (style.preferred_col_mins or {}).items()
+        if v is not None
+    }
+
+    if pref_ratios and all(_header_key(h) in pref_ratios for h in headers_s):
+        weights = [pref_ratios[_header_key(h)] for h in headers_s]
+        weight_sum = sum(weights) or 1.0
+        col_px = [max(1, int(max_inner_w * (w / weight_sum))) for w in weights]
+        min_cols = [max(_min_col_for_header(h), pref_mins.get(_header_key(h), 0)) for h in headers_s]
+        sum_min = sum(min_cols)
+        if sum_min > max_inner_w and sum_min > 0:
+            f = max_inner_w / sum_min
+            min_cols = [max(48, int(w * f)) for w in min_cols]
+        col_px = [max(min_cols[j], col_px[j]) for j in range(n_cols)]
+    else:
+        col_px = [w + style.pad_x * 2 for w in col_content_px]
+
+    table_inner_w = sum(col_px)
     if table_inner_w > max_inner_w and table_inner_w > 0:
         scale = max_inner_w / table_inner_w
-        def _min_col_for_header(h: str) -> int:
-            hs = (h or "").replace("\n", "").strip()
-            hs_u = hs.upper()
-            # Heuristic minimum widths to keep mobile tables readable.
-            # Tuned for Japanese text + comma-separated prices.
-            if hs in {"#", "No", "№"}:
-                return 64
-            if "銘柄" in hs:
-                return max(260, int(max_inner_w * 0.32))
-            if "注文" in hs:
-                return max(180, int(max_inner_w * 0.19))
-            if ("SL" in hs_u) or ("TP" in hs_u) or ("RISK" in hs_u) or (hs_u in {"R", "RR"}):
-                return max(200, int(max_inner_w * 0.20))
-            if ("状態" in hs) or ("メモ" in hs):
-                return max(110, int(max_inner_w * 0.10))
-            return max(120, int(max_inner_w * 0.12))
-        min_cols = [_min_col_for_header(h) for h in headers_s]
+        min_cols = [max(_min_col_for_header(h), pref_mins.get(_header_key(h), 0)) for h in headers_s]
         # If mins exceed available width, scale them down proportionally.
         sum_min = sum(min_cols)
         if sum_min > max_inner_w and sum_min > 0:
@@ -347,6 +382,13 @@ def _render_table_png_pil(
                     col_px[j] -= 1
                     diff += 1
             j = (j + 1) % n_cols
+    else:
+        diff = max_inner_w - table_inner_w
+        j = 0
+        while diff > 0 and n_cols > 0:
+            col_px[j] += 1
+            diff -= 1
+            j = (j + 1) % n_cols
     table_inner_w = sum(col_px)
     # ---- Wrap/truncate text to the *actual* column widths
     headers_fit: list[str] = []
@@ -375,8 +417,10 @@ def _render_table_png_pil(
                     pct = float(m2.group(1))
                 except Exception:
                     pct = None
-        if pct is None or pct < 0:
+        if pct is None:
             return None
+        if pct < 0:
+            return "#FEF2F2"  # current position is under water
         # Tune for typical stockbot ranges: 0–3% (low), 3–6% (mid), 6–8% (high), >8% (very high)
         if pct <= 3.0:
             return "#ECFDF5"  # green-50
@@ -411,11 +455,20 @@ def _render_table_png_pil(
                 return "#DCFCE7"
         # Status / memo column
         if ("状態" in ht) or ("メモ" in ht):
-            if "成行禁止" in ct or "見送り" in ct or "SLタイト" in ct:
+            compact = ct.replace(" ", "")
+            if ("成行禁止" in compact) or ("見送り" in compact) or ("SLタイト" in compact) or ("損" in compact and "含み" in compact):
                 return "#FEE2E2"
-            if "注文有効" in ct or "保有" in ct or "帯内" in ct:
+            if ("注文有効" in compact) or ("保有継続" in compact) or ("帯内" in compact) or ("ゾーン内" in compact):
                 return "#DCFCE7"
-            if "待ち" in ct or "監視" in ct:
+            if "出来高" in compact:
+                return "#FFFBEB"
+            if ("準候補" in compact):
+                return "#F3E8FF"
+            if ("上" in compact) and ("下" not in compact):
+                return "#FEF3C7"
+            if ("下" in compact) and ("上" not in compact):
+                return "#DBEAFE"
+            if ("待ち" in compact) or ("監視" in compact):
                 return "#FFFBEB"
         return None
     for j, h in enumerate(headers_s):
