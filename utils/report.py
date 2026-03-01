@@ -937,46 +937,8 @@ def build_report(
                 s = s.replace("指値（帯内2段）", "指値(帯)")
                 s = s.replace("指値（帯内）", "指値(帯)")
                 s = s.replace("指値（帯）", "指値(帯)")
-                return s.strip()
-
-            def _format_order_cell(s: str) -> str:
-                """注文セルをLINE向けに整形。
-
-                - 意味の区切りで改行して、文字の途中で不自然に割れないようにする
-                - stop(逆指値)の "Trg" が "T / rg" に割れるのを抑える
-                - レンジ(〜)は区切りで改行して価格が崩れないようにする
-                """
-
-                s = _shorten_order_text(s)
-                if not s:
-                    return ""
-
-                # slash 区切りは必ず改行（2段指値/上限など）
-                s = s.replace(" / ", "\n")
-
-                # stop注文: "逆指値 Trg 4,253" → "逆指値\nTrg\n4,253"
-                s = s.replace("逆指値(戻) Trg", "逆指値(戻)\nTrg")
-                s = s.replace("逆指値 Trg", "逆指値\nTrg")
-                s = re.sub(r"\bTrg\s*([0-9,]+)", r"Trg\n\1", s)
-                s = re.sub(r"\b上限\s*([0-9,]+)", r"上限\n\1", s)
-                s = re.sub(r"\b下限\s*([0-9,]+)", r"下限\n\1", s)
-
-                # レンジ注文: "指値 4,935〜5,003" → "指値\n4,935〜\n5,003"
-                if s.startswith("指値 ") and "〜" in s:
-                    s = s.replace("指値 ", "指値\n", 1)
-                    s = s.replace("〜", "〜\n", 1)
-                elif "〜" in s:
-                    s = s.replace("〜", "〜\n", 1)
-
-                # Order-type と価格は必ず改行して、数値が途中で割れないようにする。
-                # 例: "成行(現) 1,506" -> "成行(現)\n1,506"
-                s = re.sub(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*", r"\1\n", s)
-
-                # Many order strings are concatenated like "指値(押)1,489".
-                # If the above rule didn't trigger, insert a single newline before the first digit.
-                if "\n" not in s:
-                    s = re.sub(r"([^\s])([0-9])", r"\1\n\2", s, count=1)
-
+                s = s.replace("逆指値（戻り）", "逆指(戻)")
+                s = s.replace("逆指値", "逆指")
                 return s.strip()
 
             def _split_symbol_cell(cell: str) -> tuple[str, str]:
@@ -999,7 +961,6 @@ def build_report(
 
                 short: list[str] = []
                 for p in parts:
-                    # Compact tags for mobile (reduce column width; prevents awkward line breaks)
                     if p == "A1-Strong":
                         p = "A1S"
                     elif p == "週足OK":
@@ -1011,25 +972,80 @@ def build_report(
                     elif p == "板厚○":
                         p = "厚○"
                     short.append(p)
-
                 return "/".join(short)
+
+            def _format_symbol_for_image(cell: str, note: str = "") -> str:
+                main, tags = _split_symbol_cell(cell)
+                main = " ".join((main or "").splitlines()).strip()
+                tags = _format_tags(tags)
+                lines_out: list[str] = []
+                if main:
+                    lines_out.append(main)
+                if tags:
+                    lines_out.append(tags)
+                if note:
+                    note = note.replace(" / ", "\n")
+                    for part in [x.strip() for x in note.splitlines() if x.strip()]:
+                        lines_out.append(part)
+                return "\n".join(lines_out)
+
+            def _format_order_cell(s: str) -> str:
+                s = _shorten_order_text(s)
+                if not s:
+                    return ""
+                s = re.sub(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値|逆指\(戻\)|逆指)(?=[^\s\n])", r"\1 ", s)
+
+                # 3-step / 2-step pullback ladders
+                m3 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*中\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
+                if m3:
+                    return f"{m3.group(1)}\n浅 {m3.group(2)}\n中 {m3.group(3)}\n深 {m3.group(4)}"
+
+                m2 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
+                if m2:
+                    return f"{m2.group(1)}\n浅 {m2.group(2)}\n深 {m2.group(3)}"
+
+                # Stop / stop-reentry
+                mstop = re.match(r"^(逆指(?:\(戻\))?)\s*Trg\s*([0-9,]+)(?:\s*/\s*上限\s*([0-9,]+))?$", s)
+                if mstop:
+                    out = [mstop.group(1), f"Trg {mstop.group(2)}"]
+                    if mstop.group(3):
+                        out.append(f"上限 {mstop.group(3)}")
+                    return "\n".join(out)
+
+                # Limit range
+                mrange = re.match(r"^(指値(?:\(押\)|\(帯\))?)\s*([0-9,]+〜[0-9,]+)$", s)
+                if mrange:
+                    return f"{mrange.group(1)}\n{mrange.group(2)}"
+
+                # Plain price after action
+                mone = re.match(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*([0-9,]+)$", s)
+                if mone:
+                    return f"{mone.group(1)}\n{mone.group(2)}"
+
+                if " / " in s:
+                    s = s.replace(" / ", "\n")
+
+                if "\n" not in s:
+                    s = re.sub(r"([^)\s])\s*([0-9])", r"\1\n\2", s, count=1)
+                return s.strip()
 
             def _format_risk_block(sl: str, tp1: str, risk: str) -> str:
                 sl = (sl or "").strip()
                 tp1 = (tp1 or "").strip()
                 risk = (risk or "").strip()
+                if all(v in {"", "-"} for v in (sl, tp1, risk)):
+                    return "-"
                 out: list[str] = []
-                if sl:
+                if sl and sl != "-":
                     out.append(f"SL {sl}")
-                if tp1:
+                if tp1 and tp1 != "-":
                     out.append(f"TP {tp1}")
-                if risk:
-                    # Keep '%' so the renderer can tint by risk.
-                    if risk.startswith("R"):
-                        out.append(risk)
-                    else:
-                        out.append(f"R {risk}")
-                return "\n".join([x for x in out if x])
+                if risk and risk != "-":
+                    risk_line = risk if risk.startswith("R") else f"R {risk}"
+                    if "(" in risk_line and ")" in risk_line:
+                        risk_line = risk_line.replace(" (", "\n(")
+                    out.append(risk_line)
+                return "\n".join([x for x in out if x]) or "-"
 
             def _pretty_group_label(g: str) -> str:
                 if g == "狙える":
@@ -1042,10 +1058,41 @@ def build_report(
                     return f"🥣 {g}"
                 return f"☑ {g}"
 
-            def _build_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
+            def _format_status_cell(memo: str) -> str:
+                memo = _strip_icons(memo or "")
+                memo = memo.replace("（注文有効）", "")
+                memo = memo.replace("注文有効", "")
+                memo = memo.replace("状態：", "")
+                memo = memo.replace("ゾーンまで ", "")
+                memo = memo.replace("成行禁止（指値待ち）", "指値待ち")
+                memo = memo.replace(" / ", " | ")
+                memo = " ".join(memo.split())
+
+                if not memo:
+                    return ""
+                if "出来高" in memo and ("ゾーン内" in memo or "帯内" in memo):
+                    return "出来高\n帯内"
+                if "準候補" in memo and "下" in memo and "上" not in memo:
+                    return "準候補\n下"
+                if "準候補" in memo and "上" in memo and "下" not in memo:
+                    return "準候補\n上"
+                if "出来高" in memo and "上" in memo and "下" not in memo:
+                    return "出来高\n上"
+                if "出来高" in memo and "下" in memo and "上" not in memo:
+                    return "出来高\n下"
+                if "ゾーン内" in memo or "帯内" in memo:
+                    return "帯内"
+                if "下" in memo and "上" not in memo:
+                    return "下"
+                if "上" in memo and "下" not in memo:
+                    return "上"
+                if "出来高" in memo:
+                    return "出来高"
+                return memo.replace(" | ", "\n")
+
+            def _build_main_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
                 img_rows: list[list[str]] = []
                 current_group: str | None = None
-
                 for r in rows_src:
                     group = str(r[0]) if r and len(r) > 0 else ""
                     if group != current_group:
@@ -1053,33 +1100,38 @@ def build_report(
                         img_rows.append([_pretty_group_label(group)])
 
                     idx = str(r[1]) if len(r) > 1 else ""
-                    sym_main, sym_tags = _split_symbol_cell(str(r[2]) if len(r) > 2 else "")
-                    sym_tags = _format_tags(sym_tags)
-                    sym_cell = sym_main
-                    if sym_tags:
-                        sym_cell = f"{sym_main}\n{sym_tags}"
+                    memo = _strip_icons(str(r[7]) if len(r) > 7 else "")
+                    symbol_note = ""
+                    order_note = ""
+                    if group == "ポジ" and memo:
+                        symbol_note = memo
+                    elif group == "見送り" and memo:
+                        order_note = memo.replace("見送り", "").strip("（）() ")
 
+                    sym_cell = _format_symbol_for_image(str(r[2]) if len(r) > 2 else "", note=symbol_note)
                     order_txt = _format_order_cell(str(r[3]) if len(r) > 3 else "")
+                    if group == "見送り":
+                        order_txt = "見送り" + (f"\n{order_note}" if order_note else "")
 
                     sl = str(r[4]) if len(r) > 4 else ""
                     tp1 = str(r[5]) if len(r) > 5 else ""
                     risk = str(r[6]) if len(r) > 6 else ""
                     risk_block = _format_risk_block(sl, tp1, risk)
+                    img_rows.append([idx, sym_cell, order_txt, risk_block])
+                return img_rows
 
-                    memo = _strip_icons(str(r[7]) if len(r) > 7 else "")
-                    # Saucer pages: keep status compact (LINE wraps aggressively)
-                    if group.startswith("ソーサー"):
-                        memo = memo.replace("（注文有効）", "")
-                        memo = memo.replace("注文有効", "")
-                        memo = memo.replace("状態：", "")
-                        memo = memo.replace("ゾーンまで ", "")
-                        memo = memo.replace(" / ", " | ")
-                        memo = memo.replace("逆指値待ち", "逆指値待ち")
-                        memo = memo.replace("成行禁止（指値待ち）", "指値待ち")
-                        memo = " ".join(memo.split())
-
-                    img_rows.append([idx, sym_cell, order_txt, risk_block, memo])
-
+            def _build_saucer_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
+                img_rows: list[list[str]] = []
+                for r in rows_src:
+                    idx = str(r[1]) if len(r) > 1 else ""
+                    sym_cell = _format_symbol_for_image(str(r[2]) if len(r) > 2 else "")
+                    order_txt = _format_order_cell(str(r[3]) if len(r) > 3 else "")
+                    sl = str(r[4]) if len(r) > 4 else ""
+                    tp1 = str(r[5]) if len(r) > 5 else ""
+                    risk = str(r[6]) if len(r) > 6 else ""
+                    risk_block = _format_risk_block(sl, tp1, risk)
+                    status_txt = _format_status_cell(str(r[7]) if len(r) > 7 else "")
+                    img_rows.append([idx, sym_cell, order_txt, risk_block, status_txt])
                 return img_rows
 
             # Split rows for multi-page PNG
@@ -1088,39 +1140,59 @@ def build_report(
             rows_saucer_w = [r for r in table_rows if r and str(r[0]) == "ソーサー（週足）"]
             rows_saucer_m = [r for r in table_rows if r and str(r[0]) == "ソーサー（月足）"]
 
-            style = TableImageStyle(
+            style_main = TableImageStyle(
                 max_total_px=1000,
-                max_col_px=500,
-                margin=22,
-                pad_x=18,
-                pad_y=15,
+                max_col_px=520,
+                margin=20,
+                pad_x=16,
+                pad_y=14,
                 font_size=31,
-                title_font_size=40,
-                section_font_size=33,
+                title_font_size=38,
+                section_font_size=32,
                 line_width=1,
-                line_spacing=6,
+                line_spacing=5,
                 header_bg="#F8FAFC",
-                zebra_bg="#FAFAFA",
+                zebra_bg="#FCFCFD",
                 section_bg="#DBEAFE",
                 text_color="#111827",
                 grid_color="#CBD5E1",
                 wrap_cells=True,
-                max_lines=5,
+                max_lines=4,
+                preferred_col_ratios={"#": 0.06, "銘柄": 0.47, "注文": 0.19, "sl/tpr": 0.28},
+                preferred_col_mins={"#": 60, "銘柄": 360, "注文": 185, "sl/tpr": 240},
+            )
+
+            style_saucer = TableImageStyle(
+                max_total_px=1000,
+                max_col_px=520,
+                margin=20,
+                pad_x=16,
+                pad_y=14,
+                font_size=31,
+                title_font_size=38,
+                section_font_size=32,
+                line_width=1,
+                line_spacing=5,
+                header_bg="#F8FAFC",
+                zebra_bg="#FCFCFD",
+                section_bg="#DBEAFE",
+                text_color="#111827",
+                grid_color="#CBD5E1",
+                wrap_cells=True,
+                max_lines=4,
+                preferred_col_ratios={"#": 0.06, "銘柄": 0.40, "注文": 0.20, "sl/tpr": 0.22, "状態": 0.12},
+                preferred_col_mins={"#": 60, "銘柄": 320, "注文": 180, "sl/tpr": 220, "状態": 110},
             )
 
             png_paths: list[str] = []
 
             # 1) Orders + Position (main)
             if rows_orders:
-                img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "メモ"]
-                img_rows = _build_img_rows(rows_orders)
+                img_headers = ["#", "銘柄", "注文", "SL/TP\nR"]
+                img_rows = _build_main_img_rows(rows_orders)
                 title_orders = f"stockbotTOM {today_str} 注文サマリ"
                 try:
-                    # NOTE: `render_table_png` auto-detects risk columns from the header names
-                    # (e.g. columns containing "Risk" or "SL/TP" + "R").
-                    # Older drafts passed `risk_cols=...`, but the current `render_table_png`
-                    # implementation does not accept that argument.
-                    render_table_png(title_orders, img_headers, img_rows, png_main, style=style)
+                    render_table_png(title_orders, img_headers, img_rows, png_main, style=style_main)
                     png_paths.append(png_main)
                 except Exception as e:
                     if note_enabled:
@@ -1130,10 +1202,10 @@ def build_report(
             # 2) Saucer (daily)
             if rows_saucer_d:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
-                img_rows = _build_img_rows(rows_saucer_d)
+                img_rows = _build_saucer_img_rows(rows_saucer_d)
                 title_d = f"stockbotTOM {today_str} ソーサー（日足）"
                 try:
-                    render_table_png(title_d, img_headers, img_rows, png_d, style=style)
+                    render_table_png(title_d, img_headers, img_rows, png_d, style=style_saucer)
                     png_paths.append(png_d)
                 except Exception as e:
                     if note_enabled:
@@ -1143,10 +1215,10 @@ def build_report(
             # 3) Saucer (weekly)
             if rows_saucer_w:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
-                img_rows = _build_img_rows(rows_saucer_w)
+                img_rows = _build_saucer_img_rows(rows_saucer_w)
                 title_w = f"stockbotTOM {today_str} ソーサー（週足）"
                 try:
-                    render_table_png(title_w, img_headers, img_rows, png_w, style=style)
+                    render_table_png(title_w, img_headers, img_rows, png_w, style=style_saucer)
                     png_paths.append(png_w)
                 except Exception as e:
                     if note_enabled:
@@ -1156,10 +1228,10 @@ def build_report(
             # 4) Saucer (monthly)
             if rows_saucer_m:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
-                img_rows = _build_img_rows(rows_saucer_m)
+                img_rows = _build_saucer_img_rows(rows_saucer_m)
                 title_m = f"stockbotTOM {today_str} ソーサー（月足）"
                 try:
-                    render_table_png(title_m, img_headers, img_rows, png_m, style=style)
+                    render_table_png(title_m, img_headers, img_rows, png_m, style=style_saucer)
                     png_paths.append(png_m)
                 except Exception as e:
                     if note_enabled:
