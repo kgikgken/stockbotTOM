@@ -36,16 +36,17 @@ class TableImageStyle:
     section_font_size: int = 33
     line_width: int = 1
     line_spacing: int = 6
+    title_line_spacing: int = 2
     header_bg: str = "#F3F4F6"
     zebra_bg: str = "#FAFAFA"
     section_bg: str = "#DBEAFE"
-    section_bg_order: str = "#DCFCE7"
+    section_bg_order: str = "#DCEFE1"
     section_bg_skip: str = "#FEE2E2"
-    section_bg_position: str = "#EDE9FE"
-    section_bg_saucer: str = "#E0F2FE"
+    section_bg_position: str = "#EAE7F8"
+    section_bg_saucer: str = "#E4F1FA"
     text_color: str = "#111827"
     muted_text_color: str = "#334155"
-    grid_color: str = "#CBD5E1"
+    grid_color: str = "#C7D2DE"
     wrap_cells: bool = True
     max_lines: int = 5
     preferred_col_ratios: Optional[dict[str, float]] = None
@@ -447,6 +448,10 @@ def _render_table_png_pil(
         if ("注文" in ht) or ("action" in ht):
             if "見送り" in ct:
                 return "#FEE2E2"
+            if ("保有" in ct) or ("継続" in ct):
+                return "#EEF6F0"
+            if ("監視" in ct) or ("注意" in ct):
+                return "#FFF7DB"
             if "成行" in ct:
                 return "#DBEAFE"
             if "逆指値" in ct:
@@ -464,6 +469,8 @@ def _render_table_png_pil(
                 return "#FFFBEB"
             if ("準候補" in compact):
                 return "#F3E8FF"
+            if ("指値待ち" in compact) or ("逆指値待ち" in compact):
+                return "#EEF2FF"
             if ("上" in compact) and ("下" not in compact):
                 return "#FEF3C7"
             if ("下" in compact) and ("上" not in compact):
@@ -488,7 +495,7 @@ def _render_table_png_pil(
     # ---- Heights
     # Wrap the title/subtitle to the table width so it never gets clipped.
     title_fit = _wrap_to_px(mdraw, title, title_font, max_px=table_inner_w)
-    title_w, title_h = _text_bbox(mdraw, title_fit, title_font, spacing=style.line_spacing)
+    title_w, title_h = _text_bbox(mdraw, title_fit, title_font, spacing=style.title_line_spacing)
     head_h = 0
     for h in headers_fit:
         _, h_px = _text_bbox(mdraw, h, header_font, spacing=style.line_spacing)
@@ -507,7 +514,7 @@ def _render_table_png_pil(
             row_heights.append(max_h + style.pad_y * 2)
     table_h = head_h + sum(row_heights)
     img_w = style.margin * 2 + table_inner_w
-    img_h = style.margin * 2 + title_h + 12 + table_h
+    img_h = style.margin * 2 + title_h + 10 + table_h
     # ---- Render
     img = Image.new("RGB", (int(img_w), int(img_h)), "white")
     draw = ImageDraw.Draw(img)
@@ -517,10 +524,10 @@ def _render_table_png_pil(
         title_fit,
         fill=style.text_color,
         font=title_font,
-        spacing=style.line_spacing,
+        spacing=style.title_line_spacing,
     )
     x0 = style.margin
-    y0 = style.margin + title_h + 12
+    y0 = style.margin + title_h + 10
     x1 = x0 + table_inner_w
     # Helper: draw aligned multiline text inside a cell
     def draw_cell(
