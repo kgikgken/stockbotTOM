@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
-import os
 from dataclasses import dataclass
 from typing import Tuple
 
 from utils.screen_logic import rr_min_by_market, rday_min_by_setup
-from utils.util import clamp, append_csv_row
+from utils.util import clamp
 from utils.setup import SetupInfo
 import numpy as np
 
@@ -29,7 +27,7 @@ class EVInfo:
     time_penalty_pts: float
 
 
-def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
+def _reach_prob(setup: SetupInfo, mkt_score: int | None = None, breadth_score: int | None = None) -> float:
     """TP1到達確率（目安）
 
     仕様（監査OS）：
@@ -67,6 +65,13 @@ def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
     if mkt_score is not None:
         env = clamp((int(mkt_score) - 55) / 25.0, -1.0, 1.0)
         p += 0.03 * env
+
+    # Breadth is often more informative than the headline index alone for short-term swing entries.
+    # We keep the effect intentionally small so it acts as a conservative calibration shim,
+    # not as a second market-timing model.
+    if breadth_score is not None:
+        b = clamp((int(breadth_score) - 55) / 25.0, -1.0, 1.0)
+        p += 0.04 * b
 
     # --- Additional structure/quality adjustments (lightweight; avoid overfitting)
     # 20日騰落（勢い）
@@ -108,7 +113,7 @@ def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
 
     return float(clamp(p, 0.30, 0.85))
 
-def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
+def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool, breadth_score: int | None = None) -> EVInfo:
     """CAGR寄与度一本化（TP1基準）。
 
     - 期待RはTP1基準で固定
@@ -125,7 +130,7 @@ def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
     rr = expected_r
     expected_days = float(max(setup.expected_days, 0.5))
 
-    p = _reach_prob(setup, mkt_score=mkt_score)
+    p = _reach_prob(setup, mkt_score=mkt_score, breadth_score=breadth_score)
 
     # Expected value in R (TP1 basis): p*RR - (1-p)*1
     ev_r = float((p * expected_r) - ((1.0 - p) * 1.0))
