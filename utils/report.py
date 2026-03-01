@@ -594,6 +594,12 @@ def build_report(
             head = b[0].replace("■", "").strip()
             status = ""
             next_act = ""
+            # Some position strings already embed the action in the headline:
+            #   "186A.T（本日追加）：保有継続"
+            # Split it once so the symbol cell stays clean in the image.
+            if "：" in head:
+                head, embedded_act = head.split("：", 1)
+                next_act = embedded_act.strip()
             entry = ""
             now = ""
             pnl = ""
@@ -1027,13 +1033,13 @@ def build_report(
 
             def _pretty_group_label(g: str) -> str:
                 if g == "狙える":
-                    return "☑ 狙える（今日やること）"
+                    return "✅ 今日の注文"
                 if g == "見送り":
-                    return "✕ 見送り"
+                    return "⛔ 見送り"
                 if g == "ポジ":
-                    return "☑ ポジション"
+                    return "📌 ポジション"
                 if g.startswith("ソーサー"):
-                    return f"☑ {g}"
+                    return f"🥣 {g}"
                 return f"☑ {g}"
 
             def _build_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
@@ -1065,6 +1071,11 @@ def build_report(
                     if group.startswith("ソーサー"):
                         memo = memo.replace("（注文有効）", "")
                         memo = memo.replace("注文有効", "")
+                        memo = memo.replace("状態：", "")
+                        memo = memo.replace("ゾーンまで ", "")
+                        memo = memo.replace(" / ", " | ")
+                        memo = memo.replace("逆指値待ち", "逆指値待ち")
+                        memo = memo.replace("成行禁止（指値待ち）", "指値待ち")
                         memo = " ".join(memo.split())
 
                     img_rows.append([idx, sym_cell, order_txt, risk_block, memo])
@@ -1078,23 +1089,23 @@ def build_report(
             rows_saucer_m = [r for r in table_rows if r and str(r[0]) == "ソーサー（月足）"]
 
             style = TableImageStyle(
-                max_total_px=1080,
-                max_col_px=520,
-                margin=24,
-                pad_x=16,
-                pad_y=14,
-                font_size=30,
-                title_font_size=42,
-                section_font_size=34,
-                line_width=2,
-                line_spacing=4,
-                header_bg="#F3F4F6",
+                max_total_px=1000,
+                max_col_px=500,
+                margin=22,
+                pad_x=18,
+                pad_y=15,
+                font_size=31,
+                title_font_size=40,
+                section_font_size=33,
+                line_width=1,
+                line_spacing=6,
+                header_bg="#F8FAFC",
                 zebra_bg="#FAFAFA",
                 section_bg="#DBEAFE",
                 text_color="#111827",
-                grid_color="#D1D5DB",
+                grid_color="#CBD5E1",
                 wrap_cells=True,
-                max_lines=6,
+                max_lines=5,
             )
 
             png_paths: list[str] = []
