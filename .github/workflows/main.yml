@@ -26,19 +26,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-
       - name: Quick sanity check (syntax/import)
         run: |
           python -m compileall -q .
-
-      - name: Cache yfinance data
-        uses: actions/cache@v4
-        with:
-          path: |
-            out/cache/yf
-          key: ${{ runner.os }}-yfcache-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-yfcache-
 
       - name: Run stockbot
         run: python main.py
@@ -48,6 +38,8 @@ jobs:
           REQUIRE_REPORT_PNG: "1"
           REQUIRE_LINE_DELIVERY: "1"
           LINE_SEND_IMAGE: "1"
+          LINE_SEND_TEXT: "0"
+          REPORT_IMAGE_NOTE: "0"
           REPORT_DEBUG: "1"
 
       - name: Upload artifacts (out/)
