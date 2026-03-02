@@ -454,7 +454,7 @@ def _render_table_png_pil(
                 return "#FFF7DB"
             if "成行" in ct:
                 return "#DBEAFE"
-            if "逆指値" in ct:
+            if ("逆指値" in ct) or ("逆指" in ct):
                 return "#EDE9FE"
             if "指値" in ct:
                 return "#DCFCE7"
@@ -471,9 +471,9 @@ def _render_table_png_pil(
                 return "#F3E8FF"
             if ("指値待ち" in compact) or ("逆指値待ち" in compact):
                 return "#EEF2FF"
-            if ("上" in compact) and ("下" not in compact):
+            if (("上" in compact) or ("↑" in compact)) and (("下" not in compact) and ("↓" not in compact)):
                 return "#FEF3C7"
-            if ("下" in compact) and ("上" not in compact):
+            if (("下" in compact) or ("↓" in compact)) and (("上" not in compact) and ("↑" not in compact)):
                 return "#DBEAFE"
             if ("待ち" in compact) or ("監視" in compact):
                 return "#FFFBEB"
