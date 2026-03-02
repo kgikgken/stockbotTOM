@@ -742,8 +742,56 @@ def build_report(
                 return f"{n}ヶ月"
             return f"{n}本"
 
+        def _saucer_exec_sort(tf_key: str, raw_items: List[Dict]) -> List[Dict]:
+            """Sort saucer ideas by *today's executability* before display.
+
+            Priority:
+            1) In-zone (can place the order now)
+            2) Above-zone (pullback limit waiting)
+            3) Below-zone (buy-stop / re-entry waiting)
+
+            Within each bucket, keep the original score order unless two names are
+            both waiting; then prefer the one closer to the zone.
+            """
+            tol_zone = 0.0010
+            ranked: list[tuple[tuple[float, float, int], Dict]] = []
+            for idx0, s in enumerate(raw_items):
+                rim_f = safe_float(s.get("rim"), 0.0)
+                last_f = safe_float(s.get("last"), 0.0)
+                atrp_f = safe_float(s.get("atrp"), 0.0)
+                entry_low = safe_float(s.get("entry_low"), float("nan"))
+                entry_high = safe_float(s.get("entry_high"), float("nan"))
+                if rim_f > 0 and np.isfinite(entry_low) and np.isfinite(entry_high) and entry_low > 0 and entry_high > 0:
+                    zone_low = float(min(entry_low, entry_high))
+                    zone_high = float(max(entry_low, entry_high))
+                else:
+                    base_pre = {"D": 0.6, "W": 0.9, "M": 1.2}.get(tf_key, 0.8)
+                    max_pre = {"D": 2.0, "W": 3.0, "M": 4.0}.get(tf_key, 2.5)
+                    atr_pre = (atrp_f * 0.35) if atrp_f > 0 else 0.0
+                    pre_buf_pct = max(base_pre, atr_pre)
+                    pre_buf_pct = min(pre_buf_pct, max_pre)
+                    zone_low = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
+                    zone_high = rim_f * (1.0 - base_pre / 100.0) if rim_f > 0 else 0.0
+                    zone_high = max(zone_low, zone_high)
+
+                state_rank = 9
+                dist_rank = 999.0
+                if last_f > 0 and zone_low > 0 and zone_high > 0:
+                    if last_f < zone_low * (1.0 - tol_zone):
+                        state_rank = 2
+                        dist_rank = max(0.0, (zone_low / last_f - 1.0) * 100.0)
+                    elif last_f > zone_high * (1.0 + tol_zone):
+                        state_rank = 1
+                        dist_rank = max(0.0, (last_f / zone_high - 1.0) * 100.0)
+                    else:
+                        state_rank = 0
+                        dist_rank = 0.0
+                ranked.append(((state_rank, dist_rank, idx0), s))
+            ranked.sort(key=lambda x: x[0])
+            return [s for _k, s in ranked]
+
         for key in ("D", "W", "M"):
-            items = _iter_tf(key)[:5]
+            items = _saucer_exec_sort(key, _iter_tf(key))[:5]
             if lines and key != "D":
                 lines.append("")
             lines.append(f"🥣 ソーサー枠（{_tf_title(key)}）ランキング（最大5）")
@@ -1000,11 +1048,11 @@ def build_report(
                 # 3-step / 2-step pullback ladders
                 m3 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*中\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
                 if m3:
-                    return f"{m3.group(1)}\n上 {m3.group(2)}\n中 {m3.group(3)}\n下 {m3.group(4)}"
+                    return f"{m3.group(1)}\n浅 {m3.group(2)}\n中 {m3.group(3)}\n深 {m3.group(4)}"
 
                 m2 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
                 if m2:
-                    return f"{m2.group(1)}\n上 {m2.group(2)}\n下 {m2.group(3)}"
+                    return f"{m2.group(1)}\n浅 {m2.group(2)}\n深 {m2.group(3)}"
 
                 # Stop / stop-reentry
                 mstop = re.match(r"^(逆指(?:\(戻\))?)\s*Trg\s*([0-9,]+)(?:\s*/\s*上限\s*([0-9,]+))?$", s)
@@ -1019,7 +1067,7 @@ def build_report(
                 if mrange:
                     low = mrange.group(2)
                     high = mrange.group(3)
-                    return f"{mrange.group(1)}\n上 {high}\n下 {low}"
+                    return f"{mrange.group(1)}\n下限 {low}\n上限 {high}"
 
                 # Plain price after action
                 mone = re.match(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*([0-9,]+)$", s)
@@ -1093,9 +1141,9 @@ def build_report(
                 if in_zone:
                     return "帯内"
                 if has_down:
-                    return "下"
+                    return "下待ち"
                 if has_up:
-                    return "上"
+                    return "上待ち"
                 if "出来高" in memo:
                     return "出来高"
                 if "準候補" in memo:
