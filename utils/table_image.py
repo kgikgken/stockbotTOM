@@ -392,6 +392,32 @@ def _render_table_png_pil(
             j = (j + 1) % n_cols
     table_inner_w = sum(col_px)
     # ---- Wrap/truncate text to the *actual* column widths
+    # Title: prefer a compact, stable two-line layout on mobile.
+    # If a line is still too long, shrink the title font a little before wrapping.
+    def _fit_title_font_to_width(font, text: str, max_px: int):
+        if not text or max_px <= 0:
+            return font
+        try:
+            cur_size = int(getattr(font, 'size', style.title_font_size))
+        except Exception:
+            cur_size = int(style.title_font_size)
+        min_size = max(28, int(style.title_font_size) - 8)
+        best = font
+        lines = [ln for ln in str(text).splitlines() if ln] or [str(text)]
+        while cur_size > min_size:
+            too_wide = False
+            for ln in lines:
+                w_ln, _ = _text_bbox(mdraw, ln, best)
+                if w_ln > max_px:
+                    too_wide = True
+                    break
+            if not too_wide:
+                break
+            cur_size -= 1
+            best = _load_pil_font(cur_size, bold=True)
+        return best
+
+    title_font = _fit_title_font_to_width(title_font, title, table_inner_w)
     headers_fit: list[str] = []
     # Identify "risk" column indices so we can tint the Risk column (mobile-friendly heatmap).
     # We intentionally keep this heuristic loose because headers vary a bit between pages.
