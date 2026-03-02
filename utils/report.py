@@ -984,7 +984,7 @@ def build_report(
                 if tags:
                     lines_out.append(tags)
                 if note:
-                    note = note.replace("Entry ", "建 ")
+                    note = note.replace("Entry ", "建値 ")
                     note = note.replace("Setup ", "型 ")
                     note = note.replace(" / ", "\n")
                     for part in [x.strip() for x in note.splitlines() if x.strip()]:
@@ -1000,11 +1000,11 @@ def build_report(
                 # 3-step / 2-step pullback ladders
                 m3 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*中\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
                 if m3:
-                    return f"{m3.group(1)}\n浅 {m3.group(2)}\n中 {m3.group(3)}\n深 {m3.group(4)}"
+                    return f"{m3.group(1)}\n上 {m3.group(2)}\n中 {m3.group(3)}\n下 {m3.group(4)}"
 
                 m2 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
                 if m2:
-                    return f"{m2.group(1)}\n浅 {m2.group(2)}\n深 {m2.group(3)}"
+                    return f"{m2.group(1)}\n上 {m2.group(2)}\n下 {m2.group(3)}"
 
                 # Stop / stop-reentry
                 mstop = re.match(r"^(逆指(?:\(戻\))?)\s*Trg\s*([0-9,]+)(?:\s*/\s*上限\s*([0-9,]+))?$", s)
@@ -1017,7 +1017,9 @@ def build_report(
                 # Limit range
                 mrange = re.match(r"^(指値(?:\(押\)|\(帯\))?)\s*([0-9,]+)〜([0-9,]+)$", s)
                 if mrange:
-                    return f"{mrange.group(1)}\n下 {mrange.group(2)}\n上 {mrange.group(3)}"
+                    low = mrange.group(2)
+                    high = mrange.group(3)
+                    return f"{mrange.group(1)}\n上 {high}\n下 {low}"
 
                 # Plain price after action
                 mone = re.match(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*([0-9,]+)$", s)
@@ -1073,28 +1075,33 @@ def build_report(
 
                 if not memo:
                     return ""
-                if "出来高" in memo and ("ゾーン内" in memo or "帯内" in memo):
-                    return "出来高\n帯内"
-                if "準候補" in memo and "下" in memo and "上" not in memo:
-                    return "準候補\n下"
-                if "準候補" in memo and "上" in memo and "下" not in memo:
-                    return "準候補\n上"
-                if "出来高" in memo and "上" in memo and "下" not in memo:
-                    return "出来高\n上"
-                if "出来高" in memo and "下" in memo and "上" not in memo:
-                    return "出来高\n下"
-                if "ゾーン内" in memo or "帯内" in memo:
-                    if "上" in memo and "下" not in memo:
-                        return "帯内\n上"
-                    if "下" in memo and "上" not in memo:
-                        return "帯内\n下"
+
+                has_up = ("上" in memo) and ("下" not in memo)
+                has_down = ("下" in memo) and ("上" not in memo)
+                in_zone = ("ゾーン内" in memo) or ("帯内" in memo)
+
+                if "出来高" in memo and in_zone:
+                    return "出来高↑"
+                if "出来高" in memo and has_up:
+                    return "出来高↑"
+                if "出来高" in memo and has_down:
+                    return "出来高↓"
+                if "準候補" in memo and has_down:
+                    return "準候補↓"
+                if "準候補" in memo and has_up:
+                    return "準候補↑"
+                if in_zone:
                     return "帯内"
-                if "下" in memo and "上" not in memo:
+                if has_down:
                     return "下"
-                if "上" in memo and "下" not in memo:
+                if has_up:
                     return "上"
                 if "出来高" in memo:
                     return "出来高"
+                if "準候補" in memo:
+                    return "準候補"
+                if "指値待ち" in memo or "逆指値待ち" in memo or "待ち" in memo:
+                    return "待機"
                 return memo.replace(" | ", "\n")
 
             def _build_main_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
@@ -1140,6 +1147,26 @@ def build_report(
                     status_txt = _format_status_cell(str(r[7]) if len(r) > 7 else "")
                     img_rows.append([idx, sym_cell, order_txt, risk_block, status_txt])
                 return img_rows
+
+            def _style_for_rows(base: TableImageStyle, n_data_rows: int, *, saucer: bool = False) -> TableImageStyle:
+                # Fewer rows: trim margins / padding so the image feels tighter on mobile.
+                # More rows: slightly reduce font size to avoid excessive wrapping.
+                import dataclasses
+                st = dataclasses.replace(base)
+                if n_data_rows <= 2:
+                    st.margin = max(14, base.margin - 4)
+                    st.pad_y = max(10, base.pad_y - 3)
+                    st.line_spacing = max(3, base.line_spacing - 1)
+                    st.title_font_size = max(34, base.title_font_size - 1)
+                    st.section_font_size = max(30, base.section_font_size - 1)
+                    if saucer:
+                        st.font_size = max(28, base.font_size - 1)
+                elif n_data_rows >= 5:
+                    st.pad_y = max(11, base.pad_y - 1)
+                    st.font_size = max(28, base.font_size - 1)
+                    st.section_font_size = max(31, base.section_font_size - 1)
+                    st.max_lines = max(4, base.max_lines)
+                return st
 
             # Split rows for multi-page PNG
             rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "見送り", "ポジ")]
@@ -1199,7 +1226,7 @@ def build_report(
                 img_rows = _build_main_img_rows(rows_orders)
                 title_orders = f"stockbotTOM {today_str}\n注文サマリ"
                 try:
-                    render_table_png(title_orders, img_headers, img_rows, png_main, style=style_main)
+                    render_table_png(title_orders, img_headers, img_rows, png_main, style=_style_for_rows(style_main, len(rows_orders), saucer=False))
                     png_paths.append(png_main)
                 except Exception as e:
                     if note_enabled:
@@ -1212,7 +1239,7 @@ def build_report(
                 img_rows = _build_saucer_img_rows(rows_saucer_d)
                 title_d = f"stockbotTOM {today_str}\nソーサー（日足）"
                 try:
-                    render_table_png(title_d, img_headers, img_rows, png_d, style=style_saucer)
+                    render_table_png(title_d, img_headers, img_rows, png_d, style=_style_for_rows(style_saucer, len(rows_saucer_d), saucer=True))
                     png_paths.append(png_d)
                 except Exception as e:
                     if note_enabled:
@@ -1225,7 +1252,7 @@ def build_report(
                 img_rows = _build_saucer_img_rows(rows_saucer_w)
                 title_w = f"stockbotTOM {today_str}\nソーサー（週足）"
                 try:
-                    render_table_png(title_w, img_headers, img_rows, png_w, style=style_saucer)
+                    render_table_png(title_w, img_headers, img_rows, png_w, style=_style_for_rows(style_saucer, len(rows_saucer_w), saucer=True))
                     png_paths.append(png_w)
                 except Exception as e:
                     if note_enabled:
@@ -1238,7 +1265,7 @@ def build_report(
                 img_rows = _build_saucer_img_rows(rows_saucer_m)
                 title_m = f"stockbotTOM {today_str}\nソーサー（月足）"
                 try:
-                    render_table_png(title_m, img_headers, img_rows, png_m, style=style_saucer)
+                    render_table_png(title_m, img_headers, img_rows, png_m, style=_style_for_rows(style_saucer, len(rows_saucer_m), saucer=True))
                     png_paths.append(png_m)
                 except Exception as e:
                     if note_enabled:
