@@ -1032,10 +1032,13 @@ def build_report(
                 if tags:
                     lines_out.append(tags)
                 if note:
-                    note = note.replace("Entry ", "建値 ")
+                    note = note.replace("Entry ", "建 ")
                     note = note.replace("Setup ", "型 ")
+                    note = note.replace("建 ", "建 ")
                     note = note.replace(" / ", "\n")
                     for part in [x.strip() for x in note.splitlines() if x.strip()]:
+                        if part.startswith("型 ") and len(part) <= 5:
+                            part = part.replace("型 ", "型")
                         lines_out.append(part)
                 return "\n".join(lines_out)
 
@@ -1057,9 +1060,9 @@ def build_report(
                 # Stop / stop-reentry
                 mstop = re.match(r"^(逆指(?:\(戻\))?)\s*Trg\s*([0-9,]+)(?:\s*/\s*上限\s*([0-9,]+))?$", s)
                 if mstop:
-                    out = [mstop.group(1), f"Trg {mstop.group(2)}"]
+                    out = [mstop.group(1), mstop.group(2)]
                     if mstop.group(3):
-                        out.append(f"上限 {mstop.group(3)}")
+                        out.append(f"〜{mstop.group(3)}")
                     return "\n".join(out)
 
                 # Limit range
@@ -1067,7 +1070,7 @@ def build_report(
                 if mrange:
                     low = mrange.group(2)
                     high = mrange.group(3)
-                    return f"{mrange.group(1)}\n下限 {low}\n上限 {high}"
+                    return f"{mrange.group(1)}\n下 {low}\n上 {high}"
 
                 # Plain price after action
                 mone = re.match(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*([0-9,]+)$", s)
@@ -1135,15 +1138,15 @@ def build_report(
                 if "出来高" in memo and has_down:
                     return "出来高↓"
                 if "準候補" in memo and has_down:
-                    return "準候補↓"
+                    return "準↓"
                 if "準候補" in memo and has_up:
-                    return "準候補↑"
+                    return "準↑"
                 if in_zone:
                     return "帯内"
                 if has_down:
-                    return "下待ち"
+                    return "下待"
                 if has_up:
-                    return "上待ち"
+                    return "上待"
                 if "出来高" in memo:
                     return "出来高"
                 if "準候補" in memo:
@@ -1229,7 +1232,7 @@ def build_report(
                 pad_x=16,
                 pad_y=13,
                 font_size=30,
-                title_font_size=36,
+                title_font_size=34,
                 section_font_size=32,
                 line_width=1,
                 line_spacing=4,
@@ -1251,7 +1254,7 @@ def build_report(
                 pad_x=15,
                 pad_y=13,
                 font_size=29,
-                title_font_size=36,
+                title_font_size=34,
                 section_font_size=32,
                 line_width=1,
                 line_spacing=4,
@@ -1262,8 +1265,8 @@ def build_report(
                 grid_color="#CBD5E1",
                 wrap_cells=True,
                 max_lines=4,
-                preferred_col_ratios={"#": 0.06, "銘柄": 0.42, "注文": 0.20, "sl/tpr": 0.21, "状態": 0.11},
-                preferred_col_mins={"#": 58, "銘柄": 340, "注文": 175, "sl/tpr": 200, "状態": 100},
+                preferred_col_ratios={"#": 0.06, "銘柄": 0.40, "注文": 0.20, "sl/tpr": 0.21, "状態": 0.13},
+                preferred_col_mins={"#": 58, "銘柄": 320, "注文": 170, "sl/tpr": 195, "状態": 118},
             )
 
             png_paths: list[str] = []
@@ -1272,7 +1275,7 @@ def build_report(
             if rows_orders:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR"]
                 img_rows = _build_main_img_rows(rows_orders)
-                title_orders = f"stockbotTOM {today_str}\n注文サマリ"
+                title_orders = f"stockbotTOM {today_str} 注文サマリ"
                 try:
                     render_table_png(title_orders, img_headers, img_rows, png_main, style=_style_for_rows(style_main, len(rows_orders), saucer=False))
                     png_paths.append(png_main)
@@ -1285,7 +1288,7 @@ def build_report(
             if rows_saucer_d:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_saucer_img_rows(rows_saucer_d)
-                title_d = f"stockbotTOM {today_str}\nソーサー（日足）"
+                title_d = f"stockbotTOM {today_str} ソーサー（日足）"
                 try:
                     render_table_png(title_d, img_headers, img_rows, png_d, style=_style_for_rows(style_saucer, len(rows_saucer_d), saucer=True))
                     png_paths.append(png_d)
@@ -1298,7 +1301,7 @@ def build_report(
             if rows_saucer_w:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_saucer_img_rows(rows_saucer_w)
-                title_w = f"stockbotTOM {today_str}\nソーサー（週足）"
+                title_w = f"stockbotTOM {today_str} ソーサー（週足）"
                 try:
                     render_table_png(title_w, img_headers, img_rows, png_w, style=_style_for_rows(style_saucer, len(rows_saucer_w), saucer=True))
                     png_paths.append(png_w)
@@ -1311,7 +1314,7 @@ def build_report(
             if rows_saucer_m:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
                 img_rows = _build_saucer_img_rows(rows_saucer_m)
-                title_m = f"stockbotTOM {today_str}\nソーサー（月足）"
+                title_m = f"stockbotTOM {today_str} ソーサー（月足）"
                 try:
                     render_table_png(title_m, img_headers, img_rows, png_m, style=_style_for_rows(style_saucer, len(rows_saucer_m), saucer=True))
                     png_paths.append(png_m)
