@@ -630,6 +630,8 @@ def build_report(
                             continue
                         if seg.startswith("Setup ") and not setup_used:
                             setup_used = seg.replace("Setup", "", 1).strip()
+                            if setup_used == "POS":
+                                setup_used = ""
                             continue
                         if seg.startswith("次:") and not next_act:
                             next_act = seg.split("次:", 1)[1].strip()
@@ -662,6 +664,8 @@ def build_report(
                     tp1 = _pick_num(ln)
                 if "Setup" in ln and not setup_used:
                     setup_used = _cut_tail(ln.split("Setup", 1)[1])
+                    if setup_used == "POS":
+                        setup_used = ""
 
             act = next_act or status or "保有"
 
