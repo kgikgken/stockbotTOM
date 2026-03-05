@@ -224,6 +224,15 @@ def analyze_positions(
 
         if info is not None:
             setup_used = str(info.setup)
+            if setup_used == "POS":
+                try:
+                    row_setup = str(row.get("setup", "")).strip()
+                except Exception:
+                    row_setup = ""
+                if row_setup and row_setup not in ("POS", "NONE"):
+                    setup_used = row_setup
+                else:
+                    setup_used = ""
             sl = safe_float(info.sl, np.nan)
             tp1 = safe_float(info.tp1, np.nan)
             tp2 = safe_float(info.tp2, np.nan)
