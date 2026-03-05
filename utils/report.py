@@ -492,7 +492,19 @@ def build_report(
                     lines.append("")
         else:
             lines.append("✅ 今日やること：注文")
-            lines.append("・該当なし")
+            lines.append("・今日は注文なし")
+            table_rows.append(
+                [
+                    "注文なし",
+                    "-",
+                    "新規注文なし",
+                    "今日は見送り",
+                    "-",
+                    "-",
+                    "-",
+                    "",
+                ]
+            )
 
         if watch_items:
             lines.append("")
@@ -1109,6 +1121,8 @@ def build_report(
             def _pretty_group_label(g: str) -> str:
                 if g == "狙える":
                     return "■ 今日の注文"
+                if g == "注文なし":
+                    return "■ 今日は注文なし"
                 if g == "見送り":
                     return "■ 見送り"
                 if g == "ポジ":
@@ -1224,7 +1238,7 @@ def build_report(
                 return st
 
             # Split rows for multi-page PNG
-            rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "見送り", "ポジ")]
+            rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "注文なし", "見送り", "ポジ")]
             rows_saucer_d = [r for r in table_rows if r and str(r[0]) == "ソーサー（日足）"]
             rows_saucer_w = [r for r in table_rows if r and str(r[0]) == "ソーサー（週足）"]
             rows_saucer_m = [r for r in table_rows if r and str(r[0]) == "ソーサー（月足）"]
