@@ -232,7 +232,16 @@ def analyze_positions(
                 if row_setup and row_setup not in ("POS", "NONE"):
                     setup_used = row_setup
                 else:
-                    setup_used = ""
+                    # Fallback: infer the current setup from price structure when
+                    # positions.csv does not carry the original setup.
+                    try:
+                        inferred_setup = str(detect_setup(hist)[0]).strip()
+                    except Exception:
+                        inferred_setup = ""
+                    if inferred_setup and inferred_setup not in ("POS", "NONE"):
+                        setup_used = inferred_setup
+                    else:
+                        setup_used = ""
             sl = safe_float(info.sl, np.nan)
             tp1 = safe_float(info.tp1, np.nan)
             tp2 = safe_float(info.tp2, np.nan)
