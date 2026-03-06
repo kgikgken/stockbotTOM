@@ -137,6 +137,7 @@ def build_report(
         lines.append("")
 
     # Candidates (beginner-first)
+    no_order_section_only = False
     if cands:
         lines.append("👀 監視リスト（新規は見送り / 最大5）" if no_trade else "🏆 狙える形（ランキング / 最大5）")
 
@@ -493,18 +494,7 @@ def build_report(
         else:
             lines.append("✅ 今日やること：注文")
             lines.append("・今日は注文なし")
-            table_rows.append(
-                [
-                    "注文なし",
-                    "-",
-                    "新規注文なし",
-                    "今日は見送り",
-                    "-",
-                    "-",
-                    "-",
-                    "",
-                ]
-            )
+            no_order_section_only = True
 
         if watch_items:
             lines.append("")
@@ -1173,9 +1163,11 @@ def build_report(
                     return "待機"
                 return memo.replace(" | ", "\n")
 
-            def _build_main_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
+            def _build_main_img_rows(rows_src: list[list[str]], *, include_orderless_section: bool = False) -> list[list[str]]:
                 img_rows: list[list[str]] = []
                 current_group: str | None = None
+                if include_orderless_section:
+                    img_rows.append([_pretty_group_label("注文なし")])
                 for r in rows_src:
                     group = str(r[0]) if r and len(r) > 0 else ""
                     if group != current_group:
@@ -1238,7 +1230,7 @@ def build_report(
                 return st
 
             # Split rows for multi-page PNG
-            rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "注文なし", "見送り", "ポジ")]
+            rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "見送り", "ポジ")]
             rows_saucer_d = [r for r in table_rows if r and str(r[0]) == "ソーサー（日足）"]
             rows_saucer_w = [r for r in table_rows if r and str(r[0]) == "ソーサー（週足）"]
             rows_saucer_m = [r for r in table_rows if r and str(r[0]) == "ソーサー（月足）"]
@@ -1292,7 +1284,7 @@ def build_report(
             # 1) Orders + Position (main)
             if rows_orders:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR"]
-                img_rows = _build_main_img_rows(rows_orders)
+                img_rows = _build_main_img_rows(rows_orders, include_orderless_section=no_order_section_only)
                 title_orders = f"stockbotTOM {today_str} 注文サマリ"
                 try:
                     render_table_png(title_orders, img_headers, img_rows, png_main, style=_style_for_rows(style_main, len(rows_orders), saucer=False))
