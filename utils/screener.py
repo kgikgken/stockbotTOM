@@ -460,88 +460,6 @@ def _liquidity_grade(
         return 1, float(LIQ_RELAX_ADV_MIN)
     return 0, float(LIQ_RELAX_ADV_MIN)
 
-def _market_breadth_stats(ohlc_map: Dict[str, pd.DataFrame], min_bars: int = 120) -> Dict[str, float | bool | int | str]:
-    """Cross-sectional breadth snapshot for the current JPX universe.
-
-    Breadth is often more useful than the headline index alone for short-term trend-following.
-    We keep this lightweight and fully daily-bar based so it remains robust under the current data stack.
-    """
-    rows: list[dict[str, float]] = []
-    for _sym, df in ohlc_map.items():
-        try:
-            if df is None or df.empty or len(df) < min_bars:
-                continue
-            if is_abnormal_stock(df):
-                continue
-            c = df["Close"].astype(float).dropna()
-            if len(c) < min_bars:
-                continue
-            last = safe_float(c.iloc[-1], np.nan)
-            ma20 = safe_float(c.rolling(20).mean().iloc[-1], np.nan)
-            ma50 = safe_float(c.rolling(50).mean().iloc[-1], np.nan)
-            hh60 = safe_float(c.tail(60).max(), np.nan)
-            ret20 = _ret_n(c, 20)
-            er20 = safe_float(efficiency_ratio(c, 20), np.nan)
-            rows.append(
-                {
-                    "above20": 1.0 if (np.isfinite(last) and np.isfinite(ma20) and last > ma20) else 0.0,
-                    "above50": 1.0 if (np.isfinite(last) and np.isfinite(ma50) and last > ma50) else 0.0,
-                    "near_high60": 1.0 if (np.isfinite(last) and np.isfinite(hh60) and hh60 > 0 and last >= 0.95 * hh60) else 0.0,
-                    "ret20": float(ret20) if np.isfinite(ret20) else np.nan,
-                    "er20": float(er20) if np.isfinite(er20) else np.nan,
-                }
-            )
-        except Exception:
-            continue
-
-    if not rows:
-        return {
-            "n": 0,
-            "above20": float("nan"),
-            "above50": float("nan"),
-            "near_high60": float("nan"),
-            "median_ret20": float("nan"),
-            "median_er20": float("nan"),
-            "score": 50.0,
-            "weak": False,
-            "strong": False,
-            "regime": "unknown",
-        }
-
-    b = pd.DataFrame(rows)
-    above20 = safe_float(b["above20"].mean() * 100.0, np.nan)
-    above50 = safe_float(b["above50"].mean() * 100.0, np.nan)
-    near_high60 = safe_float(b["near_high60"].mean() * 100.0, np.nan)
-    median_ret20 = safe_float(b["ret20"].median(), np.nan)
-    median_er20 = safe_float(b["er20"].median(), np.nan)
-
-    ret_score = 50.0 + 3.75 * clamp(median_ret20, -8.0, 8.0)
-    er_score = clamp((median_er20 / 0.55) * 100.0, 0.0, 100.0) if np.isfinite(median_er20) else 50.0
-    score = (
-        0.30 * (above20 if np.isfinite(above20) else 50.0)
-        + 0.30 * (above50 if np.isfinite(above50) else 50.0)
-        + 0.15 * (near_high60 if np.isfinite(near_high60) else 50.0)
-        + 0.15 * ret_score
-        + 0.10 * er_score
-    )
-    score = float(clamp(score, 0.0, 100.0))
-    weak = bool(score < 42.0 or ((np.isfinite(above20) and above20 < 48.0) and (np.isfinite(above50) and above50 < 36.0)))
-    strong = bool(score >= 62.0 and (not np.isfinite(above50) or above50 >= 52.0) and (not np.isfinite(near_high60) or near_high60 >= 18.0))
-    regime = "strong" if strong else "weak" if weak else "neutral"
-    return {
-        "n": int(len(b)),
-        "above20": float(above20) if np.isfinite(above20) else float("nan"),
-        "above50": float(above50) if np.isfinite(above50) else float("nan"),
-        "near_high60": float(near_high60) if np.isfinite(near_high60) else float("nan"),
-        "median_ret20": float(median_ret20) if np.isfinite(median_ret20) else float("nan"),
-        "median_er20": float(median_er20) if np.isfinite(median_er20) else float("nan"),
-        "score": score,
-        "weak": weak,
-        "strong": strong,
-        "regime": regime,
-    }
-
-
 def _apply_setup_mix(cands: List[Dict], max_n: int) -> List[Dict]:
     """Enforce strategy mix per spec (when alternatives exist).
 
@@ -632,6 +550,119 @@ def _filter_blackouts(uni: pd.DataFrame, today_date) -> pd.DataFrame:
     return out
 
 
+def _calc_breadth(ohlc_map: Dict[str, pd.DataFrame]) -> Dict[str, float | str | bool]:
+    """Compute simple internal market breadth from the current universe.
+
+    Returns a compact summary used to adapt trend-following aggressiveness.
+    The score is intentionally lightweight and fully observable from daily OHLCV.
+    """
+    total = 0
+    above20 = above50 = above200 = 0
+    up20 = 0
+    nh20 = nl20 = 0
+    for df in ohlc_map.values():
+        if df is None or df.empty or "Close" not in df.columns:
+            continue
+        c = df["Close"].astype(float).dropna()
+        if len(c) < 60:
+            continue
+        total += 1
+        last = safe_float(c.iloc[-1], np.nan)
+        ma20 = safe_float(c.rolling(20).mean().iloc[-1], np.nan)
+        ma50 = safe_float(c.rolling(50).mean().iloc[-1], np.nan)
+        ma200 = safe_float(c.rolling(200).mean().iloc[-1], np.nan) if len(c) >= 200 else np.nan
+        if np.isfinite(last) and np.isfinite(ma20) and last > ma20:
+            above20 += 1
+        if np.isfinite(last) and np.isfinite(ma50) and last > ma50:
+            above50 += 1
+        if np.isfinite(last) and np.isfinite(ma200) and last > ma200:
+            above200 += 1
+        r20 = _ret_n(c, 20)
+        if np.isfinite(r20) and r20 > 0:
+            up20 += 1
+        if len(c) >= 22:
+            prev20 = c.iloc[-21:-1]
+            hh = safe_float(prev20.max(), np.nan)
+            ll = safe_float(prev20.min(), np.nan)
+            if np.isfinite(hh) and np.isfinite(last) and last >= hh * 0.999:
+                nh20 += 1
+            if np.isfinite(ll) and np.isfinite(last) and last <= ll * 1.001:
+                nl20 += 1
+    if total <= 0:
+        return {
+            "score": 50.0,
+            "regime": "NORMAL",
+            "force_no_trade": False,
+            "pct_above20": np.nan,
+            "pct_above50": np.nan,
+            "pct_above200": np.nan,
+            "pct_up20": np.nan,
+            "new_high_20": 0.0,
+            "new_low_20": 0.0,
+        }
+    p20 = above20 / total
+    p50 = above50 / total
+    p200 = above200 / total
+    pup = up20 / total
+    # high-low balance in 0..1, neutral when both are absent
+    if (nh20 + nl20) > 0:
+        hl = nh20 / (nh20 + nl20)
+    else:
+        hl = 0.5
+    score = 100.0 * (0.35 * p20 + 0.25 * p50 + 0.15 * p200 + 0.15 * hl + 0.10 * pup)
+    regime = "NORMAL"
+    if score >= 68.0 and p20 >= 0.58 and hl >= 0.55:
+        regime = "ATTACK"
+    elif score < 48.0 or p20 < 0.42 or hl < 0.40:
+        regime = "DEFENSE"
+    force_no_trade = bool(score < 35.0 and p20 < 0.35)
+    return {
+        "score": float(score),
+        "regime": str(regime),
+        "force_no_trade": force_no_trade,
+        "pct_above20": float(p20),
+        "pct_above50": float(p50),
+        "pct_above200": float(p200),
+        "pct_up20": float(pup),
+        "new_high_20": float(nh20),
+        "new_low_20": float(nl20),
+    }
+
+
+def _classify_engine(setup: str, breakout_line: float | None, hh_age20: float, pullback_from_hh20: float, ext_atr: float) -> str:
+    if str(setup) == "B" or (breakout_line is not None and np.isfinite(safe_float(breakout_line, np.nan))):
+        return "BREAKOUT"
+    if str(setup) in ("A1-Strong", "A1"):
+        if np.isfinite(hh_age20) and hh_age20 <= 3 and np.isfinite(pullback_from_hh20) and pullback_from_hh20 <= 2.8:
+            if (not np.isfinite(ext_atr)) or ext_atr >= 0.4:
+                return "CONTINUATION"
+    return "PULLBACK"
+
+
+def _engine_regime_bonus(engine: str, breadth_regime: str, setup: str) -> float:
+    eng = str(engine).upper()
+    rg = str(breadth_regime).upper()
+    st = str(setup)
+    if rg == "ATTACK":
+        if eng == "CONTINUATION":
+            return 0.05
+        if eng == "BREAKOUT":
+            return 0.03
+        return 0.02
+    if rg == "DEFENSE":
+        if eng == "BREAKOUT":
+            return -0.10
+        if eng == "CONTINUATION":
+            return -0.04
+        return 0.01 if st in ("A1-Strong", "A1") else -0.02
+    # NORMAL
+    if eng == "PULLBACK":
+        return 0.04
+    if eng == "CONTINUATION":
+        return 0.01
+    return 0.00
+
+
 def run_screen(
     today_str: str,
     today_date,
@@ -668,10 +699,12 @@ def run_screen(
     coverage_min = _env_float("DATA_COVERAGE_MIN", 0.85)
     data_warn = (data_total > 0) and (data_coverage < coverage_min)
 
-    breadth = _market_breadth_stats(ohlc_map)
-    breadth_score = int(round(float(breadth.get("score", 50.0))))
-    breadth_warn = bool(breadth.get("weak", False))
-    breadth_strong = bool(breadth.get("strong", False))
+    # Internal breadth (breadth > index for short-swing regime control)
+    breadth = _calc_breadth(ohlc_map)
+    breadth_score = safe_float(breadth.get("score"), 50.0)
+    breadth_regime = str(breadth.get("regime", "NORMAL"))
+    breadth_force_no_trade = bool(breadth.get("force_no_trade", False))
+    mkt_score_eff = int(round((0.65 * int(mkt_score)) + (0.35 * float(breadth_score))))
 
     # --- Index telemetry (for relative strength / RS)
     # yfinance is unreliable for ^TOPX, so we prefer stable Japan ETFs.
@@ -718,7 +751,7 @@ def run_screen(
         if (kpi["median_r"] < -0.10) or (kpi["exp_gap"] < -0.30) or (kpi["neg_streak"] >= 3):
             set_cooldown_days(state, "distortion_until", days=4)
 
-    no_trade = no_trade_conditions(int(mkt_score), float(delta3), macro_warn=(macro_on or data_warn or (breadth_warn and int(mkt_score) < 55)))
+    no_trade = no_trade_conditions(int(mkt_score_eff), float(delta3)) or bool(breadth_force_no_trade)
 
     cands: List[Dict] = []
     gu_cnt = 0
@@ -746,10 +779,6 @@ def run_screen(
         if info is None:
             continue
         if info.setup == "NONE":
-            continue
-
-        # Weak breadth is a bad environment for aggressive breakout-style entries.
-        if breadth_warn and info.setup == "B":
             continue
 
         if info.gu:
@@ -790,11 +819,6 @@ def run_screen(
         if np.isfinite(vr_q) and vr_q >= 2.50:
             continue
         if np.isfinite(ac_q) and ac_q >= 1.80:
-            continue
-
-        ev = calc_ev(info, mkt_score=int(mkt_score), macro_on=macro_on, breadth_score=breadth_score)
-        ok, _ = pass_thresholds(info, ev)
-        if not ok:
             continue
 
         name = str(row.get("name", ticker))
@@ -857,12 +881,7 @@ def run_screen(
             elif close_last < entry_low:
                 diff = float(entry_low - close_last)
             pb_atr = float(diff / atr_abs)
-            max_pullback_atr = float(MAX_PULLBACK_ATR)
-            if breadth_warn:
-                max_pullback_atr = max(1.4, max_pullback_atr - 0.4)
-            if info.setup == "A1-Strong":
-                max_pullback_atr = min(max_pullback_atr, 2.0)
-            if np.isfinite(pb_atr) and pb_atr > max_pullback_atr:
+            if np.isfinite(pb_atr) and pb_atr > MAX_PULLBACK_ATR:
                 continue
 
         # --- 週足整合（上位足が崩れているものを落とす）
@@ -913,7 +932,7 @@ def run_screen(
             gap_max_b = _env_float("GAP_ATR_MAX_LIMIT_B", 4.2)
             gap_lim = gap_max_b if info.setup == "B" else gap_max_a
             # In weaker tape, be stricter.
-            if mkt_score < _env_float("GAP_ATR_MAX_WEAK_MKT_SCORE", 65.0):
+            if mkt_score_eff < _env_float("GAP_ATR_MAX_WEAK_MKT_SCORE", 65.0):
                 gap_lim = max(0.5, gap_lim - _env_float("GAP_ATR_MAX_WEAK_TIGHTEN", 0.3))
             if gap_atr_max > gap_lim:
                 continue
@@ -987,17 +1006,6 @@ def run_screen(
         adx14v = safe_float(adx(df, 14), np.nan)
 
 
-        # Breadth-sensitive hard filters: when the tape is thin, require clearer accumulation and tighter structure.
-        if breadth_warn:
-            if info.setup == "A2" and weekly_ok is not True:
-                continue
-            if np.isfinite(uv_ratio20) and uv_ratio20 < _env_float("UPDN_VOL_HARD_WEAK", 0.95):
-                continue
-            if int(dist_days20) >= int(os.getenv("DIST_DAYS_HARD_WEAK", "4")):
-                continue
-            if info.setup in ("A1-Strong", "A1", "B") and np.isfinite(bb_ratio) and bb_ratio > _env_float("BB_RATIO_MAX_WEAK", 1.18):
-                continue
-
         # Hard filters (precision mode): trend smoothness + choppiness.
         # Noise score already penalizes these, but hard filters cut the worst false positives.
         if not is_pos:
@@ -1026,7 +1034,7 @@ def run_screen(
                 chop_max -= chop_bonus_b
 
             # In weaker tape, tighten a bit further.
-            if mkt_score < _env_float("TREND_QUALITY_WEAK_MKT_SCORE", 65.0):
+            if mkt_score_eff < _env_float("TREND_QUALITY_WEAK_MKT_SCORE", 65.0):
                 er_min += _env_float("TREND_QUALITY_WEAK_ER_ADD", 0.02)
                 chop_max -= _env_float("TREND_QUALITY_WEAK_CHOP_SUB", 1.0)
 
@@ -1064,7 +1072,7 @@ def run_screen(
             trend_min = trend_min_a2
         elif info.setup == "B":
             trend_min = trend_min_b
-        if mkt_score < _env_float("TREND_WEAK_MKT_SCORE", 65.0):
+        if mkt_score_eff < _env_float("TREND_WEAK_MKT_SCORE", 65.0):
             trend_min = min(1.0, trend_min + _env_float("TREND_WEAK_BONUS", 0.05))
         if np.isfinite(trend_score) and trend_score < trend_min:
             continue
@@ -1079,16 +1087,11 @@ def run_screen(
         if info.setup == "A2" and np.isfinite(hh_age20) and hh_age20 > stale_a2 and (not np.isfinite(pb_atr) or pb_atr > 0.6):
             continue
 
-        # Pullback depth guard: very deep pullbacks behave more like repairs than clean continuation.
-        if info.setup in ("A1-Strong", "A1") and np.isfinite(pullback_from_hh20):
-            max_pb_pct = _env_float("PULLBACK_MAX_PCT_A1_WEAK" if breadth_warn else "PULLBACK_MAX_PCT_A1", 8.0 if breadth_warn else 10.0)
-            max_pb_atr = _env_float("PULLBACK_MAX_ATR_A1_WEAK" if breadth_warn else "PULLBACK_MAX_ATR_A1", 1.8 if breadth_warn else 2.4)
-            if pullback_from_hh20 > max_pb_pct and (not np.isfinite(pb_atr) or pb_atr > max_pb_atr):
+        # Breadth-aware regime gate: in defensive tape, avoid weak/late trend setups.
+        if breadth_regime == "DEFENSE":
+            if info.setup == "B":
                 continue
-        elif info.setup == "A2" and np.isfinite(pullback_from_hh20):
-            max_pb_pct = _env_float("PULLBACK_MAX_PCT_A2_WEAK" if breadth_warn else "PULLBACK_MAX_PCT_A2", 10.0 if breadth_warn else 12.5)
-            max_pb_atr = _env_float("PULLBACK_MAX_ATR_A2_WEAK" if breadth_warn else "PULLBACK_MAX_ATR_A2", 2.2 if breadth_warn else 3.0)
-            if pullback_from_hh20 > max_pb_pct and (not np.isfinite(pb_atr) or pb_atr > max_pb_atr):
+            if info.setup == "A2" and trend_score < 0.80:
                 continue
 
         # Relative Strength: composite (20/60/120) vs benchmark.
@@ -1121,12 +1124,28 @@ def run_screen(
             rs_comp = float(sum(w * v for w, v in parts) / (wsum or 1.0))
 
         # Hard exclude on weak RS composite (regime adaptive)
-        rs_comp_min = float(rs_comp_min_by_market(mkt_score))
-        if breadth_warn:
-            rs_comp_min += _env_float("RS_COMP_MIN_BREADTH_ADD", 0.6)
-        elif breadth_strong:
-            rs_comp_min -= _env_float("RS_COMP_MIN_BREADTH_SUB", 0.2)
+        rs_comp_min = float(rs_comp_min_by_market(mkt_score_eff))
         if np.isfinite(rs_comp) and (rs_comp < rs_comp_min):
+            continue
+
+        # Strategy engine classification (pullback / breakout / continuation)
+        engine = _classify_engine(info.setup, info.breakout_line, hh_age20, pullback_from_hh20, ext_atr)
+        if breadth_regime == "DEFENSE" and engine == "BREAKOUT":
+            continue
+        if breadth_regime == "NORMAL" and engine == "BREAKOUT" and np.isfinite(rs_comp) and rs_comp < 4.0:
+            continue
+
+        # Breadth-aware EV / probability
+        ev = calc_ev(
+            info,
+            mkt_score=int(mkt_score_eff),
+            macro_on=macro_on,
+            breadth_score=float(breadth_score),
+            breadth_regime=str(breadth_regime),
+            engine=str(engine),
+        )
+        ok, _ = pass_thresholds(info, ev)
+        if not ok:
             continue
 
         # Add to cross-sectional pool (for percentile ranking later)
@@ -1175,12 +1194,7 @@ def run_screen(
         if np.isfinite(adx14v) and (adx14v <= _env_float("ADX14_WARN", 14.0)):
             noise_score += 1
 
-        noise_exclude_local = int(NOISE_EXCLUDE_SCORE)
-        if breadth_warn:
-            noise_exclude_local = max(2, noise_exclude_local - 1)
-        if info.setup == "B":
-            noise_exclude_local = max(2, noise_exclude_local - 1)
-        if noise_score >= noise_exclude_local:
+        if noise_score >= NOISE_EXCLUDE_SCORE:
             continue
 
         if np.isfinite(vr):
@@ -1369,6 +1383,9 @@ def run_screen(
         if weekly_ok is True and np.isfinite(rs_comp) and rs_comp >= 6.0 and np.isfinite(ac) and ac <= 0.98 and np.isfinite(vr) and vr <= 1.0:
             quality += 0.03
 
+        # Engine × regime bonus: market-internals decide which flavor of trend-following is favored.
+        quality += _engine_regime_bonus(engine, breadth_regime, info.setup)
+
         quality = float(np.clip(quality, -0.30, 0.30))
 
         # 現値IN判定（運用ルールに沿って“現実的にOK”な条件に限定）
@@ -1413,7 +1430,7 @@ def run_screen(
             and band_pos_ok
             and (not bool(info.gu))
             and (not bool(macro_on))
-            and (int(mkt_score) >= 60)
+            and (int(mkt_score_eff) >= 60)
             and (risk_now <= 6.0)
             and (p_hit >= (p_be + prob_margin))
             and vr_ok
@@ -1469,6 +1486,9 @@ def run_screen(
                 "risk_pct_low": float(risk_pct_low),
                 "risk_pct_high": float(risk_pct_high),
                 "risk_now": float(risk_now),
+                "engine": str(engine),
+                "breadth_regime": str(breadth_regime),
+                "breadth_score": float(breadth_score),
                 "band_dist": float(band_dist_pct),
                 "pb_atr": float(pb_atr) if np.isfinite(pb_atr) else float("nan"),
                 "weekly_ok": (None if weekly_ok is None else bool(weekly_ok)),
@@ -1560,11 +1580,7 @@ def run_screen(
         except Exception:
             rs_pct_map = {}
 
-    rs_pct_floor = int(os.getenv("RS_PCT_MIN", str(rs_pct_min_by_market(mkt_score))))
-    if breadth_warn:
-        rs_pct_floor += int(os.getenv("RS_PCT_BREADTH_ADD", "5"))
-    elif breadth_strong:
-        rs_pct_floor = max(45, rs_pct_floor - int(os.getenv("RS_PCT_BREADTH_SUB", "3")))
+    rs_pct_floor = int(os.getenv("RS_PCT_MIN", str(rs_pct_min_by_market(mkt_score_eff))))
     rs_pct_breakout_bonus = int(os.getenv("RS_PCT_BREAKOUT_BONUS", "5"))
     rs_pct_score_w = float(os.getenv("RS_PCT_SCORE_W", "0.10"))
 
@@ -1623,11 +1639,9 @@ def run_screen(
 
     raw_n = len(cands)
 
-    # diversify (tighten concentration when breadth is weak)
-    sector_cap = 1 if breadth_warn else 2
-    corr_cap = 0.68 if breadth_warn else 0.75
-    cands = apply_sector_cap(cands, max_per_sector=sector_cap)
-    cands = apply_corr_filter(cands, ohlc_map, max_corr=corr_cap)
+    # diversify
+    cands = apply_sector_cap(cands, max_per_sector=2)
+    cands = apply_corr_filter(cands, ohlc_map, max_corr=0.75)
 
     final: List[Dict] = []
 
@@ -1701,12 +1715,16 @@ def run_screen(
         "data_coverage": float(data_coverage),
         "data_warn": bool(data_warn),
         "data_coverage_min": float(coverage_min),
-        "breadth_score": int(breadth_score),
-        "breadth_warn": bool(breadth_warn),
-        "breadth_regime": str(breadth.get("regime", "unknown")),
-        "breadth_above20": float(breadth.get("above20", float("nan"))),
-        "breadth_above50": float(breadth.get("above50", float("nan"))),
-        "breadth_near_high60": float(breadth.get("near_high60", float("nan"))),
+        "breadth_score": float(breadth_score),
+        "breadth_regime": str(breadth_regime),
+        "breadth_force_no_trade": bool(breadth_force_no_trade),
+        "mkt_score_eff": int(mkt_score_eff),
+        "breadth_pct_above20": safe_float(breadth.get("pct_above20"), np.nan),
+        "breadth_pct_above50": safe_float(breadth.get("pct_above50"), np.nan),
+        "breadth_pct_above200": safe_float(breadth.get("pct_above200"), np.nan),
+        "breadth_pct_up20": safe_float(breadth.get("pct_up20"), np.nan),
+        "breadth_new_high_20": safe_float(breadth.get("new_high_20"), np.nan),
+        "breadth_new_low_20": safe_float(breadth.get("new_low_20"), np.nan),
         "saucers": scan_saucers(ohlc_map, uni, tcol, max_each=5),
     }
 
