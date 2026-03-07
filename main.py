@@ -143,11 +143,10 @@ def main() -> None:
         state=state,
     )
 
-    no_trade = no_trade_conditions(mkt_score, delta3, macro_warn=macro_on)
+    no_trade = no_trade_conditions(int(meta.get("mkt_score_eff", mkt_score)), delta3, macro_warn=macro_on)
     data_warn = bool(meta.get("data_warn", False))
-    breadth_warn = bool(meta.get("breadth_warn", False))
-    breadth_score = int(meta.get("breadth_score", 50) or 50)
-    if data_warn or (breadth_warn and mkt_score < 55):
+    breadth_force = bool(meta.get("breadth_force_no_trade", False))
+    if data_warn or breadth_force:
         no_trade = True
 
     policy_lines = [
@@ -164,17 +163,18 @@ def main() -> None:
             "TP2は控えめ",
             "GUは寄り後再判定",
         ]
+    breadth_regime = str(meta.get("breadth_regime", ""))
+    breadth_score = float(meta.get("breadth_score", 0.0))
+    if breadth_regime:
+        policy_lines.insert(0, f"BREADTH:{breadth_regime} {breadth_score:.0f}")
     if data_warn:
         ok = int(meta.get("data_ok", 0))
         tot = int(meta.get("data_total", 0))
         cov = float(meta.get("data_coverage", 0.0))
         cov_min = float(meta.get("data_coverage_min", 0.0))
         policy_lines.insert(0, f"DATA:{ok}/{tot} ({cov*100:.0f}%) < {cov_min*100:.0f}%")
-    if breadth_warn:
-        regime = str(meta.get("breadth_regime", "weak"))
-        a20 = float(meta.get("breadth_above20", 0.0) or 0.0)
-        a50 = float(meta.get("breadth_above50", 0.0) or 0.0)
-        policy_lines.insert(0, f"BREADTH:{breadth_score} ({regime}) / >20MA {a20:.0f}% / >50MA {a50:.0f}%")
+    if breadth_force:
+        policy_lines.insert(0, "BREADTH悪化: 新規は防御モード")
 
     pos_text, _asset = analyze_positions(pos_df, mkt_score=mkt_score, macro_on=macro_on, new_tickers=new_tickers)
 
