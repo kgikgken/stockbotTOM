@@ -1,38 +1,45 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
 import numpy as np
+import pandas as pd
 
-from utils.util import corr_60d
 
-def apply_sector_cap(cands: List[Dict], max_per_sector: int = 2) -> List[Dict]:
-    out = []
-    cnt = {}
-    for c in cands:
-        sec = str(c.get("sector", "不明"))
-        cnt.setdefault(sec, 0)
-        if cnt[sec] >= max_per_sector:
-            continue
-        out.append(c)
-        cnt[sec] += 1
-    return out
-
-def apply_corr_filter(cands: List[Dict], ohlc_map: Dict[str, object], max_corr: float = 0.75) -> List[Dict]:
+def apply_sector_cap(candidates: List[Dict], cap: int = 2) -> List[Dict]:
     out: List[Dict] = []
-    for c in cands:
-        t = c.get("ticker")
-        ok = True
-        for chosen in out:
-            t2 = chosen.get("ticker")
-            df1 = ohlc_map.get(t)
-            df2 = ohlc_map.get(t2)
-            if df1 is None or df2 is None:
-                continue
-            cr = corr_60d(df1, df2)
-            if np.isfinite(cr) and cr > max_corr:
-                ok = False
-                break
-        if ok:
-            out.append(c)
+    seen: dict[str, int] = {}
+    for cand in candidates:
+        sector = str(cand.get("sector", "Other"))
+        if seen.get(sector, 0) >= int(cap):
+            continue
+        out.append(cand)
+        seen[sector] = seen.get(sector, 0) + 1
     return out
+
+
+def _corr(df1: pd.DataFrame, df2: pd.DataFrame, lookback: int = 60) -> float:
+    if df1 is None or df2 is None or df1.empty or df2.empty:
+        return float("nan")
+    r1 = df1["Close"].astype(float).pct_change().tail(lookback)
+    r2 = df2["Close"].astype(float).pct_change().tail(lookback)
+    joined = pd.concat([r1, r2], axis=1).dropna()
+    if len(joined) < max(20, lookback // 2):
+        return float("nan")
+    return float(joined.iloc[:, 0].corr(joined.iloc[:, 1]))
+
+
+def apply_corr_filter(candidates: List[Dict], ohlc_map: Dict[str, pd.DataFrame], threshold: float = 0.87) -> List[Dict]:
+    accepted: List[Dict] = []
+    for cand in candidates:
+        keep = True
+        df = ohlc_map.get(str(cand.get("ticker")))
+        for taken in accepted:
+            df_taken = ohlc_map.get(str(taken.get("ticker")))
+            corr = _corr(df, df_taken)
+            if np.isfinite(corr) and corr >= threshold and str(cand.get("sector")) == str(taken.get("sector")):
+                keep = False
+                break
+        if keep:
+            accepted.append(cand)
+    return accepted
