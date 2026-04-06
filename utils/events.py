@@ -1,60 +1,61 @@
 from __future__ import annotations
 
-import os
-from typing import Dict, List, Tuple
+from datetime import date
+from pathlib import Path
+from typing import List, Tuple
 
 import pandas as pd
 
-from utils.util import parse_event_datetime_jst
 
-EVENTS_PATH = "events.csv"
+MACRO_KEYWORDS = ("fomc", "cpi", "boj", "日銀", "雇用", "gdp", "pce", "sq", "決算集中")
 
-def load_events(path: str = EVENTS_PATH) -> List[Dict[str, str]]:
-    if not os.path.exists(path):
-        return []
+
+def _parse_date(value: object) -> date | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except Exception:
+        try:
+            return pd.to_datetime(text).date()
+        except Exception:
+            return None
+
+
+def build_event_section(today: date, csv_path: str | Path = "events.csv") -> Tuple[List[str], bool]:
+    path = Path(csv_path)
+    if not path.exists():
+        return [], False
     try:
         df = pd.read_csv(path)
     except Exception:
-        return []
-    out: List[Dict[str, str]] = []
-    for _, row in df.iterrows():
-        label = str(row.get("label", "")).strip()
-        if not label:
-            continue
-        out.append(
-            {
-                "label": label,
-                "kind": str(row.get("kind", "")).strip(),
-                "date": str(row.get("date", "")).strip(),
-                "time": str(row.get("time", "")).strip(),
-                "datetime": str(row.get("datetime", "")).strip(),
-            }
-        )
-    return out
+        return [], False
+    if df.empty:
+        return [], False
 
-def build_event_section(today_date) -> Tuple[List[str], bool]:
-    """
-    直近（-1〜+2日）のイベントを警告に出す。
-    Macro警戒: kind == 'macro' のイベントが存在する場合 True
-    """
-    events = load_events()
-    warns: List[str] = []
+    out: List[str] = []
     macro_on = False
-
-    for ev in events:
-        dt = parse_event_datetime_jst(ev.get("datetime"), ev.get("date"), ev.get("time"))
-        if dt is None:
+    rows: list[tuple[int, date, str]] = []
+    for _, row in df.iterrows():
+        d = _parse_date(row.get("date"))
+        if d is None:
             continue
-        d = dt.date()
-        delta = (d - today_date).days
-        if -1 <= delta <= 2:
-            when = "本日" if delta == 0 else ("直近" if delta < 0 else f"{delta}日後")
-            dt_disp = dt.strftime("%Y-%m-%d %H:%M JST")
-            warns.append(f"⚠ {ev['label']}（{dt_disp} / {when}）")
-            if str(ev.get("kind", "")).lower() == "macro":
-                macro_on = True
+        title = str(row.get("title", row.get("event", ""))).strip()
+        if not title:
+            continue
+        importance = int(float(row.get("importance", 3) or 3))
+        watch_days = int(float(row.get("watch_days", 1) or 1))
+        delta = (d - today).days
+        if -1 <= delta <= max(3, watch_days):
+            rows.append((importance, d, title))
+        is_macro = importance >= 4 or any(k in title.lower() for k in MACRO_KEYWORDS)
+        if is_macro and -1 <= delta <= 1:
+            macro_on = True
 
-    if not warns:
-        warns.append("- 特になし")
-
-    return warns, macro_on
+    rows.sort(key=lambda x: (x[1], -x[0], x[2]))
+    for importance, d, title in rows[:6]:
+        out.append(f"{d.isoformat()} | I{importance} | {title}")
+    return out, macro_on
