@@ -1,5 +1,4 @@
-"""stockbotTOM entry point."""
-
+"""stockbotTOM dual-screen entry point."""
 from __future__ import annotations
 
 import os
@@ -9,96 +8,41 @@ from typing import Callable, Dict
 
 import pandas as pd
 
-from utils.util import jst_today_str, jst_today_date
-from utils.market import market_score, futures_risk_on
 from utils.events import build_event_section
-from utils.state import (
-    load_state,
-    save_state,
-    update_week,
-    weekly_left,
-    add_market_score,
-    update_weekly_from_positions,
-)
-from utils.screener import run_screen
-from utils.screen_logic import weekly_max_new, no_trade_conditions
-from utils.position import load_positions, analyze_positions
+from utils.market import futures_risk_on, market_score
+from utils.position import analyze_positions, load_positions
 from utils.report import build_report
+from utils.screen_logic import no_trade_conditions, weekly_max_new
+from utils.screener import run_screen
+from utils.state import add_market_score, load_state, save_state, update_week, update_weekly_from_positions, weekly_left
+from utils.util import env_truthy, jst_today_date, jst_today_str
 
 
 def _resolve_send_line() -> Callable[..., Dict]:
-    """Resolve LINE sender with a conservative fallback."""
     try:
         import utils.line as _line  # type: ignore
     except Exception:
         _line = None  # type: ignore
-
     if _line is not None:
         for name in ("send_line", "send", "send_line_message"):
             fn = getattr(_line, name, None)
             if callable(fn):
-                return fn  # type: ignore[return-value]
+                return fn
 
     def _fallback(text: str = "", *_args, **_kwargs) -> Dict:
-        worker_url = os.getenv("WORKER_URL", "").strip()
-        if not text.strip():
-            return {
-                "ok": True,
-                "text_ok": True,
-                "image_ok": False,
-                "skipped": True,
-                "reason": "no_content",
-                "backend": "fallback",
-                "status_code": 0,
-            }
-        if not worker_url:
+        if text.strip():
             print(text)
-            return {
-                "ok": True,
-                "text_ok": True,
-                "image_ok": False,
-                "skipped": True,
-                "reason": "printed_stdout",
-                "backend": "stdout",
-                "status_code": 0,
-            }
-        try:
-            import requests
-            r = requests.post(worker_url, json={"text": text}, timeout=20)
-            ok = 200 <= int(getattr(r, "status_code", 0) or 0) < 300
-            return {
-                "ok": ok,
-                "text_ok": ok,
-                "image_ok": False,
-                "skipped": False,
-                "reason": "text_only" if ok else "text_failed",
-                "backend": "fallback-worker",
-                "status_code": int(getattr(r, "status_code", 0) or 0),
-                "body": (getattr(r, "text", "") or "")[:300],
-            }
-        except Exception as e:
-            print(text)
-            return {
-                "ok": False,
-                "text_ok": False,
-                "image_ok": False,
-                "skipped": False,
-                "reason": str(e),
-                "backend": "fallback-worker",
-                "status_code": 0,
-            }
+        return {
+            "ok": True,
+            "text_ok": True,
+            "image_ok": False,
+            "reason": "stdout_fallback",
+        }
 
     return _fallback
 
 
 send_line = _resolve_send_line()
-
-
-def _env_truthy(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def main() -> None:
@@ -107,7 +51,6 @@ def main() -> None:
 
     state = load_state()
     update_week(state)
-
     pos_df = load_positions("positions.csv")
     try:
         pos_tickers = (
@@ -117,24 +60,24 @@ def main() -> None:
         )
     except Exception:
         pos_tickers = []
+
     prev_snapshot = state.get("positions_last", [])
     prev_set = set(str(x).strip() for x in prev_snapshot) if isinstance(prev_snapshot, list) else set()
     new_tickers = sorted(set(str(x).strip() for x in pos_tickers if str(x).strip()) - prev_set)
     update_weekly_from_positions(state, pos_tickers)
 
     mkt = market_score()
-    mkt_score = int(mkt["score"])
+    mkt_score = int(mkt.get("score", 55))
     delta3 = add_market_score(state, today_str, mkt_score)
-
     risk_on, fut_chg = futures_risk_on()
     events_lines, macro_on = build_event_section(today_date)
+    weekly_used, weekly_max = weekly_left(state, max_new=weekly_max_new())
 
-    used, wmax = weekly_left(state, max_new=weekly_max_new())
-    leverage = 1.1 if mkt_score >= 50 else 0.9
+    leverage = 1.10 if mkt_score >= 60 else 1.00 if mkt_score >= 50 else 0.80
     if macro_on:
-        leverage = min(leverage, 1.1)
+        leverage = min(leverage, 0.80)
 
-    cands, meta, _ohlc_map = run_screen(
+    screen = run_screen(
         today_str=today_str,
         today_date=today_date,
         mkt_score=mkt_score,
@@ -142,41 +85,34 @@ def main() -> None:
         macro_on=macro_on,
         state=state,
     )
+    trend_candidates = screen["trend_candidates"]
+    leader_candidates = screen["leader_candidates"]
+    meta = screen["meta"]
 
     no_trade = no_trade_conditions(int(meta.get("mkt_score_eff", mkt_score)), delta3, macro_warn=macro_on)
-    data_warn = bool(meta.get("data_warn", False))
-    breadth_force = bool(meta.get("breadth_force_no_trade", False))
-    if data_warn or breadth_force:
+    if bool(meta.get("data_warn", False)) or bool(meta.get("breadth_force_no_trade", False)):
         no_trade = True
 
     policy_lines = [
-        "新規は指値優先（現値INは条件達成銘柄のみ）",
-        "リスク幅8%超は除外",
-        "GUは寄り後再判定",
+        "dual lanes: trend + leaders",
+        "trend lane keeps A1/A1-Strong/A2/B setup family",
+        "leaders lane uses RS + 52W high + contraction + liquidity",
+        "saucer lane removed",
+        "risk width > 8% is excluded",
     ]
     if macro_on:
-        policy_lines = [
-            "新規は原則見送り（監視のみ）",
-            "どうしても入るなら指値のみ",
-            "ロットは50%以下",
-            "リスク幅8%超は除外",
-            "TP2は控えめ",
-            "GUは寄り後再判定",
-        ]
+        policy_lines.insert(0, "macro caution: new entries should be smaller or watch-only")
     breadth_regime = str(meta.get("breadth_regime", ""))
     breadth_score = float(meta.get("breadth_score", 0.0))
     if breadth_regime:
-        policy_lines.insert(0, f"BREADTH:{breadth_regime} {breadth_score:.0f}")
-    if data_warn:
+        policy_lines.insert(0, f"breadth {breadth_regime} {breadth_score:.0f}")
+    if bool(meta.get("data_warn", False)):
         ok = int(meta.get("data_ok", 0))
-        tot = int(meta.get("data_total", 0))
+        total = int(meta.get("data_total", 0))
         cov = float(meta.get("data_coverage", 0.0))
-        cov_min = float(meta.get("data_coverage_min", 0.0))
-        policy_lines.insert(0, f"DATA:{ok}/{tot} ({cov*100:.0f}%) < {cov_min*100:.0f}%")
-    if breadth_force:
-        policy_lines.insert(0, "BREADTH悪化: 新規は防御モード")
+        policy_lines.insert(0, f"data {ok}/{total} ({cov*100:.0f}%)")
 
-    pos_text, _asset = analyze_positions(pos_df, mkt_score=mkt_score, macro_on=macro_on, new_tickers=new_tickers)
+    pos_text, positions_table = analyze_positions(pos_df, mkt_score=mkt_score, macro_on=macro_on, new_tickers=new_tickers)
 
     report = build_report(
         today_str=today_str,
@@ -187,61 +123,43 @@ def main() -> None:
         macro_on=macro_on,
         events_lines=events_lines,
         no_trade=no_trade,
-        weekly_used=used,
-        weekly_max=wmax,
+        weekly_used=weekly_used,
+        weekly_max=weekly_max,
         leverage=leverage,
         policy_lines=policy_lines,
-        cands=cands,
+        trend_candidates=trend_candidates,
+        leader_candidates=leader_candidates,
         pos_text=pos_text,
-        saucers=meta.get("saucers"),
+        positions_df=positions_table,
     )
 
-    out_dir = Path(os.getenv("REPORT_OUTDIR", "out"))
     image_paths = []
-    if _env_truthy("LINE_SEND_IMAGE", True):
-        candidates = [
-            out_dir / f"report_table_{today_str}.png",
-            out_dir / f"report_table_{today_str}_d.png",
-            out_dir / f"report_table_{today_str}_w.png",
-            out_dir / f"report_table_{today_str}_m.png",
-        ]
-        image_paths = [str(p) for p in candidates if p.exists()]
+    if env_truthy("LINE_SEND_IMAGE", True):
+        for key in ("summary_png", "trend_png", "leaders_png"):
+            path = report.assets.get(key)
+            if path and Path(path).exists():
+                image_paths.append(path)
 
-    require_delivery = _env_truthy("REQUIRE_LINE_DELIVERY", False)
-    require_images = _env_truthy("REQUIRE_LINE_IMAGES", False)
+    require_delivery = env_truthy("REQUIRE_LINE_DELIVERY", False)
+    require_images = env_truthy("REQUIRE_LINE_IMAGES", False)
 
     try:
         result: Dict = {}
         if image_paths:
-            result = send_line(
-                "",
-                image_paths=image_paths,
-                image_caption="",
-                force_image=True,
-            )
+            result = send_line("", image_paths=image_paths, image_caption="", force_image=True)
         else:
-            result = send_line(report, force_text=True)
-
+            result = send_line(report.text, force_text=True)
         print("LINE result:", result)
-
-        if require_delivery:
-            if image_paths:
-                if not bool(result.get("ok", False)):
-                    reason = str(result.get("reason", "LINE delivery failed"))
-                    raise RuntimeError(f"LINE delivery failed: {reason}")
-            else:
-                if not bool(result.get("text_ok", False)):
-                    reason = str(result.get("reason", "LINE text delivery failed"))
-                    raise RuntimeError(f"LINE delivery failed (text): {reason}")
-
+        if require_delivery and not bool(result.get("ok", False)):
+            raise RuntimeError(f"LINE delivery failed: {result}")
         if require_images and image_paths and not bool(result.get("image_ok", False)):
-            reason = str(result.get("reason", "one or more images failed"))
-            raise RuntimeError(f"LINE delivery failed (one or more images): {reason}")
+            raise RuntimeError(f"LINE image delivery failed: {result}")
     except Exception:
         if require_delivery:
             raise
         traceback.print_exc()
 
+    state["positions_last"] = sorted(set(str(x).strip() for x in pos_tickers if str(x).strip()))
     save_state(state)
 
 
