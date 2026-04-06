@@ -33,10 +33,10 @@ def _resolve_send_line() -> Callable[..., Dict]:
         if text.strip():
             print(text)
         return {
-            "ok": True,
-            "text_ok": True,
+            "ok": False,
+            "text_ok": False,
             "image_ok": False,
-            "reason": "stdout_fallback",
+            "reason": "stdout_fallback_only",
         }
 
     return _fallback
@@ -144,12 +144,15 @@ def main() -> None:
     require_images = env_truthy("REQUIRE_LINE_IMAGES", False)
 
     try:
-        result: Dict = {}
-        if image_paths:
-            result = send_line("", image_paths=image_paths, image_caption="", force_image=True)
-        else:
-            result = send_line(report.text, force_text=True)
+        result = send_line(
+            report.text,
+            image_paths=image_paths,
+            image_caption="",
+            force_text=True,
+            force_image=False,
+        )
         print("LINE result:", result)
+
         if require_delivery and not bool(result.get("ok", False)):
             raise RuntimeError(f"LINE delivery failed: {result}")
         if require_images and image_paths and not bool(result.get("image_ok", False)):
