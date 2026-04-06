@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
-from urllib.parse import ParseResult, urlparse, urlunparse
+from urllib.parse import ParseResult, quote, urlparse, urlunparse
 
 
 try:
@@ -44,6 +44,105 @@ def _dedupe_keep_order(items: Sequence[str]) -> List[str]:
 def _replace_path(parsed: ParseResult, new_path: str) -> str:
     safe_path = new_path if new_path.startswith("/") else f"/{new_path}" if new_path else "/"
     return urlunparse(parsed._replace(path=safe_path, params="", query="", fragment=""))
+
+
+def _join_public_path(base_path: str, key: str) -> str:
+    clean_base = (base_path or '').rstrip('/')
+    encoded_key = quote(str(key or '').strip(), safe='')
+    if clean_base:
+        return f"{clean_base}/img/{encoded_key}"
+    return f"/img/{encoded_key}"
+
+
+def _public_image_url_candidates(*, worker_url: str, request_url: str = '', parsed: object = None) -> List[str]:
+    candidates: List[str] = []
+
+    def _add(url: str) -> None:
+        clean = str(url or '').strip()
+        if clean:
+            candidates.append(clean)
+
+    key = ''
+    if isinstance(parsed, dict):
+        for name in ('url', 'imageUrl', 'image_url', 'imgUrl', 'img_url', 'publicUrl', 'public_url'):
+            value = str(parsed.get(name) or '').strip()
+            if value:
+                _add(value)
+        for name in ('key', 'path', 'objectKey', 'object_key', 'r2Key', 'r2_key'):
+            value = str(parsed.get(name) or '').strip()
+            if value:
+                key = value
+                break
+
+    bases: List[str] = []
+    for url in (request_url, worker_url):
+        raw = str(url or '').strip()
+        if not raw:
+            continue
+        endpoints = _resolve_worker_endpoints(raw)
+        bases.extend(endpoints.get('base', []))
+        bases.extend(endpoints.get('legacy', []))
+        parsed_url = urlparse(raw)
+        if parsed_url.scheme and parsed_url.netloc:
+            bases.append(_replace_path(parsed_url, '/'))
+            path = (parsed_url.path or '').rstrip('/')
+            if path and not path.endswith(('/push', '/upload', '/health')):
+                bases.append(_replace_path(parsed_url, path))
+
+    seen = set()
+    uniq_bases: List[str] = []
+    for base in bases:
+        clean = str(base or '').strip().rstrip('/')
+        if clean and clean not in seen:
+            seen.add(clean)
+            uniq_bases.append(clean)
+
+    if key:
+        for base in uniq_bases:
+            parsed_base = urlparse(base)
+            if not parsed_base.scheme or not parsed_base.netloc:
+                continue
+            base_path = (parsed_base.path or '').rstrip('/')
+            _add(f"{parsed_base.scheme}://{parsed_base.netloc}{_join_public_path(base_path, key)}")
+            if base_path:
+                _add(f"{parsed_base.scheme}://{parsed_base.netloc}{_join_public_path('', key)}")
+
+    return _dedupe_keep_order(candidates)
+
+
+def _probe_public_image_url(url: str, timeout: int = 20, retries: int = 3) -> bool:
+    if requests is None:
+        return False
+    clean = str(url or '').strip()
+    if not clean:
+        return False
+    for _ in range(max(1, retries)):
+        try:
+            resp = requests.get(clean, timeout=timeout, stream=True)
+        except Exception:
+            resp = None
+        if resp is not None:
+            try:
+                content_type = str(resp.headers.get('content-type') or '').lower()
+                if 200 <= int(resp.status_code) < 300 and (content_type.startswith('image/') or resp.headers.get('content-length') not in (None, '0')):
+                    resp.close()
+                    return True
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+    return False
+
+
+def _resolve_public_image_url(*, worker_url: str, request_url: str = '', parsed: object = None) -> Tuple[str, List[str]]:
+    candidates = _public_image_url_candidates(worker_url=worker_url, request_url=request_url, parsed=parsed)
+    for candidate in candidates:
+        if _probe_public_image_url(candidate):
+            return candidate, candidates
+    if candidates:
+        return candidates[0], candidates
+    return '', []
 
 
 def _worker_url() -> str:
@@ -238,14 +337,16 @@ def _upload_images_v2(worker_url: str, image_paths: Sequence[str]) -> Tuple[List
                 last_error = f"HTTP {resp.status_code}: {msg}"
                 continue
 
-            url = ""
-            if isinstance(parsed, dict):
-                url = str(parsed.get("url") or "").strip()
-            if not url:
-                last_error = "missing_url"
+            public_url, public_candidates = _resolve_public_image_url(
+                worker_url=worker_url,
+                request_url=upload_url,
+                parsed=parsed,
+            )
+            if not public_url:
+                last_error = "missing_public_url"
                 continue
 
-            uploaded.append(url)
+            uploaded.append(public_url)
             success = True
             last_error = ""
             break
@@ -367,9 +468,11 @@ def _legacy_image_post(
         last_resp = resp
         ok, parsed, msg = _parse_worker_response(resp)
         if ok:
-            image_url = ""
-            if isinstance(parsed, dict):
-                image_url = str(parsed.get("url") or "").strip()
+            image_url, public_candidates = _resolve_public_image_url(
+                worker_url=worker_url,
+                request_url=legacy_url,
+                parsed=parsed,
+            )
             return {
                 "ok": True,
                 "status_code": resp.status_code,
@@ -379,6 +482,7 @@ def _legacy_image_post(
                 "mode": "worker_legacy",
                 "raw_json": parsed if isinstance(parsed, dict) else None,
                 "url": image_url,
+                "public_url_candidates": public_candidates,
             }
         last_err = f"HTTP {resp.status_code}: {msg}"
 
