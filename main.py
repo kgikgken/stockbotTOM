@@ -1,7 +1,6 @@
 """stockbotTOM dual-screen entry point."""
 from __future__ import annotations
 
-import os
 import traceback
 from pathlib import Path
 from typing import Callable, Dict
@@ -40,6 +39,26 @@ def _resolve_send_line() -> Callable[..., Dict]:
         }
 
     return _fallback
+
+
+def _line_result_summary(result: Dict) -> Dict:
+    try:
+        from utils.line import summarize_line_result  # type: ignore
+
+        return summarize_line_result(result)
+    except Exception:
+        keys = [
+            "ok",
+            "text_ok",
+            "image_ok",
+            "partial_image_ok",
+            "reason",
+            "text_mode",
+            "image_mode",
+            "text_status_code",
+            "image_status_code",
+        ]
+        return {k: result.get(k) for k in keys}
 
 
 send_line = _resolve_send_line()
@@ -151,12 +170,12 @@ def main() -> None:
             force_text=True,
             force_image=False,
         )
-        print("LINE result:", result)
+        print("LINE result:", _line_result_summary(result))
 
         if require_delivery and not bool(result.get("ok", False)):
-            raise RuntimeError(f"LINE delivery failed: {result}")
+            raise RuntimeError(f"LINE delivery failed: {_line_result_summary(result)}")
         if require_images and image_paths and not bool(result.get("image_ok", False)):
-            raise RuntimeError(f"LINE image delivery failed: {result}")
+            raise RuntimeError(f"LINE image delivery failed: {_line_result_summary(result)}")
     except Exception:
         if require_delivery:
             raise
