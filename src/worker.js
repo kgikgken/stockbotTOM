@@ -3,6 +3,9 @@ export default {
     const url = new URL(request.url);
     const path = normalizePath(url.pathname);
 
+    if (request.method === "GET" && (path === "/health" || path.endsWith("/health"))) {
+      return handleHealth(env);
+    }
     if (request.method === "GET" && path.includes("/img/")) {
       return handleImageGet(url, env, path);
     }
@@ -10,6 +13,9 @@ export default {
       return handleUpload(request, env, url, path);
     }
     if (request.method === "POST" && (path === "/" || path.endsWith("/push"))) {
+      if (!authOk(request, env)) {
+        return json({ ok: false, error: "unauthorized" }, 401);
+      }
       return handlePush(request, env);
     }
     return json({ ok: true, service: "stockbotTOM-worker" });
@@ -30,7 +36,7 @@ function json(body, status = 200) {
 }
 
 function authOk(request, env) {
-  const expected = env.UPLOAD_TOKEN || env.AUTH_TOKEN || "";
+  const expected = env.PUSH_TOKEN || env.UPLOAD_TOKEN || env.AUTH_TOKEN || "";
   if (!expected) return true;
   const header = request.headers.get("authorization") || "";
   return header === `Bearer ${expected}`;
@@ -41,6 +47,17 @@ function stripTerminalPath(path, terminal) {
   if (path === suffix) return "";
   if (path.endsWith(suffix)) return path.slice(0, -suffix.length);
   return path;
+}
+
+function handleHealth(env) {
+  return json({
+    ok: true,
+    service: "stockbotTOM-worker",
+    reportsBinding: Boolean(env.REPORTS),
+    lineTokenPresent: Boolean(env.LINE_TOKEN || env.LINE_CHANNEL_ACCESS_TOKEN),
+    lineRecipientPresent: Boolean(env.LINE_USER_ID || env.LINE_TO),
+    authEnabled: Boolean(env.PUSH_TOKEN || env.UPLOAD_TOKEN || env.AUTH_TOKEN),
+  });
 }
 
 async function handleUpload(request, env, url, path) {
