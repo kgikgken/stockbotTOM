@@ -1,18 +1,26 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname.startsWith("/img/")) {
-      return handleImageGet(url, env);
+    const path = normalizePath(url.pathname);
+
+    if (request.method === "GET" && path.includes("/img/")) {
+      return handleImageGet(url, env, path);
     }
-    if (request.method === "POST" && url.pathname === "/upload") {
-      return handleUpload(request, env, url);
+    if (request.method === "POST" && path.endsWith("/upload")) {
+      return handleUpload(request, env, url, path);
     }
-    if (request.method === "POST" && (url.pathname === "/push" || url.pathname === "/")) {
+    if (request.method === "POST" && (path === "/" || path.endsWith("/push"))) {
       return handlePush(request, env);
     }
     return json({ ok: true, service: "stockbotTOM-worker" });
   },
 };
+
+function normalizePath(pathname) {
+  const clean = String(pathname || "/").replace(/\/+/g, "/");
+  if (clean === "/") return "/";
+  return clean.replace(/\/+$/, "") || "/";
+}
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -28,7 +36,14 @@ function authOk(request, env) {
   return header === `Bearer ${expected}`;
 }
 
-async function handleUpload(request, env, url) {
+function stripTerminalPath(path, terminal) {
+  const suffix = `/${terminal}`;
+  if (path === suffix) return "";
+  if (path.endsWith(suffix)) return path.slice(0, -suffix.length);
+  return path;
+}
+
+async function handleUpload(request, env, url, path) {
   if (!authOk(request, env)) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
@@ -45,14 +60,20 @@ async function handleUpload(request, env, url) {
   await env.REPORTS.put(key, await file.arrayBuffer(), {
     httpMetadata: { contentType: file.type || "image/png" },
   });
-  return json({ ok: true, key, url: `${url.origin}/img/${encodeURIComponent(key)}` });
+  const prefix = stripTerminalPath(path, "upload");
+  return json({ ok: true, key, url: `${url.origin}${prefix}/img/${encodeURIComponent(key)}` });
 }
 
-async function handleImageGet(url, env) {
+async function handleImageGet(url, env, path) {
   if (!env.REPORTS) {
     return new Response("REPORTS binding missing", { status: 500 });
   }
-  const key = decodeURIComponent(url.pathname.replace(/^\/img\//, ""));
+  const marker = "/img/";
+  const idx = path.lastIndexOf(marker);
+  const key = idx >= 0 ? decodeURIComponent(path.slice(idx + marker.length)) : "";
+  if (!key) {
+    return new Response("not found", { status: 404 });
+  }
   const obj = await env.REPORTS.get(key);
   if (!obj) {
     return new Response("not found", { status: 404 });
