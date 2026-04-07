@@ -517,23 +517,23 @@ def _upload_images_v2(worker_url: str, image_paths: Sequence[str]) -> Tuple[List
     return uploaded, failures, last_target, last_error
 
 
-def _push_messages_v2(worker_url: str, payload: Dict, timeout: int = 30) -> Dict:
-    endpoints = _resolve_worker_endpoints(worker_url)
-    push_urls = endpoints.get("push", [])
-    headers = _worker_auth_headers()
-    resp, used_url, err = _post_first_success(push_urls, json_payload=payload, headers=headers, timeout=timeout)
-    if resp is None:
-        return {
-            "ok": False,
-            "status_code": None,
-            "body": err,
-            "push_url": used_url,
-            "worker_ok": False,
-            "line_ok": False,
-            "mode": "worker_v2",
-        }
+def _compat_status_code(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
 
-    ok, parsed, msg = _parse_worker_response(resp)
+
+def _compat_push_body_marker(body: object) -> str:
+    return str(body or '').strip().lower()
+
+
+def _push_result_from_response(resp, used_url: str, mode: str, parsed: object = None, msg: str = '') -> Dict:
+    ok, parsed_local, msg_local = _parse_worker_response(resp)
+    if parsed is None:
+        parsed = parsed_local
+    if not msg:
+        msg = msg_local
     line_ok = ok
     line_status = None
     if isinstance(parsed, dict):
@@ -543,7 +543,6 @@ def _push_messages_v2(worker_url: str, payload: Dict, timeout: int = 30) -> Dict
             line_status = parsed.get("line_status")
         if parsed.get("ok") is not None:
             line_ok = bool(parsed.get("ok"))
-
     return {
         "ok": ok and line_ok,
         "status_code": resp.status_code,
@@ -553,8 +552,97 @@ def _push_messages_v2(worker_url: str, payload: Dict, timeout: int = 30) -> Dict
         "worker_ok": ok,
         "line_ok": line_ok,
         "raw_json": parsed if isinstance(parsed, dict) else None,
-        "mode": "worker_v2",
+        "mode": mode,
     }
+
+
+def _should_try_worker_json_compat(attempts: Sequence[Dict]) -> bool:
+    if not attempts:
+        return True
+    routeish_status = {401, 404, 405, 501}
+    routeish_markers = (
+        'not_found',
+        'wrong_path',
+        'cannot post',
+        'method not allowed',
+        'unsupported',
+        'unauthorized',
+        'missing route',
+        'route',
+    )
+    saw_status = False
+    for attempt in attempts:
+        if attempt.get('ok'):
+            return False
+        code = _compat_status_code(attempt.get('status_code'))
+        body = _compat_push_body_marker(attempt.get('body'))
+        if code is not None:
+            saw_status = True
+        if code in routeish_status:
+            return True
+        if body and any(marker in body for marker in routeish_markers):
+            return True
+    return not saw_status
+
+
+def _post_worker_json(urls: Sequence[str], payload: Dict, headers: Dict[str, str], timeout: int, mode: str) -> Tuple[Dict | None, List[Dict], Dict]:
+    attempts: List[Dict] = []
+    failure = {
+        "ok": False,
+        "status_code": None,
+        "line_status": None,
+        "body": "",
+        "push_url": "",
+        "worker_ok": False,
+        "line_ok": False,
+        "raw_json": None,
+        "mode": mode,
+    }
+    if requests is None:
+        failure['body'] = 'requests unavailable'
+        return None, attempts, failure
+    for url in urls:
+        failure['push_url'] = url
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        except Exception as exc:
+            body = f"{type(exc).__name__}: {exc}"
+            attempts.append({"url": url, "status_code": None, "body": body, "ok": False})
+            failure['body'] = body
+            continue
+        ok, parsed, msg = _parse_worker_response(resp)
+        attempts.append({"url": url, "status_code": resp.status_code, "body": msg, "ok": ok})
+        result = _push_result_from_response(resp, url, mode, parsed=parsed, msg=msg)
+        if result.get('ok'):
+            return result, attempts, failure
+        failure = result
+    return None, attempts, failure
+
+
+def _push_messages_v2(worker_url: str, payload: Dict, timeout: int = 30) -> Dict:
+    endpoints = _resolve_worker_endpoints(worker_url)
+    headers = _worker_auth_headers()
+
+    primary_urls = list(endpoints.get("push", []))
+    result, attempts, failure = _post_worker_json(primary_urls, payload, headers, timeout, "worker_v2")
+    if result is not None:
+        return result
+
+    compat_urls = _dedupe_keep_order([
+        url for url in list(endpoints.get("base", [])) + list(endpoints.get("legacy", []))
+        if url not in set(primary_urls)
+    ])
+    if compat_urls and _should_try_worker_json_compat(attempts):
+        compat_result, compat_attempts, compat_failure = _post_worker_json(compat_urls, payload, headers, timeout, "worker_v2_base_json")
+        attempts.extend(compat_attempts)
+        if compat_result is not None:
+            compat_result['compat_attempts'] = attempts
+            return compat_result
+        # prefer the compat failure because it reflects the last route tried
+        failure = compat_failure
+
+    failure['compat_attempts'] = attempts
+    return failure
 
 
 def _push_legacy_text(worker_url: str, text: str, timeout: int = 30) -> Dict:
