@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
+import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
-from urllib.parse import ParseResult, quote, urlparse, urlunparse
+from urllib.parse import ParseResult, quote, unquote, urlparse, urlunparse
 
 
 try:
@@ -54,7 +57,170 @@ def _join_public_path(base_path: str, key: str) -> str:
     return f"/img/{encoded_key}"
 
 
-def _public_image_url_candidates(*, worker_url: str, request_url: str = '', parsed: object = None) -> List[str]:
+JST = timezone(timedelta(hours=9))
+
+
+def _default_upload_key(file_name: str) -> str:
+    base = Path(str(file_name or '').strip()).name
+    if not base:
+        return ''
+    return f"reports/{base}"
+
+
+def _normalized_field_name(name: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name or '').lower())
+
+
+def _collect_named_values(obj: object, names: Sequence[str], *, depth: int = 0, max_depth: int = 5) -> List[str]:
+    if depth > max_depth or obj is None:
+        return []
+    wanted = {_normalized_field_name(name) for name in names}
+    out: List[str] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if _normalized_field_name(key) in wanted and value is not None:
+                if isinstance(value, str):
+                    out.append(value)
+                else:
+                    out.append(str(value))
+            out.extend(_collect_named_values(value, names, depth=depth + 1, max_depth=max_depth))
+    elif isinstance(obj, (list, tuple, set)):
+        for value in obj:
+            out.extend(_collect_named_values(value, names, depth=depth + 1, max_depth=max_depth))
+    elif isinstance(obj, str):
+        clean = obj.strip()
+        if clean[:1] in {'{', '['}:
+            try:
+                parsed = json.loads(clean)
+            except Exception:
+                parsed = None
+            if parsed is not None and parsed is not obj:
+                out.extend(_collect_named_values(parsed, names, depth=depth + 1, max_depth=max_depth))
+    return out
+
+
+def _collect_string_values(obj: object, *, depth: int = 0, max_depth: int = 5) -> List[str]:
+    if depth > max_depth or obj is None:
+        return []
+    out: List[str] = []
+    if isinstance(obj, dict):
+        for value in obj.values():
+            out.extend(_collect_string_values(value, depth=depth + 1, max_depth=max_depth))
+    elif isinstance(obj, (list, tuple, set)):
+        for value in obj:
+            out.extend(_collect_string_values(value, depth=depth + 1, max_depth=max_depth))
+    elif isinstance(obj, str):
+        clean = obj.strip()
+        if clean:
+            out.append(clean)
+        if clean[:1] in {'{', '['}:
+            try:
+                parsed = json.loads(clean)
+            except Exception:
+                parsed = None
+            if parsed is not None and parsed is not obj:
+                out.extend(_collect_string_values(parsed, depth=depth + 1, max_depth=max_depth))
+    return out
+
+
+def _extract_urls_from_text(text: str) -> List[str]:
+    clean = str(text or '').strip()
+    if not clean:
+        return []
+    urls = re.findall(r"https?://[^\s\"'<>]+", clean)
+    return _dedupe_keep_order(urls)
+
+
+def _normalize_key_hint(raw: object) -> str:
+    clean = str(raw or '').strip()
+    if not clean:
+        return ''
+    if clean.startswith('http://') or clean.startswith('https://'):
+        parsed = urlparse(clean)
+        marker = '/img/'
+        if marker in parsed.path:
+            clean = unquote(parsed.path.split(marker, 1)[1])
+        else:
+            return ''
+    clean = clean.split('?', 1)[0].split('#', 1)[0].replace('\\', '/').strip()
+    if '/img/' in clean:
+        clean = clean.split('/img/', 1)[1]
+    clean = clean.lstrip('/')
+    if clean.startswith('img/'):
+        clean = clean[4:]
+    return clean
+
+
+def _filename_key_hints(file_name: str) -> List[str]:
+    base = Path(str(file_name or '').strip()).name
+    if not base:
+        return []
+    hints: List[str] = [base, _default_upload_key(base)]
+    dates = set(re.findall(r'(20\d{2}-\d{2}-\d{2})', base))
+    now_utc = datetime.now(timezone.utc).date()
+    now_jst = datetime.now(JST).date()
+    for d in (
+        now_utc,
+        now_utc - timedelta(days=1),
+        now_utc + timedelta(days=1),
+        now_jst,
+        now_jst - timedelta(days=1),
+        now_jst + timedelta(days=1),
+    ):
+        dates.add(d.isoformat())
+    for d in sorted(dates):
+        hints.append(f'{d}/{base}')
+        hints.append(f'reports/{base}')
+        hints.append(f'reports/{d}/{base}')
+    return _dedupe_keep_order([h for h in hints if h])
+
+
+def _url_and_key_hints(*, parsed: object = None, response_text: str = '', hint_keys: Sequence[str] = ()) -> Tuple[List[str], List[str]]:
+    url_names = (
+        'url', 'imageUrl', 'image_url', 'imgUrl', 'img_url', 'publicUrl', 'public_url',
+        'originalContentUrl', 'previewImageUrl', 'location', 'href',
+    )
+    key_names = (
+        'key', 'path', 'objectKey', 'object_key', 'r2Key', 'r2_key', 'imageKey', 'image_key',
+        'fileKey', 'file_key', 'filename', 'fileName', 'name',
+    )
+    urls: List[str] = []
+    keys: List[str] = []
+
+    if parsed is not None:
+        urls.extend(_collect_named_values(parsed, url_names))
+        keys.extend(_collect_named_values(parsed, key_names))
+        for value in _collect_string_values(parsed):
+            urls.extend(_extract_urls_from_text(value))
+            if '/img/' in value or re.search(r'\.(png|jpe?g|webp|gif)(?:$|[?#])', value, re.I):
+                keys.append(value)
+
+    urls.extend(_extract_urls_from_text(response_text))
+    for match in re.findall(r"(?:[\"']|\b)(?:key|path|objectKey|object_key|r2Key|r2_key|imageKey|image_key|filename|fileName|name)(?:[\"'])?\s*[:=]\s*(?:[\"'])([^\"'\s]+)", str(response_text or ""), re.I):
+        keys.append(match)
+
+    for key in hint_keys:
+        clean = str(key or '').strip()
+        if clean:
+            keys.append(clean)
+            keys.extend(_filename_key_hints(clean))
+
+    normalized_urls: List[str] = []
+    for url in urls:
+        clean = str(url or '').strip()
+        if clean.startswith('http://') or clean.startswith('https://'):
+            normalized_urls.append(clean)
+
+    normalized_keys: List[str] = []
+    for key in keys:
+        clean = _normalize_key_hint(key)
+        if clean:
+            normalized_keys.append(clean)
+
+    return _dedupe_keep_order(normalized_urls), _dedupe_keep_order(normalized_keys)
+
+
+def _public_image_url_candidates(*, worker_url: str, request_url: str = '', parsed: object = None, response_text: str = '', hint_keys: Sequence[str] = ()) -> List[str]:
     candidates: List[str] = []
 
     def _add(url: str) -> None:
@@ -62,17 +228,9 @@ def _public_image_url_candidates(*, worker_url: str, request_url: str = '', pars
         if clean:
             candidates.append(clean)
 
-    key = ''
-    if isinstance(parsed, dict):
-        for name in ('url', 'imageUrl', 'image_url', 'imgUrl', 'img_url', 'publicUrl', 'public_url'):
-            value = str(parsed.get(name) or '').strip()
-            if value:
-                _add(value)
-        for name in ('key', 'path', 'objectKey', 'object_key', 'r2Key', 'r2_key'):
-            value = str(parsed.get(name) or '').strip()
-            if value:
-                key = value
-                break
+    direct_urls, key_hints = _url_and_key_hints(parsed=parsed, response_text=response_text, hint_keys=hint_keys)
+    for value in direct_urls:
+        _add(value)
 
     bases: List[str] = []
     for url in (request_url, worker_url):
@@ -97,7 +255,7 @@ def _public_image_url_candidates(*, worker_url: str, request_url: str = '', pars
             seen.add(clean)
             uniq_bases.append(clean)
 
-    if key:
+    for key in key_hints:
         for base in uniq_bases:
             parsed_base = urlparse(base)
             if not parsed_base.scheme or not parsed_base.netloc:
@@ -135,8 +293,8 @@ def _probe_public_image_url(url: str, timeout: int = 20, retries: int = 3) -> bo
     return False
 
 
-def _resolve_public_image_url(*, worker_url: str, request_url: str = '', parsed: object = None) -> Tuple[str, List[str]]:
-    candidates = _public_image_url_candidates(worker_url=worker_url, request_url=request_url, parsed=parsed)
+def _resolve_public_image_url(*, worker_url: str, request_url: str = '', parsed: object = None, response_text: str = '', hint_keys: Sequence[str] = ()) -> Tuple[str, List[str]]:
+    candidates = _public_image_url_candidates(worker_url=worker_url, request_url=request_url, parsed=parsed, response_text=response_text, hint_keys=hint_keys)
     for candidate in candidates:
         if _probe_public_image_url(candidate):
             return candidate, candidates
@@ -321,12 +479,13 @@ def _upload_images_v2(worker_url: str, image_paths: Sequence[str]) -> Tuple[List
             continue
 
         success = False
+        upload_key = _default_upload_key(p.name) or p.name
         for upload_url in upload_urls:
             last_target = upload_url or last_target
             try:
                 with p.open("rb") as f:
                     files = {"file": (p.name, f, "image/png")}
-                    data = {"path": p.name}
+                    data = {"path": upload_key, "key": upload_key, "filename": p.name}
                     resp = requests.post(upload_url, files=files, data=data, headers=headers, timeout=40)  # type: ignore[arg-type]
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
@@ -341,6 +500,8 @@ def _upload_images_v2(worker_url: str, image_paths: Sequence[str]) -> Tuple[List
                 worker_url=worker_url,
                 request_url=upload_url,
                 parsed=parsed,
+                response_text=_pick_response_text(resp),
+                hint_keys=[upload_key, p.name],
             )
             if not public_url:
                 last_error = "missing_public_url"
@@ -456,8 +617,13 @@ def _legacy_image_post(
         last_url = legacy_url
         try:
             with p.open("rb") as f:
-                files = {"image": (p.name, f, "image/png")}
-                data = {"key": p.name}
+                upload_key = _default_upload_key(p.name) or p.name
+                body = f.read()
+                files = {
+                    "image": (p.name, body, "image/png"),
+                    "file": (p.name, body, "image/png"),
+                }
+                data = {"key": upload_key, "path": upload_key, "filename": p.name}
                 if text.strip():
                     data["text"] = text
                 resp = requests.post(legacy_url, files=files, data=data, headers=headers, timeout=timeout)  # type: ignore[arg-type]
@@ -472,6 +638,8 @@ def _legacy_image_post(
                 worker_url=worker_url,
                 request_url=legacy_url,
                 parsed=parsed,
+                response_text=_pick_response_text(resp),
+                hint_keys=[upload_key, p.name],
             )
             return {
                 "ok": True,
