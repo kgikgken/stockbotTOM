@@ -161,15 +161,25 @@ def main() -> None:
 
     require_delivery = env_truthy("REQUIRE_LINE_DELIVERY", False)
     require_images = env_truthy("REQUIRE_LINE_IMAGES", False)
+    send_text_with_images = env_truthy("LINE_SEND_TEXT", False)
 
     try:
-        result = send_line(
-            report.text,
-            image_paths=image_paths,
-            image_caption="",
-            force_text=True,
-            force_image=False,
-        )
+        if image_paths:
+            result = send_line(
+                report.text if send_text_with_images else "",
+                image_paths=image_paths,
+                image_caption="",
+                force_text=send_text_with_images,
+                force_image=True,
+            )
+        else:
+            result = send_line(
+                report.text,
+                image_paths=[],
+                image_caption="",
+                force_text=True,
+                force_image=False,
+            )
         print("LINE result:", _line_result_summary(result))
 
         if require_delivery and not bool(result.get("ok", False)):
