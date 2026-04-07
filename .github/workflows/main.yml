@@ -40,7 +40,8 @@ jobs:
           LINE_TO: ${{ secrets.LINE_TO || secrets.LINE_USER_ID || secrets.LINE_TARGET_ID || vars.LINE_TO || vars.LINE_USER_ID || vars.LINE_TARGET_ID }}
           LINE_TARGET_ID: ${{ secrets.LINE_TARGET_ID || secrets.LINE_USER_ID || secrets.LINE_TO || vars.LINE_TARGET_ID || vars.LINE_USER_ID || vars.LINE_TO }}
           LINE_SEND_IMAGE: ${{ vars.LINE_SEND_IMAGE || '1' }}
-          REQUIRE_LINE_DELIVERY: ${{ vars.REQUIRE_LINE_DELIVERY || '0' }}
+          LINE_SEND_TEXT: ${{ vars.LINE_SEND_TEXT || '0' }}
+          REQUIRE_LINE_DELIVERY: ${{ vars.REQUIRE_LINE_DELIVERY || '1' }}
           REQUIRE_LINE_IMAGES: ${{ vars.REQUIRE_LINE_IMAGES || '0' }}
         run: python main.py
 
