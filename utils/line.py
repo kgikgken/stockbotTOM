@@ -376,6 +376,27 @@ def _pick_response_text(resp) -> str:
     except Exception:
         return ""
 
+def _legacy_text_placeholder() -> str:
+    return "\u200b"
+
+
+def _looks_like_text_required(status_code: object, body: object) -> bool:
+    code = _compat_status_code(status_code)
+    marker = _compat_push_body_marker(body)
+    if code not in {400, 422, None}:
+        return False
+    hints = (
+        "no text",
+        "missing text",
+        "text required",
+        "text is required",
+        "require text",
+        "text missing",
+        "invalid text",
+    )
+    return any(hint in marker for hint in hints)
+
+
 
 def _worker_auth_headers() -> Dict[str, str]:
     auth = _worker_auth_token()
@@ -698,49 +719,74 @@ def _legacy_image_post(
             "url": "",
         }
 
+    upload_key = _default_upload_key(p.name) or p.name
+    explicit_text = str(text or "")
     last_err = ""
     last_url = ""
     last_resp = None
-    for legacy_url in legacy_urls:
-        last_url = legacy_url
+
+    def _post_once(legacy_url: str, payload_text: str | None):
         try:
             with p.open("rb") as f:
-                upload_key = _default_upload_key(p.name) or p.name
                 body = f.read()
                 files = {
                     "image": (p.name, body, "image/png"),
                     "file": (p.name, body, "image/png"),
                 }
                 data = {"key": upload_key, "path": upload_key, "filename": p.name}
-                if text.strip():
-                    data["text"] = text
-                resp = requests.post(legacy_url, files=files, data=data, headers=headers, timeout=timeout)  # type: ignore[arg-type]
+                if payload_text is not None and str(payload_text).strip():
+                    data["text"] = str(payload_text)
+                resp_local = requests.post(legacy_url, files=files, data=data, headers=headers, timeout=timeout)  # type: ignore[arg-type]
+            return resp_local, ""
         except Exception as exc:
-            last_err = f"{type(exc).__name__}: {exc}"
-            continue
+            return None, f"{type(exc).__name__}: {exc}"
 
-        last_resp = resp
-        ok, parsed, msg = _parse_worker_response(resp)
-        if ok:
-            image_url, public_candidates = _resolve_public_image_url(
-                worker_url=worker_url,
-                request_url=legacy_url,
-                parsed=parsed,
-                response_text=_pick_response_text(resp),
-                hint_keys=[upload_key, p.name],
+    for legacy_url in legacy_urls:
+        last_url = legacy_url
+        payload_candidates: List[str | None]
+        if explicit_text.strip():
+            payload_candidates = [explicit_text]
+        else:
+            payload_candidates = [None, _legacy_text_placeholder()]
+
+        for idx, payload_text in enumerate(payload_candidates):
+            resp, post_err = _post_once(legacy_url, payload_text)
+            if resp is None:
+                last_err = post_err
+                break
+
+            last_resp = resp
+            ok, parsed, msg = _parse_worker_response(resp)
+            if ok:
+                image_url, public_candidates = _resolve_public_image_url(
+                    worker_url=worker_url,
+                    request_url=legacy_url,
+                    parsed=parsed,
+                    response_text=_pick_response_text(resp),
+                    hint_keys=[upload_key, p.name],
+                )
+                return {
+                    "ok": True,
+                    "status_code": resp.status_code,
+                    "body": msg,
+                    "push_url": legacy_url,
+                    "line_status": resp.status_code,
+                    "mode": "worker_legacy",
+                    "raw_json": parsed if isinstance(parsed, dict) else None,
+                    "url": image_url,
+                    "public_url_candidates": public_candidates,
+                    "text_placeholder_used": bool(payload_text == _legacy_text_placeholder()),
+                }
+
+            last_err = f"HTTP {resp.status_code}: {msg}"
+            should_retry_with_placeholder = (
+                idx == 0
+                and not explicit_text.strip()
+                and _looks_like_text_required(resp.status_code, msg)
             )
-            return {
-                "ok": True,
-                "status_code": resp.status_code,
-                "body": msg,
-                "push_url": legacy_url,
-                "line_status": resp.status_code,
-                "mode": "worker_legacy",
-                "raw_json": parsed if isinstance(parsed, dict) else None,
-                "url": image_url,
-                "public_url_candidates": public_candidates,
-            }
-        last_err = f"HTTP {resp.status_code}: {msg}"
+            if should_retry_with_placeholder:
+                continue
+            break
 
     status_code = None if last_resp is None else last_resp.status_code
     return {
