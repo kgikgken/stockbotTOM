@@ -370,6 +370,26 @@ def _resolve_worker_endpoints(worker_url: str) -> Dict[str, List[str]]:
     }
 
 
+def _worker_prefers_legacy_image(worker_url: str) -> bool:
+    raw = str(worker_url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return False
+
+    path = (parsed.path or "").rstrip("/")
+    if not path:
+        return True
+    if path.endswith("/push") or path.endswith("/upload"):
+        return False
+    if path.endswith("/health"):
+        return True
+    if "/img/" in path:
+        return False
+    return True
+
+
 def _pick_response_text(resp) -> str:
     try:
         return (resp.text or "")[:500]
@@ -992,18 +1012,45 @@ def send_line(
     image_fallback_result = None
     legacy_image_result = None
     partial_image_ok = False
+    prefer_legacy_image = worker_available and _worker_prefers_legacy_image(worker_url)
 
     if images and worker_available:
-        uploaded, upload_failures, upload_url, upload_error = _upload_images_v2(worker_url, images)
-        if uploaded:
-            image_result = _push_messages_v2(worker_url, {"text": "", "imageUrls": uploaded, "imageCaption": image_caption})
-            if (not bool(image_result.get("ok"))) and direct_available:
-                image_fallback_result = _direct_push(_build_image_messages(uploaded))
-                if bool(image_fallback_result.get("ok")):
-                    image_result = image_fallback_result
-            partial_image_ok = bool(image_result.get("ok")) and bool(uploaded)
+        legacy_text = text if text_requested and not bool(text_result.get("ok")) else ""
+        if prefer_legacy_image:
+            legacy_image_result = _send_images_legacy(worker_url, images, text=legacy_text)
+            if bool(legacy_image_result.get("ok")):
+                image_result = {
+                    "ok": legacy_image_result.get("ok"),
+                    "status_code": legacy_image_result.get("status_code"),
+                    "body": legacy_image_result.get("body"),
+                    "push_url": legacy_image_result.get("push_url"),
+                    "line_status": legacy_image_result.get("status_code"),
+                    "mode": "worker_legacy",
+                }
+                partial_image_ok = bool(legacy_image_result.get("partial_image_ok"))
+                uploaded = list(legacy_image_result.get("uploaded") or uploaded)
+                upload_failures = list(legacy_image_result.get("upload_failures") or [])
+                if legacy_text and bool(legacy_image_result.get("text_ok")):
+                    text_result = {
+                        "ok": True,
+                        "status_code": legacy_image_result.get("status_code"),
+                        "body": legacy_image_result.get("body"),
+                        "push_url": legacy_image_result.get("push_url"),
+                        "line_status": legacy_image_result.get("status_code"),
+                        "mode": "worker_legacy",
+                    }
+
         if not partial_image_ok:
-            legacy_text = text if text_requested and not bool(text_result.get("ok")) else ""
+            uploaded, upload_failures, upload_url, upload_error = _upload_images_v2(worker_url, images)
+            if uploaded:
+                image_result = _push_messages_v2(worker_url, {"text": "", "imageUrls": uploaded, "imageCaption": image_caption})
+                if (not bool(image_result.get("ok"))) and direct_available:
+                    image_fallback_result = _direct_push(_build_image_messages(uploaded))
+                    if bool(image_fallback_result.get("ok")):
+                        image_result = image_fallback_result
+                partial_image_ok = bool(image_result.get("ok")) and bool(uploaded)
+
+        if not partial_image_ok and not prefer_legacy_image:
             legacy_image_result = _send_images_legacy(worker_url, images, text=legacy_text)
             if bool(legacy_image_result.get("ok")):
                 image_result = {
