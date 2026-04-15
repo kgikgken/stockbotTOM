@@ -1,1186 +1,508 @@
+"""LINE delivery helper.
+
+Primary backend: custom Cloudflare Worker (recommended for GitHub Actions).
+Fallback backend: LINE Notify (legacy).
+
+This module is intentionally defensive because multiple worker shapes have been
+used during the project history.
+
+Supported worker styles
+-----------------------
+A) Single endpoint
+   - POST <WORKER_URL> JSON {"text": "..."}
+   - POST <WORKER_URL> multipart form-data with image + text/key fields
+
+B) Split endpoints
+   - POST <WORKER_URL>/notify JSON {"text": "..."}
+   - POST <WORKER_URL>/upload multipart form-data with image + text/key fields
+   - Some historical variants used /image instead of /upload
+
+The function returns a structured dict and should not raise in normal operation.
+"""
+
 from __future__ import annotations
 
-import json
 import os
-import re
-from datetime import datetime, timedelta, timezone
+import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
-from urllib.parse import ParseResult, quote, unquote, urlparse, urlunparse
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import requests
 
 try:
-    import requests
-except Exception:  # pragma: no cover - requests should exist in runtime
-    requests = None  # type: ignore
+    from PIL import Image
+except Exception:  # pragma: no cover
+    Image = None  # type: ignore
+
+LINE_NOTIFY_API = "https://notify-api.line.me/api/notify"
+DEFAULT_IMAGE_MAX_BYTES = 950_000
 
 
-def _env_first(*names: str) -> str:
-    for name in names:
-        value = os.getenv(name)
-        if value is None:
-            continue
-        clean = str(value).strip()
-        if clean:
-            return clean
-    return ""
-
-
-def _truthy(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
+def _env_truthy(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None:
         return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _dedupe_keep_order(items: Sequence[str]) -> List[str]:
+def _unique_keep_order(items: Iterable[str]) -> List[str]:
     out: List[str] = []
     seen = set()
-    for item in items:
-        clean = str(item or "").strip()
-        if clean and clean not in seen:
-            seen.add(clean)
-            out.append(clean)
-    return out
-
-
-def _replace_path(parsed: ParseResult, new_path: str) -> str:
-    safe_path = new_path if new_path.startswith("/") else f"/{new_path}" if new_path else "/"
-    return urlunparse(parsed._replace(path=safe_path, params="", query="", fragment=""))
-
-
-def _join_public_path(base_path: str, key: str) -> str:
-    clean_base = (base_path or '').rstrip('/')
-    encoded_key = quote(str(key or '').strip(), safe='')
-    if clean_base:
-        return f"{clean_base}/img/{encoded_key}"
-    return f"/img/{encoded_key}"
-
-
-JST = timezone(timedelta(hours=9))
-
-
-def _default_upload_key(file_name: str) -> str:
-    base = Path(str(file_name or '').strip()).name
-    if not base:
-        return ''
-    return f"reports/{base}"
-
-
-def _normalized_field_name(name: object) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(name or '').lower())
-
-
-def _collect_named_values(obj: object, names: Sequence[str], *, depth: int = 0, max_depth: int = 5) -> List[str]:
-    if depth > max_depth or obj is None:
-        return []
-    wanted = {_normalized_field_name(name) for name in names}
-    out: List[str] = []
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            if _normalized_field_name(key) in wanted and value is not None:
-                if isinstance(value, str):
-                    out.append(value)
-                else:
-                    out.append(str(value))
-            out.extend(_collect_named_values(value, names, depth=depth + 1, max_depth=max_depth))
-    elif isinstance(obj, (list, tuple, set)):
-        for value in obj:
-            out.extend(_collect_named_values(value, names, depth=depth + 1, max_depth=max_depth))
-    elif isinstance(obj, str):
-        clean = obj.strip()
-        if clean[:1] in {'{', '['}:
-            try:
-                parsed = json.loads(clean)
-            except Exception:
-                parsed = None
-            if parsed is not None and parsed is not obj:
-                out.extend(_collect_named_values(parsed, names, depth=depth + 1, max_depth=max_depth))
-    return out
-
-
-def _collect_string_values(obj: object, *, depth: int = 0, max_depth: int = 5) -> List[str]:
-    if depth > max_depth or obj is None:
-        return []
-    out: List[str] = []
-    if isinstance(obj, dict):
-        for value in obj.values():
-            out.extend(_collect_string_values(value, depth=depth + 1, max_depth=max_depth))
-    elif isinstance(obj, (list, tuple, set)):
-        for value in obj:
-            out.extend(_collect_string_values(value, depth=depth + 1, max_depth=max_depth))
-    elif isinstance(obj, str):
-        clean = obj.strip()
-        if clean:
-            out.append(clean)
-        if clean[:1] in {'{', '['}:
-            try:
-                parsed = json.loads(clean)
-            except Exception:
-                parsed = None
-            if parsed is not None and parsed is not obj:
-                out.extend(_collect_string_values(parsed, depth=depth + 1, max_depth=max_depth))
-    return out
-
-
-def _extract_urls_from_text(text: str) -> List[str]:
-    clean = str(text or '').strip()
-    if not clean:
-        return []
-    urls = re.findall(r"https?://[^\s\"'<>]+", clean)
-    return _dedupe_keep_order(urls)
-
-
-def _normalize_key_hint(raw: object) -> str:
-    clean = str(raw or '').strip()
-    if not clean:
-        return ''
-    if clean.startswith('http://') or clean.startswith('https://'):
-        parsed = urlparse(clean)
-        marker = '/img/'
-        if marker in parsed.path:
-            clean = unquote(parsed.path.split(marker, 1)[1])
-        else:
-            return ''
-    clean = clean.split('?', 1)[0].split('#', 1)[0].replace('\\', '/').strip()
-    if '/img/' in clean:
-        clean = clean.split('/img/', 1)[1]
-    clean = clean.lstrip('/')
-    if clean.startswith('img/'):
-        clean = clean[4:]
-    return clean
-
-
-def _filename_key_hints(file_name: str) -> List[str]:
-    base = Path(str(file_name or '').strip()).name
-    if not base:
-        return []
-    hints: List[str] = [base, _default_upload_key(base)]
-    dates = set(re.findall(r'(20\d{2}-\d{2}-\d{2})', base))
-    now_utc = datetime.now(timezone.utc).date()
-    now_jst = datetime.now(JST).date()
-    for d in (
-        now_utc,
-        now_utc - timedelta(days=1),
-        now_utc + timedelta(days=1),
-        now_jst,
-        now_jst - timedelta(days=1),
-        now_jst + timedelta(days=1),
-    ):
-        dates.add(d.isoformat())
-    for d in sorted(dates):
-        hints.append(f'{d}/{base}')
-        hints.append(f'reports/{base}')
-        hints.append(f'reports/{d}/{base}')
-    return _dedupe_keep_order([h for h in hints if h])
-
-
-def _url_and_key_hints(*, parsed: object = None, response_text: str = '', hint_keys: Sequence[str] = ()) -> Tuple[List[str], List[str]]:
-    url_names = (
-        'url', 'imageUrl', 'image_url', 'imgUrl', 'img_url', 'publicUrl', 'public_url',
-        'originalContentUrl', 'previewImageUrl', 'location', 'href',
-    )
-    key_names = (
-        'key', 'path', 'objectKey', 'object_key', 'r2Key', 'r2_key', 'imageKey', 'image_key',
-        'fileKey', 'file_key', 'filename', 'fileName', 'name',
-    )
-    urls: List[str] = []
-    keys: List[str] = []
-
-    if parsed is not None:
-        urls.extend(_collect_named_values(parsed, url_names))
-        keys.extend(_collect_named_values(parsed, key_names))
-        for value in _collect_string_values(parsed):
-            urls.extend(_extract_urls_from_text(value))
-            if '/img/' in value or re.search(r'\.(png|jpe?g|webp|gif)(?:$|[?#])', value, re.I):
-                keys.append(value)
-
-    urls.extend(_extract_urls_from_text(response_text))
-    for match in re.findall(r"(?:[\"']|\b)(?:key|path|objectKey|object_key|r2Key|r2_key|imageKey|image_key|filename|fileName|name)(?:[\"'])?\s*[:=]\s*(?:[\"'])([^\"'\s]+)", str(response_text or ""), re.I):
-        keys.append(match)
-
-    for key in hint_keys:
-        clean = str(key or '').strip()
-        if clean:
-            keys.append(clean)
-            keys.extend(_filename_key_hints(clean))
-
-    normalized_urls: List[str] = []
-    for url in urls:
-        clean = str(url or '').strip()
-        if clean.startswith('http://') or clean.startswith('https://'):
-            normalized_urls.append(clean)
-
-    normalized_keys: List[str] = []
-    for key in keys:
-        clean = _normalize_key_hint(key)
-        if clean:
-            normalized_keys.append(clean)
-
-    return _dedupe_keep_order(normalized_urls), _dedupe_keep_order(normalized_keys)
-
-
-def _public_image_url_candidates(*, worker_url: str, request_url: str = '', parsed: object = None, response_text: str = '', hint_keys: Sequence[str] = ()) -> List[str]:
-    candidates: List[str] = []
-
-    def _add(url: str) -> None:
-        clean = str(url or '').strip()
-        if clean:
-            candidates.append(clean)
-
-    direct_urls, key_hints = _url_and_key_hints(parsed=parsed, response_text=response_text, hint_keys=hint_keys)
-    for value in direct_urls:
-        _add(value)
-
-    bases: List[str] = []
-    for url in (request_url, worker_url):
-        raw = str(url or '').strip()
-        if not raw:
+    for x in items:
+        if not x:
             continue
-        endpoints = _resolve_worker_endpoints(raw)
-        bases.extend(endpoints.get('base', []))
-        bases.extend(endpoints.get('legacy', []))
-        parsed_url = urlparse(raw)
-        if parsed_url.scheme and parsed_url.netloc:
-            bases.append(_replace_path(parsed_url, '/'))
-            path = (parsed_url.path or '').rstrip('/')
-            if path and not path.endswith(('/push', '/upload', '/health')):
-                bases.append(_replace_path(parsed_url, path))
-
-    seen = set()
-    uniq_bases: List[str] = []
-    for base in bases:
-        clean = str(base or '').strip().rstrip('/')
-        if clean and clean not in seen:
-            seen.add(clean)
-            uniq_bases.append(clean)
-
-    for key in key_hints:
-        for base in uniq_bases:
-            parsed_base = urlparse(base)
-            if not parsed_base.scheme or not parsed_base.netloc:
-                continue
-            base_path = (parsed_base.path or '').rstrip('/')
-            _add(f"{parsed_base.scheme}://{parsed_base.netloc}{_join_public_path(base_path, key)}")
-            if base_path:
-                _add(f"{parsed_base.scheme}://{parsed_base.netloc}{_join_public_path('', key)}")
-
-    return _dedupe_keep_order(candidates)
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
 
 
-def _probe_public_image_url(url: str, timeout: int = 20, retries: int = 3) -> bool:
-    if requests is None:
-        return False
-    clean = str(url or '').strip()
-    if not clean:
-        return False
-    for _ in range(max(1, retries)):
+def _normalize_worker_urls(worker_url: str) -> Tuple[str, str]:
+    raw = str(worker_url or "").rstrip("/")
+    base = raw
+    for suffix in ("/notify", "/upload", "/image"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return raw, base
+
+
+def _auth_headers(token: Optional[str], extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if extra:
+        headers.update(extra)
+    if token:
+        # Historical worker variants have used either x-auth-token or Bearer.
+        headers.setdefault("Authorization", f"Bearer {token}")
+        headers.setdefault("x-auth-token", token)
+    return headers
+
+
+def _mime_for_path(path: str | Path) -> str:
+    ext = Path(path).suffix.lower()
+    if ext in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    if ext == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def _post_with_retries(
+    *,
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = 30.0,
+    params: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    json: Optional[Dict[str, Any]] = None,
+    files: Optional[Dict[str, Any]] = None,
+    max_retries: int = 3,
+) -> Tuple[bool, int, str]:
+    last_status = 0
+    last_text = ""
+    for attempt in range(max_retries):
         try:
-            resp = requests.get(clean, timeout=timeout, stream=True)
+            r = requests.post(
+                url,
+                headers=headers or {},
+                params=params,
+                data=data,
+                json=json,
+                files=files,
+                timeout=timeout,
+            )
+            last_status = int(getattr(r, "status_code", 0) or 0)
+            last_text = (getattr(r, "text", "") or "")[:500]
+            if 200 <= last_status < 300:
+                return True, last_status, last_text
+            # Retry only for transient cases.
+            if last_status in {408, 409, 425, 429, 500, 502, 503, 504} and attempt < max_retries - 1:
+                time.sleep(0.8 * (2**attempt))
+                continue
+            return False, last_status, last_text
+        except Exception as e:  # pragma: no cover - network/runtime dependent
+            last_status = 0
+            last_text = str(e)
+            if attempt < max_retries - 1:
+                time.sleep(0.8 * (2**attempt))
+                continue
+            return False, last_status, last_text
+    return False, last_status, last_text
+
+
+def _ensure_image_under_limit(path: Path, *, max_bytes: int, workdir: Path) -> Path:
+    """Best-effort shrinker for LINE preview/worker image limits.
+
+    Returns original path if already small enough or if Pillow is unavailable.
+    """
+    try:
+        if path.stat().st_size <= max_bytes:
+            return path
+    except Exception:
+        return path
+
+    if Image is None:
+        return path
+
+    try:
+        im = Image.open(path)
+    except Exception:
+        return path
+
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    # 1) Try optimized PNG first (best for table images)
+    if path.suffix.lower() == ".png":
+        try:
+            tmp_png = workdir / f"{path.stem}.line.png"
+            im.save(tmp_png, format="PNG", optimize=True, compress_level=9)
+            if tmp_png.stat().st_size <= max_bytes:
+                return tmp_png
         except Exception:
-            resp = None
-        if resp is not None:
+            pass
+
+    # 2) Quantize to palette PNG (works very well for charts/tables)
+    try:
+        palette = im.convert("P", palette=Image.ADAPTIVE, colors=256)  # type: ignore[attr-defined]
+        tmp_q = workdir / f"{path.stem}.line.pal.png"
+        palette.save(tmp_q, format="PNG", optimize=True, compress_level=9)
+        if tmp_q.stat().st_size <= max_bytes:
+            return tmp_q
+    except Exception:
+        pass
+
+    # 3) Fall back to JPEG with gradual downscale
+    try:
+        rgb = im.convert("RGB")
+    except Exception:
+        return path
+
+    w0, h0 = rgb.size
+    if w0 <= 0 or h0 <= 0:
+        return path
+
+    for scale in (1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7):
+        w = max(1, int(w0 * scale))
+        h = max(1, int(h0 * scale))
+        cur = rgb if (w, h) == rgb.size else rgb.resize((w, h))
+        for quality in (90, 85, 80, 75, 70):
             try:
-                content_type = str(resp.headers.get('content-type') or '').lower()
-                if 200 <= int(resp.status_code) < 300 and (content_type.startswith('image/') or resp.headers.get('content-length') not in (None, '0')):
-                    resp.close()
-                    return True
-            finally:
-                try:
-                    resp.close()
-                except Exception:
-                    pass
-    return False
+                tmp_jpg = workdir / f"{path.stem}.line.s{int(scale*100)}.q{quality}.jpg"
+                cur.save(tmp_jpg, format="JPEG", quality=quality, optimize=True)
+                if tmp_jpg.stat().st_size <= max_bytes:
+                    return tmp_jpg
+            except Exception:
+                continue
+    return path
 
 
-def _resolve_public_image_url(*, worker_url: str, request_url: str = '', parsed: object = None, response_text: str = '', hint_keys: Sequence[str] = ()) -> Tuple[str, List[str]]:
-    candidates = _public_image_url_candidates(worker_url=worker_url, request_url=request_url, parsed=parsed, response_text=response_text, hint_keys=hint_keys)
-    for candidate in candidates:
-        if _probe_public_image_url(candidate):
-            return candidate, candidates
-    if candidates:
-        return candidates[0], candidates
-    return '', []
-
-
-def _worker_url() -> str:
-    return _env_first("WORKER_URL", "WORKER_BASE_URL", "PUBLIC_BASE_URL")
-
-
-def _worker_auth_token() -> str:
-    return _env_first(
-        "WORKER_AUTH_TOKEN",
-        "WORKER_TOKEN",
-        "UPLOAD_TOKEN",
-        "AUTH_TOKEN",
-        "PUSH_TOKEN",
-    )
-
-
-def _resolve_worker_endpoints(worker_url: str) -> Dict[str, List[str]]:
-    raw = str(worker_url or "").strip()
-    if not raw:
-        return {"push": [], "upload": [], "base": [], "legacy": []}
-    parsed = urlparse(raw)
-    if not parsed.scheme or not parsed.netloc:
-        return {"push": [], "upload": [], "base": [], "legacy": []}
-
-    path = (parsed.path or "").rstrip("/")
-    terminal = ""
-    base_path = path
-    for suffix in ("/push", "/upload", "/health"):
-        if path.endswith(suffix):
-            terminal = suffix[1:]
-            base_path = path[: -len(suffix)]
-            break
-
-    push_paths: List[str] = []
-    upload_paths: List[str] = []
-    base_urls: List[str] = []
-    legacy_urls: List[str] = []
-
-    if terminal == "push":
-        push_paths.append(path or "/push")
-    if terminal == "upload":
-        upload_paths.append(path or "/upload")
-
-    if base_path:
-        push_paths.append(f"{base_path}/push")
-        upload_paths.append(f"{base_path}/upload")
-        base_urls.append(_replace_path(parsed, base_path))
-        legacy_urls.append(_replace_path(parsed, base_path))
-    else:
-        base_urls.append(_replace_path(parsed, "/"))
-        legacy_urls.append(_replace_path(parsed, "/"))
-
-    push_paths.append("/push")
-    upload_paths.append("/upload")
-    legacy_urls.append(_replace_path(parsed, "/"))
-
-    if path and terminal not in {"push", "upload", "health"}:
-        push_paths.append(path)
-        base_urls.append(_replace_path(parsed, path))
-        legacy_urls.append(_replace_path(parsed, path))
-
-    return {
-        "push": [_replace_path(parsed, p) for p in _dedupe_keep_order(push_paths)],
-        "upload": [_replace_path(parsed, p) for p in _dedupe_keep_order(upload_paths)],
-        "base": _dedupe_keep_order(base_urls),
-        "legacy": _dedupe_keep_order(legacy_urls),
-    }
-
-
-def _worker_prefers_legacy_image(worker_url: str) -> bool:
-    raw = str(worker_url or "").strip()
-    if not raw:
-        return False
-    parsed = urlparse(raw)
-    if not parsed.scheme or not parsed.netloc:
-        return False
-
-    path = (parsed.path or "").rstrip("/")
-    if not path:
-        return True
-    if path.endswith("/push") or path.endswith("/upload"):
-        return False
-    if path.endswith("/health"):
-        return True
-    if "/img/" in path:
-        return False
-    return True
-
-
-def _pick_response_text(resp) -> str:
-    try:
-        return (resp.text or "")[:500]
-    except Exception:
-        return ""
-
-def _legacy_text_placeholder() -> str:
-    return "\u200b"
-
-
-def _looks_like_text_required(status_code: object, body: object) -> bool:
-    code = _compat_status_code(status_code)
-    marker = _compat_push_body_marker(body)
-    if code not in {400, 422, None}:
-        return False
-    hints = (
-        "no text",
-        "missing text",
-        "text required",
-        "text is required",
-        "require text",
-        "text missing",
-        "invalid text",
-    )
-    return any(hint in marker for hint in hints)
-
-
-
-def _worker_auth_headers() -> Dict[str, str]:
-    auth = _worker_auth_token()
-    if not auth:
-        return {}
-    return {
-        "Authorization": f"Bearer {auth}",
-        "X-Auth-Token": auth,
-    }
-
-
-def _line_api_base_url() -> str:
-    return _env_first("LINE_API_BASE_URL") or "https://api.line.me"
-
-
-def _line_credentials() -> Tuple[str, str]:
-    token = _env_first(
-        "LINE_CHANNEL_ACCESS_TOKEN",
-        "LINE_TOKEN",
-        "LINE_ACCESS_TOKEN",
-        "CHANNEL_ACCESS_TOKEN",
-    )
-    to = _env_first(
-        "LINE_USER_ID",
-        "LINE_TO",
-        "LINE_TARGET_ID",
-        "TARGET_ID",
-        "USER_ID",
-        "TO",
-    )
-    return token, to
-
-
-def _line_direct_available() -> bool:
-    token, to = _line_credentials()
-    return bool(token and to and requests is not None)
-
-
-def _parse_worker_response(resp) -> Tuple[bool, object, str]:
-    body = _pick_response_text(resp)
-    try:
-        parsed = resp.json()
-    except Exception:
-        parsed = None
-
-    if 200 <= int(getattr(resp, "status_code", 0) or 0) < 300:
-        if isinstance(parsed, dict) and parsed.get("ok") is False:
-            return False, parsed, str(parsed.get("error") or parsed.get("body") or body)
-        return True, parsed, body
-
-    if isinstance(parsed, dict):
-        msg = str(parsed.get("error") or parsed.get("detail") or parsed.get("body") or body)
-    else:
-        msg = body
-    return False, parsed, msg
-
-
-def _post_first_success(
-    urls: Sequence[str],
-    *,
-    json_payload=None,
-    files=None,
-    data=None,
-    headers=None,
-    timeout: int = 30,
-):
-    if requests is None:
-        return None, "", "requests unavailable"
-    last_resp = None
-    last_url = ""
-    last_err = ""
+def _worker_post_text(worker_url: str, auth_token: Optional[str], text: str, timeout: float) -> Tuple[bool, int, str]:
+    raw, base = _normalize_worker_urls(worker_url)
+    urls = _unique_keep_order([raw, f"{base}/notify"])
+    payloads = [{"text": text}, {"message": text}]
+    last = (False, 0, "")
     for url in urls:
-        last_url = url
-        try:
-            resp = requests.post(url, json=json_payload, files=files, data=data, headers=headers, timeout=timeout)
-            last_resp = resp
-        except Exception as exc:
-            last_err = f"{type(exc).__name__}: {exc}"
-            continue
-
-        ok, _parsed, msg = _parse_worker_response(resp)
-        if ok:
-            return resp, url, ""
-        last_err = f"HTTP {resp.status_code}: {msg}"
-    return last_resp, last_url, last_err
-
-
-def _upload_images_v2(worker_url: str, image_paths: Sequence[str]) -> Tuple[List[str], List[str], str, str]:
-    endpoints = _resolve_worker_endpoints(worker_url)
-    upload_urls = endpoints.get("upload", [])
-    headers = _worker_auth_headers()
-
-    uploaded: List[str] = []
-    failures: List[str] = []
-    last_target = ""
-    last_error = ""
-    for path in image_paths:
-        p = Path(path)
-        if not p.exists():
-            failures.append(f"{p.name}: file_missing")
-            continue
-
-        success = False
-        upload_key = _default_upload_key(p.name) or p.name
-        for upload_url in upload_urls:
-            last_target = upload_url or last_target
-            try:
-                with p.open("rb") as f:
-                    files = {"file": (p.name, f, "image/png")}
-                    data = {"path": upload_key, "key": upload_key, "filename": p.name}
-                    resp = requests.post(upload_url, files=files, data=data, headers=headers, timeout=40)  # type: ignore[arg-type]
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                continue
-
-            ok, parsed, msg = _parse_worker_response(resp)
-            if not ok:
-                last_error = f"HTTP {resp.status_code}: {msg}"
-                continue
-
-            public_url, public_candidates = _resolve_public_image_url(
-                worker_url=worker_url,
-                request_url=upload_url,
-                parsed=parsed,
-                response_text=_pick_response_text(resp),
-                hint_keys=[upload_key, p.name],
+        for payload in payloads:
+            ok, status, body = _post_with_retries(
+                url=url,
+                headers=_auth_headers(auth_token, {"Content-Type": "application/json"}),
+                json=payload,
+                timeout=timeout,
             )
-            if not public_url:
-                last_error = "missing_public_url"
-                continue
-
-            uploaded.append(public_url)
-            success = True
-            last_error = ""
-            break
-
-        if not success:
-            failures.append(f"{p.name}: {last_error or 'upload_failed'}")
-    return uploaded, failures, last_target, last_error
-
-
-def _compat_status_code(value: object) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except Exception:
-        return None
-
-
-def _compat_push_body_marker(body: object) -> str:
-    return str(body or '').strip().lower()
-
-
-def _push_result_from_response(resp, used_url: str, mode: str, parsed: object = None, msg: str = '') -> Dict:
-    ok, parsed_local, msg_local = _parse_worker_response(resp)
-    if parsed is None:
-        parsed = parsed_local
-    if not msg:
-        msg = msg_local
-    line_ok = ok
-    line_status = None
-    if isinstance(parsed, dict):
-        if parsed.get("status") is not None:
-            line_status = parsed.get("status")
-        elif parsed.get("line_status") is not None:
-            line_status = parsed.get("line_status")
-        if parsed.get("ok") is not None:
-            line_ok = bool(parsed.get("ok"))
-    return {
-        "ok": ok and line_ok,
-        "status_code": resp.status_code,
-        "line_status": line_status,
-        "body": msg,
-        "push_url": used_url,
-        "worker_ok": ok,
-        "line_ok": line_ok,
-        "raw_json": parsed if isinstance(parsed, dict) else None,
-        "mode": mode,
-    }
-
-
-def _should_try_worker_json_compat(attempts: Sequence[Dict]) -> bool:
-    if not attempts:
-        return True
-    routeish_status = {401, 404, 405, 501}
-    routeish_markers = (
-        'not_found',
-        'wrong_path',
-        'cannot post',
-        'method not allowed',
-        'unsupported',
-        'unauthorized',
-        'missing route',
-        'route',
-    )
-    saw_status = False
-    for attempt in attempts:
-        if attempt.get('ok'):
-            return False
-        code = _compat_status_code(attempt.get('status_code'))
-        body = _compat_push_body_marker(attempt.get('body'))
-        if code is not None:
-            saw_status = True
-        if code in routeish_status:
-            return True
-        if body and any(marker in body for marker in routeish_markers):
-            return True
-    return not saw_status
-
-
-def _post_worker_json(urls: Sequence[str], payload: Dict, headers: Dict[str, str], timeout: int, mode: str) -> Tuple[Dict | None, List[Dict], Dict]:
-    attempts: List[Dict] = []
-    failure = {
-        "ok": False,
-        "status_code": None,
-        "line_status": None,
-        "body": "",
-        "push_url": "",
-        "worker_ok": False,
-        "line_ok": False,
-        "raw_json": None,
-        "mode": mode,
-    }
-    if requests is None:
-        failure['body'] = 'requests unavailable'
-        return None, attempts, failure
-    for url in urls:
-        failure['push_url'] = url
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-        except Exception as exc:
-            body = f"{type(exc).__name__}: {exc}"
-            attempts.append({"url": url, "status_code": None, "body": body, "ok": False})
-            failure['body'] = body
-            continue
-        ok, parsed, msg = _parse_worker_response(resp)
-        attempts.append({"url": url, "status_code": resp.status_code, "body": msg, "ok": ok})
-        result = _push_result_from_response(resp, url, mode, parsed=parsed, msg=msg)
-        if result.get('ok'):
-            return result, attempts, failure
-        failure = result
-    return None, attempts, failure
-
-
-def _push_messages_v2(worker_url: str, payload: Dict, timeout: int = 30) -> Dict:
-    endpoints = _resolve_worker_endpoints(worker_url)
-    headers = _worker_auth_headers()
-
-    primary_urls = list(endpoints.get("push", []))
-    result, attempts, failure = _post_worker_json(primary_urls, payload, headers, timeout, "worker_v2")
-    if result is not None:
-        return result
-
-    compat_urls = _dedupe_keep_order([
-        url for url in list(endpoints.get("base", [])) + list(endpoints.get("legacy", []))
-        if url not in set(primary_urls)
-    ])
-    if compat_urls and _should_try_worker_json_compat(attempts):
-        compat_result, compat_attempts, compat_failure = _post_worker_json(compat_urls, payload, headers, timeout, "worker_v2_base_json")
-        attempts.extend(compat_attempts)
-        if compat_result is not None:
-            compat_result['compat_attempts'] = attempts
-            return compat_result
-        # prefer the compat failure because it reflects the last route tried
-        failure = compat_failure
-
-    failure['compat_attempts'] = attempts
-    return failure
-
-
-def _push_legacy_text(worker_url: str, text: str, timeout: int = 30) -> Dict:
-    endpoints = _resolve_worker_endpoints(worker_url)
-    legacy_urls = endpoints.get("legacy", []) or endpoints.get("base", [])
-    headers = _worker_auth_headers()
-    resp, used_url, err = _post_first_success(legacy_urls, json_payload={"text": text}, headers=headers, timeout=timeout)
-    if resp is None:
-        return {
-            "ok": False,
-            "status_code": None,
-            "body": err,
-            "push_url": used_url,
-            "line_status": None,
-            "mode": "worker_legacy",
-        }
-
-    ok, parsed, msg = _parse_worker_response(resp)
-    line_status = resp.status_code
-    if isinstance(parsed, dict) and parsed.get("status") is not None:
-        line_status = parsed.get("status")
-
-    return {
-        "ok": ok,
-        "status_code": resp.status_code,
-        "body": msg,
-        "push_url": used_url,
-        "line_status": line_status,
-        "raw_json": parsed if isinstance(parsed, dict) else None,
-        "mode": "worker_legacy",
-    }
-
-
-def _legacy_image_post(
-    worker_url: str,
-    path: str,
-    *,
-    text: str = "",
-    timeout: int = 40,
-) -> Dict:
-    endpoints = _resolve_worker_endpoints(worker_url)
-    legacy_urls = endpoints.get("legacy", []) or endpoints.get("base", [])
-    headers = _worker_auth_headers()
-    p = Path(path)
-    if not p.exists():
-        return {
-            "ok": False,
-            "status_code": None,
-            "body": "file_missing",
-            "push_url": "",
-            "line_status": None,
-            "mode": "worker_legacy",
-            "url": "",
-        }
-
-    upload_key = _default_upload_key(p.name) or p.name
-    explicit_text = str(text or "")
-    last_err = ""
-    last_url = ""
-    last_resp = None
-
-    def _post_once(legacy_url: str, payload_text: str | None):
-        try:
-            with p.open("rb") as f:
-                body = f.read()
-                files = {
-                    "image": (p.name, body, "image/png"),
-                    "file": (p.name, body, "image/png"),
-                }
-                data = {"key": upload_key, "path": upload_key, "filename": p.name}
-                if payload_text is not None and str(payload_text).strip():
-                    data["text"] = str(payload_text)
-                resp_local = requests.post(legacy_url, files=files, data=data, headers=headers, timeout=timeout)  # type: ignore[arg-type]
-            return resp_local, ""
-        except Exception as exc:
-            return None, f"{type(exc).__name__}: {exc}"
-
-    for legacy_url in legacy_urls:
-        last_url = legacy_url
-        payload_candidates: List[str | None]
-        if explicit_text.strip():
-            payload_candidates = [explicit_text]
-        else:
-            payload_candidates = [None, _legacy_text_placeholder()]
-
-        for idx, payload_text in enumerate(payload_candidates):
-            resp, post_err = _post_once(legacy_url, payload_text)
-            if resp is None:
-                last_err = post_err
-                break
-
-            last_resp = resp
-            ok, parsed, msg = _parse_worker_response(resp)
             if ok:
-                image_url, public_candidates = _resolve_public_image_url(
-                    worker_url=worker_url,
-                    request_url=legacy_url,
-                    parsed=parsed,
-                    response_text=_pick_response_text(resp),
-                    hint_keys=[upload_key, p.name],
-                )
-                return {
-                    "ok": True,
-                    "status_code": resp.status_code,
-                    "body": msg,
-                    "push_url": legacy_url,
-                    "line_status": resp.status_code,
-                    "mode": "worker_legacy",
-                    "raw_json": parsed if isinstance(parsed, dict) else None,
-                    "url": image_url,
-                    "public_url_candidates": public_candidates,
-                    "text_placeholder_used": bool(payload_text == _legacy_text_placeholder()),
-                }
-
-            last_err = f"HTTP {resp.status_code}: {msg}"
-            should_retry_with_placeholder = (
-                idx == 0
-                and not explicit_text.strip()
-                and _looks_like_text_required(resp.status_code, msg)
-            )
-            if should_retry_with_placeholder:
-                continue
-            break
-
-    status_code = None if last_resp is None else last_resp.status_code
-    return {
-        "ok": False,
-        "status_code": status_code,
-        "body": last_err,
-        "push_url": last_url,
-        "line_status": status_code,
-        "mode": "worker_legacy",
-        "url": "",
-    }
+                return True, status, body
+            last = (ok, status, body)
+            if status in {404, 405}:
+                break
+    return last
 
 
-def _send_images_legacy(worker_url: str, image_paths: Sequence[str], *, text: str = "") -> Dict:
-    uploaded: List[str] = []
-    failures: List[str] = []
-    results: List[Dict] = []
-    text_ok = not bool(text.strip())
-    first_text = text if text.strip() else ""
+def _worker_post_image(
+    worker_url: str,
+    auth_token: Optional[str],
+    image_path: str,
+    caption: str,
+    image_key: str,
+    timeout: float = 30.0,
+) -> Tuple[bool, int, str]:
+    raw, base = _normalize_worker_urls(worker_url)
+    urls = _unique_keep_order([
+        f"{base}/upload",  # current/expected worker path
+        raw,               # legacy single-endpoint multipart
+        f"{base}/image",  # older compatibility path
+    ])
 
-    for idx, path in enumerate(image_paths):
-        payload_text = first_text if idx == 0 and first_text else ""
-        result = _legacy_image_post(worker_url, path, text=payload_text)
-        results.append(result)
-        if result.get("ok"):
-            url = str(result.get("url") or "").strip()
-            if url:
-                uploaded.append(url)
-            if payload_text:
-                text_ok = True
-        else:
-            failures.append(f"{Path(path).name}: {result.get('body') or result.get('status_code') or 'legacy_upload_failed'}")
+    # Some worker variants require a non-empty text field even for image-only messages.
+    caption_safe = (caption or "").strip() or "\u200b"
+    key = (image_key or "").strip() or Path(image_path).name
 
-    partial_ok = any(bool(r.get("ok")) for r in results)
-    image_ok = partial_ok and len([r for r in results if r.get("ok")]) == len(image_paths)
-    last = results[-1] if results else {
-        "status_code": None,
-        "push_url": "",
-        "body": "",
-        "mode": "worker_legacy",
-    }
-    return {
-        "ok": partial_ok,
-        "text_ok": text_ok,
-        "image_ok": image_ok,
-        "partial_image_ok": partial_ok,
-        "uploaded": uploaded,
-        "upload_failures": failures,
-        "status_code": last.get("status_code"),
-        "push_url": last.get("push_url"),
-        "body": last.get("body"),
-        "mode": "worker_legacy",
-        "details": results,
-    }
+    p = Path(image_path)
+    if not p.exists():
+        return False, 0, f"image file not found: {image_path}"
 
+    max_bytes = int(float(os.getenv("LINE_IMAGE_MAX_BYTES", str(DEFAULT_IMAGE_MAX_BYTES)) or DEFAULT_IMAGE_MAX_BYTES))
+    p2 = _ensure_image_under_limit(p, max_bytes=max_bytes, workdir=Path("out") / "_line_tmp")
 
-def _build_text_messages(text: str) -> List[Dict[str, str]]:
-    clean = str(text or "")
-    if not clean.strip():
-        return []
-    return [{"type": "text", "text": clean[:5000]}]
-
-
-def _build_image_messages(image_urls: Sequence[str]) -> List[Dict[str, str]]:
-    messages: List[Dict[str, str]] = []
-    for url in list(image_urls)[:5]:
-        clean = str(url or "").strip()
-        if not clean:
-            continue
-        messages.append(
-            {
-                "type": "image",
-                "originalContentUrl": clean,
-                "previewImageUrl": clean,
-            }
-        )
-    return messages
-
-
-def _direct_push(messages: Sequence[Dict[str, str]], timeout: int = 30) -> Dict:
-    token, to = _line_credentials()
-    if requests is None:
-        return {
-            "ok": False,
-            "status_code": None,
-            "body": "requests unavailable",
-            "push_url": "",
-            "line_status": None,
-            "mode": "direct",
-        }
-    if not token or not to:
-        return {
-            "ok": False,
-            "status_code": None,
-            "body": "LINE credentials missing",
-            "push_url": "",
-            "line_status": None,
-            "mode": "direct",
-        }
-    if not messages:
-        return {
-            "ok": True,
-            "status_code": 200,
-            "body": "no_messages",
-            "push_url": f"{_line_api_base_url().rstrip('/')}/v2/bot/message/push",
-            "line_status": 200,
-            "mode": "direct",
-        }
-
-    url = f"{_line_api_base_url().rstrip('/')}/v2/bot/message/push"
-    headers = {
-        "content-type": "application/json",
-        "authorization": f"Bearer {token}",
-    }
     try:
-        resp = requests.post(url, json={"to": to, "messages": list(messages)}, headers=headers, timeout=timeout)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "body": f"{type(exc).__name__}: {exc}",
-            "push_url": url,
-            "line_status": None,
-            "mode": "direct",
-        }
+        img_bytes = p2.read_bytes()
+    except Exception as e:
+        return False, 0, f"read_image_failed: {e}"
 
-    return {
-        "ok": 200 <= resp.status_code < 300,
-        "status_code": resp.status_code,
-        "body": _pick_response_text(resp),
-        "push_url": url,
-        "line_status": resp.status_code,
-        "mode": "direct",
-    }
+    basename = p2.name
+    mime = _mime_for_path(p2)
+
+    file_field_candidates = ["image", "file", "imageFile"]
+    payload_variants: List[Tuple[str, Dict[str, str]]] = [
+        ("data", {"text": caption_safe, "key": key}),
+        ("data", {"text": caption_safe, "image_key": key}),
+        ("data", {"caption": caption_safe, "image_key": key}),
+        ("data", {"message": caption_safe, "key": key}),
+        ("data", {"message": caption_safe, "image_key": key}),
+        ("data", {"text": caption_safe}),
+        ("data", {"caption": caption_safe}),
+        ("data", {"message": caption_safe}),
+        ("params", {"caption": caption_safe, "key": key}),
+        ("params", {"text": caption_safe, "key": key}),
+    ]
+
+    last = (False, 0, "")
+    for url in urls:
+        for file_field in file_field_candidates:
+            for mode, payload in payload_variants:
+                files = {file_field: (basename, img_bytes, mime)}
+                kwargs = {"params": dict(payload)} if mode == "params" else {"data": dict(payload)}
+                ok, status, body = _post_with_retries(
+                    url=url,
+                    headers=_auth_headers(auth_token),
+                    timeout=timeout,
+                    files=files,
+                    **kwargs,
+                )
+                if ok:
+                    return True, status, body
+                last = (ok, status, body)
+                if status in {404, 405}:
+                    break
+            if last[1] in {404, 405}:
+                break
+    return last
+
+
+def _notify_post_text(token: str, text: str, timeout: float) -> Tuple[bool, int, str]:
+    return _post_with_retries(
+        url=LINE_NOTIFY_API,
+        headers={"Authorization": f"Bearer {token}"},
+        data={"message": text},
+        timeout=timeout,
+    )
+
+
+def _notify_post_image(token: str, image_path: str, caption: str, timeout: float) -> Tuple[bool, int, str]:
+    p = Path(image_path)
+    if not p.exists():
+        return False, 0, f"image file not found: {image_path}"
+    try:
+        img_bytes = p.read_bytes()
+    except Exception as e:
+        return False, 0, f"read_image_failed: {e}"
+    files = {"imageFile": (p.name, img_bytes, _mime_for_path(p))}
+    payload = {"message": caption if caption else " "}
+    return _post_with_retries(
+        url=LINE_NOTIFY_API,
+        headers={"Authorization": f"Bearer {token}"},
+        data=payload,
+        files=files,
+        timeout=timeout,
+    )
 
 
 def send_line(
     text: str = "",
-    image_paths: Iterable[str] | None = None,
-    image_caption: str = "",
-    force_image: bool = False,
+    *,
+    image_path: Optional[str] = None,
+    image_paths: Optional[Sequence[str]] = None,
+    image_caption: Optional[str] = None,
+    image_key: Optional[str] = None,
     force_text: bool = False,
-) -> Dict:
-    worker_url = _worker_url()
-    images = [str(p) for p in (image_paths or []) if str(p).strip()]
-    text = str(text or "")
-    text_requested = bool(text.strip() or force_text)
-    image_requested = bool(images or force_image)
+    force_image: bool = False,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """Send a LINE notification.
 
-    worker_available = bool(worker_url)
-    direct_available = _line_direct_available()
+    Behavior:
+    - If image(s) are requested and the first image succeeds, text is not sent by
+      default (same UX as the working 2026-02-24 setup).
+    - If an image fails and text is available, text is sent as a fallback unless
+      force_image=True.
 
-    if requests is None:
+    Returns a structured dict:
+      ok, text_ok, image_ok, skipped, reason, backend, status_code, body
+    """
+
+    # Batch helper: send first image with fallback text, remaining images image-only.
+    if image_paths and not image_path:
+        overall_ok = True
+        image_ok_all = True
+        text_ok_any = False
+        statuses: List[int] = []
+        reasons: List[str] = []
+        for idx, p in enumerate(image_paths):
+            res = send_line(
+                text if idx == 0 else "",
+                image_path=p,
+                image_caption=image_caption,
+                image_key=image_key if idx == 0 else None,
+                force_text=force_text,
+                force_image=force_image,
+                timeout=timeout,
+            )
+            overall_ok = overall_ok and bool(res.get("ok", False))
+            image_ok_all = image_ok_all and bool(res.get("image_ok", False))
+            text_ok_any = text_ok_any or bool(res.get("text_ok", False))
+            statuses.append(int(res.get("status_code", 0) or 0))
+            reasons.append(str(res.get("reason", "")))
+        return {
+            "ok": overall_ok,
+            "text_ok": text_ok_any,
+            "image_ok": image_ok_all,
+            "skipped": False,
+            "reason": ",".join([r for r in reasons if r]),
+            "backend": "batch",
+            "status_code": max(statuses) if statuses else 0,
+        }
+
+    send_image = _env_truthy("LINE_SEND_IMAGE", True)
+    send_text = _env_truthy("LINE_SEND_TEXT", False)
+    if force_text:
+        send_text = True
+        send_image = False
+    if force_image:
+        send_image = True
+        send_text = False
+
+    worker_url = (os.getenv("WORKER_URL") or os.getenv("LINE_WORKER_URL") or "").strip()
+    worker_token = (
+        os.getenv("WORKER_AUTH_TOKEN")
+        or os.getenv("LINE_WORKER_AUTH_TOKEN")
+        or os.getenv("UPLOAD_TOKEN")
+        or os.getenv("AUTH_TOKEN")
+        or ""
+    ).strip() or None
+    notify_token = (
+        os.getenv("LINE_NOTIFY_TOKEN")
+        or os.getenv("LINE_NOTIFY_ACCESS_TOKEN")
+        or os.getenv("LINE_TOKEN")
+        or ""
+    ).strip()
+
+    if worker_url:
+        backend = "worker"
+    elif notify_token:
+        backend = "notify"
+    else:
         return {
             "ok": False,
             "text_ok": False,
             "image_ok": False,
-            "text_requested": text_requested,
-            "image_requested": image_requested,
-            "reason": "requests unavailable",
-            "uploaded": [],
-            "upload_failures": ["requests unavailable"] if images else [],
-            "stdout_fallback": False,
-            "worker_available": worker_available,
-            "direct_available": direct_available,
+            "skipped": True,
+            "reason": "WORKER_URL and LINE_NOTIFY_TOKEN/LINE_TOKEN are not set",
+            "backend": "none",
+            "status_code": 0,
+            "body": "",
         }
 
-    text_result = {
-        "ok": not text_requested,
-        "status_code": None,
-        "body": "",
-        "push_url": "",
-        "line_status": None,
-        "mode": "none",
-    }
-    text_fallback_result = None
-    text_legacy_result = None
+    caption = (image_caption or "").strip()
 
-    if text_requested:
-        if worker_available:
-            text_result = _push_messages_v2(worker_url, {"text": text, "imageUrls": [], "imageCaption": image_caption})
-            if not bool(text_result.get("ok")):
-                text_legacy_result = _push_legacy_text(worker_url, text)
-                if bool(text_legacy_result.get("ok")):
-                    text_result = text_legacy_result
-        if (not bool(text_result.get("ok"))) and direct_available:
-            text_fallback_result = _direct_push(_build_text_messages(text))
-            if bool(text_fallback_result.get("ok")):
-                text_result = text_fallback_result
-
-    uploaded: List[str] = []
-    upload_failures: List[str] = []
-    upload_url = ""
-    upload_error = ""
-    image_result = {
-        "ok": not image_requested,
-        "status_code": None,
-        "body": "",
-        "push_url": "",
-        "line_status": None,
-        "mode": "none",
-    }
-    image_fallback_result = None
-    legacy_image_result = None
-    partial_image_ok = False
-    prefer_legacy_image = worker_available and _worker_prefers_legacy_image(worker_url)
-
-    if images and worker_available:
-        legacy_text = text if text_requested and not bool(text_result.get("ok")) else ""
-        if prefer_legacy_image:
-            legacy_image_result = _send_images_legacy(worker_url, images, text=legacy_text)
-            if bool(legacy_image_result.get("ok")):
-                image_result = {
-                    "ok": legacy_image_result.get("ok"),
-                    "status_code": legacy_image_result.get("status_code"),
-                    "body": legacy_image_result.get("body"),
-                    "push_url": legacy_image_result.get("push_url"),
-                    "line_status": legacy_image_result.get("status_code"),
-                    "mode": "worker_legacy",
-                }
-                partial_image_ok = bool(legacy_image_result.get("partial_image_ok"))
-                uploaded = list(legacy_image_result.get("uploaded") or uploaded)
-                upload_failures = list(legacy_image_result.get("upload_failures") or [])
-                if legacy_text and bool(legacy_image_result.get("text_ok")):
-                    text_result = {
-                        "ok": True,
-                        "status_code": legacy_image_result.get("status_code"),
-                        "body": legacy_image_result.get("body"),
-                        "push_url": legacy_image_result.get("push_url"),
-                        "line_status": legacy_image_result.get("status_code"),
-                        "mode": "worker_legacy",
-                    }
-
-        if not partial_image_ok:
-            uploaded, upload_failures, upload_url, upload_error = _upload_images_v2(worker_url, images)
-            if uploaded:
-                image_result = _push_messages_v2(worker_url, {"text": "", "imageUrls": uploaded, "imageCaption": image_caption})
-                if (not bool(image_result.get("ok"))) and direct_available:
-                    image_fallback_result = _direct_push(_build_image_messages(uploaded))
-                    if bool(image_fallback_result.get("ok")):
-                        image_result = image_fallback_result
-                partial_image_ok = bool(image_result.get("ok")) and bool(uploaded)
-
-        if not partial_image_ok and not prefer_legacy_image:
-            legacy_image_result = _send_images_legacy(worker_url, images, text=legacy_text)
-            if bool(legacy_image_result.get("ok")):
-                image_result = {
-                    "ok": legacy_image_result.get("ok"),
-                    "status_code": legacy_image_result.get("status_code"),
-                    "body": legacy_image_result.get("body"),
-                    "push_url": legacy_image_result.get("push_url"),
-                    "line_status": legacy_image_result.get("status_code"),
-                    "mode": "worker_legacy",
-                }
-                partial_image_ok = bool(legacy_image_result.get("partial_image_ok"))
-                uploaded = list(legacy_image_result.get("uploaded") or uploaded)
-                upload_failures = list(legacy_image_result.get("upload_failures") or [])
-                if legacy_text and bool(legacy_image_result.get("text_ok")):
-                    text_result = {
-                        "ok": True,
-                        "status_code": legacy_image_result.get("status_code"),
-                        "body": legacy_image_result.get("body"),
-                        "push_url": legacy_image_result.get("push_url"),
-                        "line_status": legacy_image_result.get("status_code"),
-                        "mode": "worker_legacy",
-                    }
-    elif images:
-        upload_error = "WORKER_URL missing"
-        upload_failures = [f"{Path(p).name}: WORKER_URL missing" for p in images]
-
-    text_ok = bool(text_result.get("ok")) if text_requested else True
-    image_ok = True
-    if image_requested:
-        if legacy_image_result is not None and bool(legacy_image_result.get("ok")):
-            image_ok = bool(legacy_image_result.get("image_ok"))
-            partial_image_ok = bool(legacy_image_result.get("partial_image_ok"))
+    # 1) Try image first (daily ops: images only)
+    if send_image and image_path:
+        if backend == "worker":
+            ok, status, body = _worker_post_image(worker_url, worker_token, image_path, caption, image_key or "", timeout)
         else:
-            image_ok = bool(image_result.get("ok")) and len(uploaded) == len(images)
-            if not partial_image_ok:
-                partial_image_ok = bool(image_result.get("ok")) and bool(uploaded)
+            ok, status, body = _notify_post_image(notify_token, image_path, caption, timeout)
 
-    any_delivery = False
-    if text_requested and text_ok:
-        any_delivery = True
-    if image_requested and partial_image_ok:
-        any_delivery = True
-    if not text_requested and not image_requested:
-        any_delivery = True
+        if ok:
+            if force_text and text.strip():
+                # Explicitly requested text too
+                if backend == "worker":
+                    t_ok, t_status, t_body = _worker_post_text(worker_url, worker_token, text, timeout)
+                else:
+                    t_ok, t_status, t_body = _notify_post_text(notify_token, text, timeout)
+                return {
+                    "ok": bool(t_ok),
+                    "text_ok": bool(t_ok),
+                    "image_ok": True,
+                    "skipped": False,
+                    "reason": "image_then_text" if t_ok else "image_ok_text_failed",
+                    "backend": backend,
+                    "status_code": int(t_status or status or 0),
+                    "body": t_body or body,
+                }
+            return {
+                "ok": True,
+                "text_ok": True,
+                "image_ok": True,
+                "skipped": False,
+                "reason": "image_only",
+                "backend": backend,
+                "status_code": int(status or 0),
+                "body": body,
+            }
 
-    ok = any_delivery
-    if force_text and not text_ok:
-        ok = False
-    if force_image and not image_ok:
-        ok = False
+        # Image failed -> optional fallback to text
+        print(f"LINE image delivery error: {status} {body}")
+        if (not force_image) and text.strip():
+            if backend == "worker":
+                t_ok, t_status, t_body = _worker_post_text(worker_url, worker_token, text, timeout)
+            else:
+                t_ok, t_status, t_body = _notify_post_text(notify_token, text, timeout)
+            return {
+                "ok": bool(t_ok),
+                "text_ok": bool(t_ok),
+                "image_ok": False,
+                "skipped": False,
+                "reason": "image_failed_text_fallback" if t_ok else "image_failed_text_failed",
+                "backend": backend,
+                "status_code": int(t_status or status or 0),
+                "body": t_body or body,
+            }
+        return {
+            "ok": False,
+            "text_ok": False,
+            "image_ok": False,
+            "skipped": False,
+            "reason": "image_failed",
+            "backend": backend,
+            "status_code": int(status or 0),
+            "body": body,
+        }
 
-    reasons: List[str] = []
-    if text_requested and not text_ok:
-        reasons.append(f"text_push_failed:{text_result.get('status_code')}:{text_result.get('body')}")
-    if image_requested and not image_ok:
-        if upload_failures:
-            reasons.extend(upload_failures)
-        elif image_result.get("body"):
-            reasons.append(f"image_push_failed:{image_result.get('status_code')}:{image_result.get('body')}")
-    if not ok:
-        if not worker_available:
-            reasons.append("worker_missing")
-        if not direct_available:
-            reasons.append("direct_line_unavailable")
-    if not reasons:
-        reasons.append("ok")
+    # 2) Text-only path
+    if send_text and text.strip():
+        if backend == "worker":
+            ok, status, body = _worker_post_text(worker_url, worker_token, text, timeout)
+        else:
+            ok, status, body = _notify_post_text(notify_token, text, timeout)
+        return {
+            "ok": bool(ok),
+            "text_ok": bool(ok),
+            "image_ok": True,
+            "skipped": False,
+            "reason": "text_only" if ok else "text_failed",
+            "backend": backend,
+            "status_code": int(status or 0),
+            "body": body,
+        }
 
-    if not ok and text.strip():
-        print(text)
-
-    endpoints = _resolve_worker_endpoints(worker_url)
     return {
-        "ok": ok,
-        "text_ok": text_ok,
-        "image_ok": image_ok,
-        "partial_image_ok": partial_image_ok,
-        "text_requested": text_requested,
-        "image_requested": image_requested,
-        "requested_images": len(images),
-        "uploaded_images": len(uploaded),
-        "uploaded": uploaded,
-        "upload_failures": upload_failures,
-        "upload_url": upload_url,
-        "upload_error": upload_error,
-        "text_status_code": text_result.get("status_code"),
-        "image_status_code": image_result.get("status_code"),
-        "text_push_url": text_result.get("push_url"),
-        "image_push_url": image_result.get("push_url"),
-        "text_body": str(text_result.get("body") or "")[:500],
-        "image_body": str(image_result.get("body") or "")[:500],
-        "line_text_status": text_result.get("line_status"),
-        "line_image_status": image_result.get("line_status"),
-        "text_mode": text_result.get("mode"),
-        "image_mode": image_result.get("mode"),
-        "text_fallback": text_fallback_result,
-        "text_legacy": text_legacy_result,
-        "image_fallback": image_fallback_result,
-        "legacy_image": legacy_image_result,
-        "reason": "; ".join(_dedupe_keep_order([r for r in reasons if r])),
-        "worker_available": worker_available,
-        "direct_available": direct_available,
-        "worker_auth_used": bool(_worker_auth_token()),
-        "worker_base_candidates": endpoints.get("base", []),
-        "worker_legacy_candidates": endpoints.get("legacy", []),
-        "worker_push_candidates": endpoints.get("push", []),
-        "worker_upload_candidates": endpoints.get("upload", []),
-        "stdout_fallback": bool(not ok and text.strip()),
+        "ok": True,
+        "text_ok": True,
+        "image_ok": True,
+        "skipped": True,
+        "reason": "no_content",
+        "backend": backend,
+        "status_code": 0,
+        "body": "",
     }
-
-
-def summarize_line_result(result: Dict) -> Dict:
-    keys = [
-        "ok",
-        "text_ok",
-        "image_ok",
-        "partial_image_ok",
-        "reason",
-        "text_mode",
-        "image_mode",
-        "text_status_code",
-        "image_status_code",
-        "text_push_url",
-        "image_push_url",
-        "upload_url",
-        "worker_available",
-        "direct_available",
-        "worker_auth_used",
-    ]
-    return {key: result.get(key) for key in keys}
-
-
-send = send_line
-send_line_message = send_line
