@@ -1,337 +1,503 @@
 from __future__ import annotations
 
-import math
+import csv
 import os
-from datetime import date, datetime
-from pathlib import Path
-from typing import Dict, Iterable, Iterator, Sequence
-from zoneinfo import ZoneInfo
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+# yfinance is required for market data download, but we keep it as an optional
+# import so that non-data modules (e.g. LINE notification, formatting, tests)
+# can be imported even when yfinance is missing in the environment.
+try:
+    import yfinance as yf  # type: ignore
+except Exception:  # pragma: no cover
+    yf = None  # type: ignore
 
-JST = ZoneInfo("Asia/Tokyo")
+# Silence noisy yfinance logs by default.
+# (GitHub Actions のログが yfinance の警告で埋まるのを避ける)
+import logging
 
 
-# ---------- env / date helpers ----------
+def env_truthy(name: str, default: bool = False) -> bool:
+    """Parse a boolean-like environment variable."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    v = str(raw).strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def tick_size_jpx(price: float) -> float:
+    """Approx JPX tick size by price level.
+
+    NOTE:
+      - JPX tick sizes can vary by market/issue; this schedule covers typical cases.
+      - Used for rounding entry/SL/TP prices so orders don't fail due to invalid ticks.
+    """
+
+    try:
+        p = float(price)
+    except Exception:
+        return 1.0
+    if not np.isfinite(p) or p <= 0:
+        return 1.0
+
+    if p < 3000:
+        return 1.0
+    if p < 5000:
+        return 5.0
+    if p < 30000:
+        return 10.0
+    if p < 50000:
+        return 50.0
+    if p < 300000:
+        return 100.0
+    if p < 500000:
+        return 500.0
+    return 1000.0
+
+
+def floor_to_tick(price: float, tick: float) -> float:
+    """Floor price to the nearest valid tick."""
+
+    try:
+        p = float(price)
+        t = float(tick)
+        if not (np.isfinite(p) and np.isfinite(t)) or t <= 0:
+            return p
+        return float(np.floor(p / t) * t)
+    except Exception:
+        return float(price)
+
+
+def ceil_to_tick(price: float, tick: float) -> float:
+    """Ceil price to the nearest valid tick."""
+
+    try:
+        p = float(price)
+        t = float(tick)
+        if not (np.isfinite(p) and np.isfinite(t)) or t <= 0:
+            return p
+        return float(np.ceil(p / t) * t)
+    except Exception:
+        return float(price)
+
+JST = timezone(timedelta(hours=9))
 
 def jst_now() -> datetime:
     return datetime.now(JST)
 
-
-def jst_today_date() -> date:
-    return jst_now().date()
-
-
 def jst_today_str() -> str:
     return jst_now().strftime("%Y-%m-%d")
 
+def jst_today_date():
+    return jst_now().date()
 
-def env_truthy(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+def parse_event_datetime_jst(dt_str: str | None, date_str: str | None, time_str: str | None) -> Optional[datetime]:
+    dt_str = (dt_str or "").strip()
+    date_str = (date_str or "").strip()
+    time_str = (time_str or "").strip()
 
+    if dt_str:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(dt_str, fmt).replace(tzinfo=JST)
+            except Exception:
+                pass
 
-def env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return int(default)
+    if date_str and time_str:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(f"{date_str} {time_str}", fmt).replace(tzinfo=JST)
+            except Exception:
+                pass
+
+    if date_str:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=JST)
+        except Exception:
+            return None
+
+    return None
+
+def safe_float(x, default=np.nan) -> float:
     try:
-        return int(str(raw).strip())
-    except Exception:
-        return int(default)
-
-
-def env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return float(default)
-    try:
-        return float(str(raw).strip())
-    except Exception:
-        return float(default)
-
-
-# ---------- numeric helpers ----------
-
-def safe_float(value: object, default: float = float("nan")) -> float:
-    try:
-        out = float(value)
-        if math.isnan(out):
+        v = float(x)
+        if not np.isfinite(v):
             return float(default)
-        return out
+        return float(v)
     except Exception:
         return float(default)
 
-
-def clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
-
-
-def percentile_rank(values: Sequence[float], target: float) -> float:
-    arr = np.asarray([x for x in values if np.isfinite(x)], dtype=float)
-    if arr.size == 0 or not np.isfinite(target):
-        return float("nan")
-    return float((arr <= target).mean() * 100.0)
+def clamp(v: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, v)))
 
 
-def rolling_median_ratio(series: pd.Series, window: int = 60) -> float:
-    if series is None or series.empty or len(series) < max(window, 5):
-        return float("nan")
-    base = series.rolling(window).median().iloc[-1]
-    last = series.iloc[-1]
-    if not (np.isfinite(base) and np.isfinite(last) and base != 0):
-        return float("nan")
-    return float(last / base)
+def append_csv_row(
+    path: str,
+    row: Dict[str, Any] | List[Any] | Tuple[Any, ...],
+    header: Optional[List[str]] = None,
+    encoding: str = "utf-8",
+) -> None:
+    """Append a single row to a CSV file.
 
+    Backward-compat helper: some modules / forks still import this.
+    Keeps the runner from failing with ImportError.
 
-# ---------- market microstructure helpers ----------
+    - Creates parent directories automatically.
+    - Writes header when the file is new and (row is dict or header is provided).
+    - For dict rows, column order follows `header` if provided.
+    """
 
-def tick_size_jpx(price: float) -> float:
-    """Approximate TSE tick size by price band."""
-    p = safe_float(price)
-    if not np.isfinite(p) or p <= 0:
-        return 1.0
-    if p < 1_000:
-        return 1.0
-    if p < 3_000:
-        return 1.0
-    if p < 5_000:
-        return 5.0
-    if p < 30_000:
-        return 10.0
-    if p < 50_000:
-        return 50.0
-    if p < 300_000:
-        return 100.0
-    if p < 500_000:
-        return 500.0
-    return 1_000.0
+    if not path:
+        return
 
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
 
-def round_to_tick(price: float, price_ref: float, mode: str = "nearest") -> float:
-    tick = tick_size_jpx(price_ref)
-    if tick <= 0:
-        return float(price)
-    if mode == "down":
-        return math.floor(price / tick) * tick
-    if mode == "up":
-        return math.ceil(price / tick) * tick
-    return round(price / tick) * tick
+    file_exists = os.path.exists(path)
 
+    with open(path, "a", newline="", encoding=encoding) as f:
+        if isinstance(row, dict):
+            cols = header or list(row.keys())
+            w = csv.DictWriter(f, fieldnames=cols)
+            if (not file_exists) and cols:
+                w.writeheader()
+            w.writerow({k: row.get(k, "") for k in cols})
+        else:
+            w = csv.writer(f)
+            if (not file_exists) and header:
+                w.writerow(list(header))
+            w.writerow(list(row))
 
-# ---------- indicators ----------
+@dataclass
+class OHLCV:
+    df: pd.DataFrame
+
+def _normalize_tickers(tickers: Iterable[str]) -> List[str]:
+    out = []
+    for t in tickers:
+        t = str(t).strip()
+        if t:
+            out.append(t)
+    seen=set()
+    uniq=[]
+    for t in out:
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(t)
+    return uniq
+
+def download_history_bulk(
+    tickers: Iterable[str],
+    period: str = "260d",
+    auto_adjust: bool = True,
+    group_size: int = 200,
+    pause_sec: float = 0.15,
+) -> Dict[str, pd.DataFrame]:
+    """
+    yfinance.download を chunk で回す（リトライ＋静音＋低負荷寄り）。
+
+    返り値: {ticker: df} (Open/High/Low/Close/Volume)
+
+    Env:
+      - YFINANCE_QUIET      : 1 で stdout/stderr を抑制 (default: 1)
+      - YF_THREADS          : 1 で yfinance の threads を有効化 (default: 0)
+      - YF_MAX_RETRIES      : chunk の最大リトライ回数 (default: 3)
+      - YF_BACKOFF_BASE     : リトライの基準待ち秒 (default: 1.0)
+      - YF_GROUP_SLEEP      : chunk 間の待ち秒 (default: pause_sec)
+      - YF_GROUP_SIZE       : group_size の上書き (optional)
+    """
+    if yf is None:
+        raise ImportError(
+            "yfinance is not available. Install yfinance to enable market data download (download_history_bulk)."
+        )
+
+    tickers = _normalize_tickers(tickers)
+    out: Dict[str, pd.DataFrame] = {}
+    if not tickers:
+        return out
+
+    # allow override from env
+    group_size_env = os.getenv("YF_GROUP_SIZE")
+    if group_size_env:
+        try:
+            group_size = max(1, int(group_size_env))
+        except Exception:
+            pass
+
+    quiet = env_truthy("YFINANCE_QUIET", default=True)
+
+    # Default threads=False to avoid background prints and to reduce rate-limit pressure.
+    # Enable explicitly when you are sure it is stable in your runtime.
+    threads = env_truthy("YF_THREADS", default=False)
+
+    max_retries = int(os.getenv("YF_MAX_RETRIES", "3") or "3")
+    max_retries = max(1, min(10, max_retries))
+    backoff_base = safe_float(os.getenv("YF_BACKOFF_BASE", "1.0"), 1.0)
+    backoff_base = max(0.1, backoff_base)
+    group_sleep = safe_float(os.getenv("YF_GROUP_SLEEP", str(pause_sec)), pause_sec)
+    group_sleep = max(0.0, group_sleep)
+
+    # yfinance は欠損ティッカーが混ざると大量の WARNING/ERROR を標準出力に出す。
+    # Actions のログ可読性のため、デフォルトで抑制する。
+    logging.getLogger("yfinance").setLevel(logging.ERROR if quiet else logging.INFO)
+
+    import contextlib
+    import io
+    from typing import Optional
+
+    def _is_rate_limited(msg: str) -> bool:
+        m = (msg or "").lower()
+        return (
+            ("rate limit" in m)
+            or ("rate limited" in m)
+            or ("too many requests" in m)
+            or ("yfratelimit" in m)
+        )
+
+    for i in range(0, len(tickers), group_size):
+        chunk = tickers[i : i + group_size]
+
+        data = None
+        last_err: Optional[Exception] = None
+
+        for attempt in range(max_retries):
+            try:
+                if quiet:
+                    _buf_out = io.StringIO()
+                    _buf_err = io.StringIO()
+                    with contextlib.redirect_stdout(_buf_out), contextlib.redirect_stderr(_buf_err):
+                        data = yf.download(
+                            tickers=" ".join(chunk),
+                            period=period,
+                            auto_adjust=auto_adjust,
+                            progress=False,
+                            threads=threads,
+                            group_by="ticker",
+                        )
+                else:
+                    data = yf.download(
+                        tickers=" ".join(chunk),
+                        period=period,
+                        auto_adjust=auto_adjust,
+                        progress=False,
+                        threads=threads,
+                        group_by="ticker",
+                    )
+
+                # Empty is treated as failure (often rate-limit / temporary glitch)
+                if data is None or getattr(data, "empty", True):
+                    raise ValueError("yfinance returned empty dataframe")
+
+                break  # success
+            except Exception as e:
+                last_err = e
+                data = None
+                msg = str(e)
+                # Exponential backoff; rate-limit error -> longer.
+                sleep_sec = backoff_base * (2 ** attempt)
+                if _is_rate_limited(msg):
+                    sleep_sec = max(sleep_sec, backoff_base * 3 * (2 ** attempt))
+                time.sleep(sleep_sec)
+
+        if data is None or getattr(data, "empty", True):
+            # give up this chunk
+            if last_err and not quiet:
+                print(f"[WARN] yfinance download failed for chunk {i//group_size+1}: {last_err}")
+            time.sleep(group_sleep)
+            continue
+
+        if isinstance(data.columns, pd.MultiIndex):
+            for t in chunk:
+                if t not in data.columns.get_level_values(0):
+                    continue
+                df = data[t].copy().dropna(how="all")
+                if df is not None and not df.empty:
+                    out[t] = df
+        else:
+            # Single ticker case
+            t = chunk[0]
+            df = data.copy().dropna(how="all")
+            if df is not None and not df.empty:
+                out[t] = df
+
+        time.sleep(group_sleep)
+
+    return out
+
+def sma(series: pd.Series, window: int) -> pd.Series:
+    return series.rolling(window).mean()
+
+def rsi14(close: pd.Series) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    return 100 - (100 / (1 + rs))
 
 def atr14(df: pd.DataFrame) -> pd.Series:
-    if df is None or df.empty:
-        return pd.Series(dtype=float)
     high = df["High"].astype(float)
     low = df["Low"].astype(float)
     close = df["Close"].astype(float)
     prev_close = close.shift(1)
     tr = pd.concat(
-        [
-            (high - low).abs(),
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
+        [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1
     ).max(axis=1)
-    return tr.rolling(14, min_periods=14).mean()
+    return tr.rolling(14).mean()
+
+def adv20(df: pd.DataFrame) -> float:
+    if df is None or df.empty or "Volume" not in df.columns:
+        return np.nan
+    v = df["Volume"].astype(float)
+    c = df["Close"].astype(float)
+    val = (v * c).rolling(20).mean()
+    return safe_float(val.iloc[-1], np.nan)
+
+def atr_pct_last(df: pd.DataFrame) -> float:
+    if df is None or df.empty:
+        return np.nan
+    a = atr14(df)
+    c = df["Close"].astype(float)
+    if len(a) == 0:
+        return np.nan
+    return safe_float((a.iloc[-1] / (c.iloc[-1] + 1e-9)) * 100.0, np.nan)
 
 
-def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    if df is None or df.empty or len(df) < period * 2:
-        return pd.Series(dtype=float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    close = df["Close"].astype(float)
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    tr = pd.concat(
-        [
-            (high - low).abs(),
-            (high - close.shift(1)).abs(),
-            (low - close.shift(1)).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr = tr.rolling(period, min_periods=period).mean()
-    plus_di = 100 * pd.Series(plus_dm, index=df.index).rolling(period, min_periods=period).sum() / atr
-    minus_di = 100 * pd.Series(minus_dm, index=df.index).rolling(period, min_periods=period).sum() / atr
-    dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
-    return dx.rolling(period, min_periods=period).mean()
+def efficiency_ratio(close: pd.Series, window: int = 60) -> float:
+    """Kaufman Efficiency Ratio (ER).
 
+    ER = |close(t) - close(t-window)| / sum(|diff(close)|)
 
-def efficiency_ratio(close: pd.Series, period: int = 10) -> pd.Series:
-    if close is None or close.empty:
-        return pd.Series(dtype=float)
-    direction = close.diff(period).abs()
-    volatility = close.diff().abs().rolling(period, min_periods=period).sum()
-    return direction / volatility.replace(0, np.nan)
-
-
-def choppiness_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    if df is None or df.empty or len(df) < period:
-        return pd.Series(dtype=float)
-    atr = atr14(df)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    hh = high.rolling(period, min_periods=period).max()
-    ll = low.rolling(period, min_periods=period).min()
-    denom = (hh - ll).replace(0, np.nan)
-    value = 100 * np.log10(atr.rolling(period, min_periods=period).sum() / denom) / np.log10(period)
-    return value
-
-
-def bb_width_ratio(close: pd.Series, ma_window: int = 20, lookback: int = 60) -> float:
-    if close is None or close.empty or len(close) < max(ma_window + 5, lookback):
+    Range: [0, 1]
+      - 1.0: straight / efficient trend
+      - 0.0: choppy / mean-reverting
+    """
+    try:
+        c = pd.Series(close).astype(float)
+    except Exception:
         return float("nan")
-    ma = close.rolling(ma_window, min_periods=ma_window).mean()
-    std = close.rolling(ma_window, min_periods=ma_window).std(ddof=0)
-    width = (4.0 * std) / ma.replace(0, np.nan)
-    return rolling_median_ratio(width.dropna(), window=lookback)
 
-
-def down_up_volume_ratio(close: pd.Series, volume: pd.Series, lookback: int = 10) -> float:
-    if close is None or volume is None or len(close) < lookback + 1:
+    if c is None or len(c) < window + 1:
         return float("nan")
-    delta = close.diff()
-    recent = delta.iloc[-lookback:]
-    vol_recent = volume.iloc[-lookback:]
-    down = vol_recent.where(recent < 0, 0.0).sum()
-    up = vol_recent.where(recent > 0, 0.0).sum()
-    if up <= 0:
-        return float("inf") if down > 0 else 1.0
-    return float(down / up)
 
+    seg = c.iloc[-(window + 1):]
+    net = float(abs(seg.iloc[-1] - seg.iloc[0]))
+    denom = float(seg.diff().abs().sum())
+    if denom <= 0:
+        return 0.0
+    return float(net / denom)
+
+
+def choppiness_index(df: pd.DataFrame, window: int = 14) -> float:
+    """Choppiness Index (CHOP).
+
+    Higher -> choppy / ranging. Lower -> trending.
+    """
+    try:
+        if df is None or len(df) < window + 1:
+            return float("nan")
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [
+                (high - low).abs(),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+
+        tr_sum = tr.rolling(window).sum()
+        hh = high.rolling(window).max()
+        ll = low.rolling(window).min()
+        rng = (hh - ll).replace(0, np.nan)
+
+        x = (tr_sum / rng).replace([np.inf, -np.inf], np.nan)
+        chop = 100.0 * np.log10(x) / np.log10(float(window))
+        return float(chop.iloc[-1])
+    except Exception:
+        return float("nan")
+
+
+def adx(df: pd.DataFrame, window: int = 14) -> float:
+    """Average Directional Index (ADX)."""
+    try:
+        if df is None or len(df) < window * 2 + 2:
+            return float("nan")
+
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = pd.Series(plus_dm, index=df.index)
+        minus_dm = pd.Series(minus_dm, index=df.index)
+
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [
+                (high - low).abs(),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+
+        alpha = 1.0 / float(window)
+        atr = tr.ewm(alpha=alpha, adjust=False).mean()
+        plus_di = 100.0 * plus_dm.ewm(alpha=alpha, adjust=False).mean() / (atr + 1e-9)
+        minus_di = 100.0 * minus_dm.ewm(alpha=alpha, adjust=False).mean() / (atr + 1e-9)
+
+        dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+        adx_s = dx.ewm(alpha=alpha, adjust=False).mean()
+        return float(adx_s.iloc[-1])
+    except Exception:
+        return float("nan")
+
+def returns(df: pd.DataFrame) -> pd.Series:
+    c = df["Close"].astype(float)
+    return c.pct_change(fill_method=None)
+
+def corr_60d(df_a: pd.DataFrame, df_b: pd.DataFrame) -> float:
+    ra = returns(df_a).tail(60)
+    rb = returns(df_b).tail(60)
+    x = pd.concat([ra, rb], axis=1).dropna()
+    if len(x) < 20:
+        return np.nan
+    return float(x.iloc[:, 0].corr(x.iloc[:, 1]))
 
 def is_abnormal_stock(df: pd.DataFrame) -> bool:
-    if df is None or df.empty or len(df) < 60:
-        return True
-    close = df["Close"].astype(float)
-    vol = df["Volume"].astype(float)
-    if close.iloc[-1] <= 50:
-        return True
-    if vol.tail(20).median() <= 0:
-        return True
-    if close.tail(20).pct_change().abs().max() > 0.40:
-        return True
-    return False
-
-
-# ---------- data download ----------
-
-def _chunked(items: Sequence[str], size: int) -> Iterator[list[str]]:
-    buf: list[str] = []
-    for item in items:
-        buf.append(item)
-        if len(buf) >= size:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
-
-
-def _normalize_history_frame(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out.columns = [str(c).strip() for c in out.columns]
-    wanted = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
-    for col in wanted:
-        if col not in out.columns:
-            if col == "Adj Close" and "Close" in out.columns:
-                out[col] = out["Close"]
-            elif col == "Volume":
-                out[col] = 0.0
-            else:
-                out[col] = np.nan
-    out = out[wanted]
-    out.index = pd.to_datetime(out.index)
-    out = out.sort_index()
-    out = out[~out.index.duplicated(keep="last")]
-    return out
-
-
-def download_history_bulk(
-    tickers: Sequence[str],
-    period: str = "3y",
-    interval: str = "1d",
-    chunk_size: int = 50,
-) -> Dict[str, pd.DataFrame]:
-    """Download daily OHLCV from yfinance in chunks.
-
-    The function is intentionally tolerant: unavailable symbols are skipped.
     """
-    symbols = [str(t).strip() for t in tickers if str(t).strip()]
-    if not symbols:
-        return {}
-
-    try:
-        import yfinance as yf  # type: ignore
-    except Exception:
-        return {}
-
-    result: Dict[str, pd.DataFrame] = {}
-    for batch in _chunked(symbols, chunk_size):
-        try:
-            raw = yf.download(
-                tickers=batch,
-                period=period,
-                interval=interval,
-                group_by="ticker",
-                auto_adjust=False,
-                progress=False,
-                threads=True,
-            )
-        except Exception:
-            continue
-        if raw is None or getattr(raw, "empty", True):
-            continue
-
-        if isinstance(raw.columns, pd.MultiIndex):
-            lvl0 = set(str(x) for x in raw.columns.get_level_values(0))
-            if any(symbol in lvl0 for symbol in batch):
-                for symbol in batch:
-                    try:
-                        frame = raw[symbol].dropna(how="all")
-                    except Exception:
-                        frame = None
-                    if frame is not None and not frame.empty:
-                        result[symbol] = _normalize_history_frame(frame)
-            else:
-                # Layout: fields first, symbols second.
-                for symbol in batch:
-                    try:
-                        frame = raw.xs(symbol, axis=1, level=1).dropna(how="all")
-                    except Exception:
-                        frame = None
-                    if frame is not None and not frame.empty:
-                        result[symbol] = _normalize_history_frame(frame)
-        else:
-            if len(batch) == 1:
-                result[batch[0]] = _normalize_history_frame(raw.dropna(how="all"))
-
-    return result
-
-
-# ---------- text helpers ----------
-
-def human_yen(value: float) -> str:
-    v = safe_float(value)
-    if not np.isfinite(v):
-        return "-"
-    if abs(v) >= 100_000_000:
-        return f"{v/100_000_000:.1f}億"
-    if abs(v) >= 10_000:
-        return f"{v/10_000:.1f}万"
-    return f"{v:,.0f}"
-
-
-def ensure_dir(path: str | Path) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    異常変動の簡易除外（完全ではない）
+    - 直近5日で|日次|>12%が3本以上
+    - 直近3日連続で|日次|>12%
+    """
+    if df is None or len(df) < 10:
+        return False
+    r = returns(df).tail(5).abs()
+    extreme = int((r > 0.12).sum())
+    last3 = returns(df).tail(3).abs()
+    last3_ext = bool((last3 > 0.12).all())
+    return bool(extreme >= 3 or last3_ext)
