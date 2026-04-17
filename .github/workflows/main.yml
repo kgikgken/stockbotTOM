@@ -2,7 +2,7 @@ name: stockbot
 
 on:
   schedule:
-    - cron: "27 23 * * *" # JST 08:27
+    - cron: "00 23 * * *" # JST 08:00
   workflow_dispatch:
 
 jobs:
