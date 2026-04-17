@@ -577,3 +577,4 @@ def build_position_info(df: pd.DataFrame, entry_price: float, macro_on: bool) ->
         range_contr=float(range_contr) if np.isfinite(range_contr) else None,
     )
     return info
+
