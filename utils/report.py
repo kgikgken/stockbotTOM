@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Iterable, List
-from __future__ import annotations
-
 import os
 from typing import Dict, List, Tuple, Optional
 import numpy as np
@@ -142,6 +137,7 @@ def build_report(
         lines.append("")
 
     # Candidates (beginner-first)
+    no_order_section_only = False
     if cands:
         lines.append("👀 監視リスト（新規は見送り / 最大5）" if no_trade else "🏆 狙える形（ランキング / 最大5）")
 
@@ -497,7 +493,8 @@ def build_report(
                     lines.append("")
         else:
             lines.append("✅ 今日やること：注文")
-            lines.append("・該当なし")
+            lines.append("・今日は注文なし")
+            no_order_section_only = True
 
         if watch_items:
             lines.append("")
@@ -635,6 +632,8 @@ def build_report(
                             continue
                         if seg.startswith("Setup ") and not setup_used:
                             setup_used = seg.replace("Setup", "", 1).strip()
+                            if setup_used == "POS":
+                                setup_used = ""
                             continue
                         if seg.startswith("次:") and not next_act:
                             next_act = seg.split("次:", 1)[1].strip()
@@ -667,6 +666,8 @@ def build_report(
                     tp1 = _pick_num(ln)
                 if "Setup" in ln and not setup_used:
                     setup_used = _cut_tail(ln.split("Setup", 1)[1])
+                    if setup_used == "POS":
+                        setup_used = ""
 
             act = next_act or status or "保有"
 
@@ -747,8 +748,56 @@ def build_report(
                 return f"{n}ヶ月"
             return f"{n}本"
 
+        def _saucer_exec_sort(tf_key: str, raw_items: List[Dict]) -> List[Dict]:
+            """Sort saucer ideas by *today's executability* before display.
+
+            Priority:
+            1) In-zone (can place the order now)
+            2) Above-zone (pullback limit waiting)
+            3) Below-zone (buy-stop / re-entry waiting)
+
+            Within each bucket, keep the original score order unless two names are
+            both waiting; then prefer the one closer to the zone.
+            """
+            tol_zone = 0.0010
+            ranked: list[tuple[tuple[float, float, int], Dict]] = []
+            for idx0, s in enumerate(raw_items):
+                rim_f = safe_float(s.get("rim"), 0.0)
+                last_f = safe_float(s.get("last"), 0.0)
+                atrp_f = safe_float(s.get("atrp"), 0.0)
+                entry_low = safe_float(s.get("entry_low"), float("nan"))
+                entry_high = safe_float(s.get("entry_high"), float("nan"))
+                if rim_f > 0 and np.isfinite(entry_low) and np.isfinite(entry_high) and entry_low > 0 and entry_high > 0:
+                    zone_low = float(min(entry_low, entry_high))
+                    zone_high = float(max(entry_low, entry_high))
+                else:
+                    base_pre = {"D": 0.6, "W": 0.9, "M": 1.2}.get(tf_key, 0.8)
+                    max_pre = {"D": 2.0, "W": 3.0, "M": 4.0}.get(tf_key, 2.5)
+                    atr_pre = (atrp_f * 0.35) if atrp_f > 0 else 0.0
+                    pre_buf_pct = max(base_pre, atr_pre)
+                    pre_buf_pct = min(pre_buf_pct, max_pre)
+                    zone_low = rim_f * (1.0 - pre_buf_pct / 100.0) if rim_f > 0 else 0.0
+                    zone_high = rim_f * (1.0 - base_pre / 100.0) if rim_f > 0 else 0.0
+                    zone_high = max(zone_low, zone_high)
+
+                state_rank = 9
+                dist_rank = 999.0
+                if last_f > 0 and zone_low > 0 and zone_high > 0:
+                    if last_f < zone_low * (1.0 - tol_zone):
+                        state_rank = 2
+                        dist_rank = max(0.0, (zone_low / last_f - 1.0) * 100.0)
+                    elif last_f > zone_high * (1.0 + tol_zone):
+                        state_rank = 1
+                        dist_rank = max(0.0, (last_f / zone_high - 1.0) * 100.0)
+                    else:
+                        state_rank = 0
+                        dist_rank = 0.0
+                ranked.append(((state_rank, dist_rank, idx0), s))
+            ranked.sort(key=lambda x: x[0])
+            return [s for _k, s in ranked]
+
         for key in ("D", "W", "M"):
-            items = _iter_tf(key)[:5]
+            items = _saucer_exec_sort(key, _iter_tf(key))[:5]
             if lines and key != "D":
                 lines.append("")
             lines.append(f"🥣 ソーサー枠（{_tf_title(key)}）ランキング（最大5）")
@@ -942,46 +991,8 @@ def build_report(
                 s = s.replace("指値（帯内2段）", "指値(帯)")
                 s = s.replace("指値（帯内）", "指値(帯)")
                 s = s.replace("指値（帯）", "指値(帯)")
-                return s.strip()
-
-            def _format_order_cell(s: str) -> str:
-                """注文セルをLINE向けに整形。
-
-                - 意味の区切りで改行して、文字の途中で不自然に割れないようにする
-                - stop(逆指値)の "Trg" が "T / rg" に割れるのを抑える
-                - レンジ(〜)は区切りで改行して価格が崩れないようにする
-                """
-
-                s = _shorten_order_text(s)
-                if not s:
-                    return ""
-
-                # slash 区切りは必ず改行（2段指値/上限など）
-                s = s.replace(" / ", "\n")
-
-                # stop注文: "逆指値 Trg 4,253" → "逆指値\nTrg\n4,253"
-                s = s.replace("逆指値(戻) Trg", "逆指値(戻)\nTrg")
-                s = s.replace("逆指値 Trg", "逆指値\nTrg")
-                s = re.sub(r"\bTrg\s*([0-9,]+)", r"Trg\n\1", s)
-                s = re.sub(r"\b上限\s*([0-9,]+)", r"上限\n\1", s)
-                s = re.sub(r"\b下限\s*([0-9,]+)", r"下限\n\1", s)
-
-                # レンジ注文: "指値 4,935〜5,003" → "指値\n4,935〜\n5,003"
-                if s.startswith("指値 ") and "〜" in s:
-                    s = s.replace("指値 ", "指値\n", 1)
-                    s = s.replace("〜", "〜\n", 1)
-                elif "〜" in s:
-                    s = s.replace("〜", "〜\n", 1)
-
-                # Order-type と価格は必ず改行して、数値が途中で割れないようにする。
-                # 例: "成行(現) 1,506" -> "成行(現)\n1,506"
-                s = re.sub(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*", r"\1\n", s)
-
-                # Many order strings are concatenated like "指値(押)1,489".
-                # If the above rule didn't trigger, insert a single newline before the first digit.
-                if "\n" not in s:
-                    s = re.sub(r"([^\s])([0-9])", r"\1\n\2", s, count=1)
-
+                s = s.replace("逆指値（戻り）", "逆指(戻)")
+                s = s.replace("逆指値", "逆指")
                 return s.strip()
 
             def _split_symbol_cell(cell: str) -> tuple[str, str]:
@@ -1004,7 +1015,6 @@ def build_report(
 
                 short: list[str] = []
                 for p in parts:
-                    # Compact tags for mobile (reduce column width; prevents awkward line breaks)
                     if p == "A1-Strong":
                         p = "A1S"
                     elif p == "週足OK":
@@ -1016,41 +1026,148 @@ def build_report(
                     elif p == "板厚○":
                         p = "厚○"
                     short.append(p)
-
                 return "/".join(short)
+
+            def _format_symbol_for_image(cell: str, note: str = "") -> str:
+                main, tags = _split_symbol_cell(cell)
+                main = " ".join((main or "").splitlines()).strip()
+                tags = _format_tags(tags)
+                lines_out: list[str] = []
+                if main:
+                    lines_out.append(main)
+                if tags:
+                    lines_out.append(tags)
+                if note:
+                    note = note.replace("Entry ", "建 ")
+                    note = note.replace("Setup ", "型 ")
+                    note = note.replace("建 ", "建 ")
+                    note = note.replace(" / ", "\n")
+                    for part in [x.strip() for x in note.splitlines() if x.strip()]:
+                        if part.startswith("型 ") and len(part) <= 5:
+                            part = part.replace("型 ", "型")
+                        lines_out.append(part)
+                return "\n".join(lines_out)
+
+            def _format_order_cell(s: str) -> str:
+                s = _shorten_order_text(s)
+                if not s:
+                    return ""
+                s = re.sub(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値|逆指\(戻\)|逆指)(?=[^\s\n])", r"\1 ", s)
+
+                # 3-step / 2-step pullback ladders
+                m3 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*中\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
+                if m3:
+                    return f"{m3.group(1)}\n浅 {m3.group(2)}\n中 {m3.group(3)}\n深 {m3.group(4)}"
+
+                m2 = re.match(r"^(指値\(押\)|指値\(帯\)|指値)\s*浅\s*([0-9,]+)\s*/\s*深\s*([0-9,]+)$", s)
+                if m2:
+                    return f"{m2.group(1)}\n浅 {m2.group(2)}\n深 {m2.group(3)}"
+
+                # Stop / stop-reentry
+                mstop = re.match(r"^(逆指(?:\(戻\))?)\s*Trg\s*([0-9,]+)(?:\s*/\s*上限\s*([0-9,]+))?$", s)
+                if mstop:
+                    out = [mstop.group(1), mstop.group(2)]
+                    if mstop.group(3):
+                        out.append(f"〜{mstop.group(3)}")
+                    return "\n".join(out)
+
+                # Limit range
+                mrange = re.match(r"^(指値(?:\(押\)|\(帯\))?)\s*([0-9,]+)〜([0-9,]+)$", s)
+                if mrange:
+                    low = mrange.group(2)
+                    high = mrange.group(3)
+                    return f"{mrange.group(1)}\n下 {low}\n上 {high}"
+
+                # Plain price after action
+                mone = re.match(r"^(成行\(現\)|成行\(寄\)|指値\(押\)|指値\(帯\)|指値)\s*([0-9,]+)$", s)
+                if mone:
+                    return f"{mone.group(1)}\n{mone.group(2)}"
+
+                if " / " in s:
+                    s = s.replace(" / ", "\n")
+
+                if "\n" not in s:
+                    s = re.sub(r"([^)\s])\s*([0-9])", r"\1\n\2", s, count=1)
+                return s.strip()
 
             def _format_risk_block(sl: str, tp1: str, risk: str) -> str:
                 sl = (sl or "").strip()
                 tp1 = (tp1 or "").strip()
                 risk = (risk or "").strip()
+                if all(v in {"", "-"} for v in (sl, tp1, risk)):
+                    return "-"
                 out: list[str] = []
-                if sl:
+                if sl and sl != "-":
                     out.append(f"SL {sl}")
-                if tp1:
+                if tp1 and tp1 != "-":
                     out.append(f"TP {tp1}")
-                if risk:
-                    # Keep '%' so the renderer can tint by risk.
-                    if risk.startswith("R"):
-                        out.append(risk)
-                    else:
-                        out.append(f"R {risk}")
-                return "\n".join([x for x in out if x])
+                if risk and risk != "-":
+                    risk_line = risk if risk.startswith("R") else f"R {risk}"
+                    if "(" in risk_line and ")" in risk_line:
+                        risk_line = risk_line.replace(" (", "\n(")
+                    out.append(risk_line)
+                return "\n".join([x for x in out if x]) or "-"
 
             def _pretty_group_label(g: str) -> str:
                 if g == "狙える":
-                    return "✅ 今日の注文"
+                    return "■ 今日の注文"
+                if g == "注文なし":
+                    return "■ 今日は注文なし"
                 if g == "見送り":
-                    return "⛔ 見送り"
+                    return "■ 見送り"
                 if g == "ポジ":
-                    return "📌 ポジション"
+                    return "■ ポジション"
                 if g.startswith("ソーサー"):
-                    return f"🥣 {g}"
-                return f"☑ {g}"
+                    return f"■ {g}"
+                return f"■ {g}"
 
-            def _build_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
+            def _format_status_cell(memo: str) -> str:
+                memo = _strip_icons(memo or "")
+                memo = memo.replace("（注文有効）", "")
+                memo = memo.replace("注文有効", "")
+                memo = memo.replace("状態：", "")
+                memo = memo.replace("ゾーンまで ", "")
+                memo = memo.replace("成行禁止（指値待ち）", "指値待ち")
+                memo = memo.replace("出来高⚠", "出来高")
+                memo = memo.replace(" / ", " | ")
+                memo = " ".join(memo.split())
+
+                if not memo:
+                    return ""
+
+                has_up = ("上" in memo) and ("下" not in memo)
+                has_down = ("下" in memo) and ("上" not in memo)
+                in_zone = ("ゾーン内" in memo) or ("帯内" in memo)
+
+                if "出来高" in memo and in_zone:
+                    return "出来高↑"
+                if "出来高" in memo and has_up:
+                    return "出来高↑"
+                if "出来高" in memo and has_down:
+                    return "出来高↓"
+                if "準候補" in memo and has_down:
+                    return "準↓"
+                if "準候補" in memo and has_up:
+                    return "準↑"
+                if in_zone:
+                    return "帯内"
+                if has_down:
+                    return "下待"
+                if has_up:
+                    return "上待"
+                if "出来高" in memo:
+                    return "出来高"
+                if "準候補" in memo:
+                    return "準候補"
+                if "指値待ち" in memo or "逆指値待ち" in memo or "待ち" in memo:
+                    return "待機"
+                return memo.replace(" | ", "\n")
+
+            def _build_main_img_rows(rows_src: list[list[str]], *, include_orderless_section: bool = False) -> list[list[str]]:
                 img_rows: list[list[str]] = []
                 current_group: str | None = None
-
+                if include_orderless_section:
+                    img_rows.append([_pretty_group_label("注文なし")])
                 for r in rows_src:
                     group = str(r[0]) if r and len(r) > 0 else ""
                     if group != current_group:
@@ -1058,34 +1175,59 @@ def build_report(
                         img_rows.append([_pretty_group_label(group)])
 
                     idx = str(r[1]) if len(r) > 1 else ""
-                    sym_main, sym_tags = _split_symbol_cell(str(r[2]) if len(r) > 2 else "")
-                    sym_tags = _format_tags(sym_tags)
-                    sym_cell = sym_main
-                    if sym_tags:
-                        sym_cell = f"{sym_main}\n{sym_tags}"
+                    memo = _strip_icons(str(r[7]) if len(r) > 7 else "")
+                    symbol_note = ""
+                    order_note = ""
+                    if group == "ポジ" and memo:
+                        symbol_note = memo
+                    elif group == "見送り" and memo:
+                        order_note = memo.replace("見送り", "").strip("（）() ")
 
+                    sym_cell = _format_symbol_for_image(str(r[2]) if len(r) > 2 else "", note=symbol_note)
                     order_txt = _format_order_cell(str(r[3]) if len(r) > 3 else "")
+                    if group == "見送り":
+                        order_txt = "見送り" + (f"\n{order_note}" if order_note else "")
 
                     sl = str(r[4]) if len(r) > 4 else ""
                     tp1 = str(r[5]) if len(r) > 5 else ""
                     risk = str(r[6]) if len(r) > 6 else ""
                     risk_block = _format_risk_block(sl, tp1, risk)
-
-                    memo = _strip_icons(str(r[7]) if len(r) > 7 else "")
-                    # Saucer pages: keep status compact (LINE wraps aggressively)
-                    if group.startswith("ソーサー"):
-                        memo = memo.replace("（注文有効）", "")
-                        memo = memo.replace("注文有効", "")
-                        memo = memo.replace("状態：", "")
-                        memo = memo.replace("ゾーンまで ", "")
-                        memo = memo.replace(" / ", " | ")
-                        memo = memo.replace("逆指値待ち", "逆指値待ち")
-                        memo = memo.replace("成行禁止（指値待ち）", "指値待ち")
-                        memo = " ".join(memo.split())
-
-                    img_rows.append([idx, sym_cell, order_txt, risk_block, memo])
-
+                    img_rows.append([idx, sym_cell, order_txt, risk_block])
                 return img_rows
+
+            def _build_saucer_img_rows(rows_src: list[list[str]]) -> list[list[str]]:
+                img_rows: list[list[str]] = []
+                for r in rows_src:
+                    idx = str(r[1]) if len(r) > 1 else ""
+                    sym_cell = _format_symbol_for_image(str(r[2]) if len(r) > 2 else "")
+                    order_txt = _format_order_cell(str(r[3]) if len(r) > 3 else "")
+                    sl = str(r[4]) if len(r) > 4 else ""
+                    tp1 = str(r[5]) if len(r) > 5 else ""
+                    risk = str(r[6]) if len(r) > 6 else ""
+                    risk_block = _format_risk_block(sl, tp1, risk)
+                    status_txt = _format_status_cell(str(r[7]) if len(r) > 7 else "")
+                    img_rows.append([idx, sym_cell, order_txt, risk_block, status_txt])
+                return img_rows
+
+            def _style_for_rows(base: TableImageStyle, n_data_rows: int, *, saucer: bool = False) -> TableImageStyle:
+                # Fewer rows: trim margins / padding so the image feels tighter on mobile.
+                # More rows: slightly reduce font size to avoid excessive wrapping.
+                import dataclasses
+                st = dataclasses.replace(base)
+                if n_data_rows <= 2:
+                    st.margin = max(14, base.margin - 4)
+                    st.pad_y = max(10, base.pad_y - 3)
+                    st.line_spacing = max(3, base.line_spacing - 1)
+                    st.title_font_size = max(34, base.title_font_size - 1)
+                    st.section_font_size = max(30, base.section_font_size - 1)
+                    if saucer:
+                        st.font_size = max(28, base.font_size - 1)
+                elif n_data_rows >= 5:
+                    st.pad_y = max(11, base.pad_y - 1)
+                    st.font_size = max(28, base.font_size - 1)
+                    st.section_font_size = max(31, base.section_font_size - 1)
+                    st.max_lines = max(4, base.max_lines)
+                return st
 
             # Split rows for multi-page PNG
             rows_orders = [r for r in table_rows if r and str(r[0]) in ("狙える", "見送り", "ポジ")]
@@ -1093,39 +1235,59 @@ def build_report(
             rows_saucer_w = [r for r in table_rows if r and str(r[0]) == "ソーサー（週足）"]
             rows_saucer_m = [r for r in table_rows if r and str(r[0]) == "ソーサー（月足）"]
 
-            style = TableImageStyle(
+            style_main = TableImageStyle(
                 max_total_px=1000,
-                max_col_px=500,
-                margin=22,
-                pad_x=18,
-                pad_y=15,
-                font_size=31,
-                title_font_size=40,
-                section_font_size=33,
+                max_col_px=520,
+                margin=18,
+                pad_x=16,
+                pad_y=13,
+                font_size=30,
+                title_font_size=34,
+                section_font_size=32,
                 line_width=1,
-                line_spacing=6,
+                line_spacing=4,
                 header_bg="#F8FAFC",
-                zebra_bg="#FAFAFA",
+                zebra_bg="#FBFCFE",
                 section_bg="#DBEAFE",
                 text_color="#111827",
                 grid_color="#CBD5E1",
                 wrap_cells=True,
-                max_lines=5,
+                max_lines=4,
+                preferred_col_ratios={"#": 0.06, "銘柄": 0.50, "注文": 0.19, "sl/tpr": 0.25},
+                preferred_col_mins={"#": 58, "銘柄": 390, "注文": 180, "sl/tpr": 220},
+            )
+
+            style_saucer = TableImageStyle(
+                max_total_px=1000,
+                max_col_px=520,
+                margin=18,
+                pad_x=15,
+                pad_y=13,
+                font_size=29,
+                title_font_size=34,
+                section_font_size=32,
+                line_width=1,
+                line_spacing=4,
+                header_bg="#F8FAFC",
+                zebra_bg="#FBFCFE",
+                section_bg="#DBEAFE",
+                text_color="#111827",
+                grid_color="#CBD5E1",
+                wrap_cells=True,
+                max_lines=4,
+                preferred_col_ratios={"#": 0.06, "銘柄": 0.40, "注文": 0.20, "sl/tpr": 0.21, "状態": 0.13},
+                preferred_col_mins={"#": 58, "銘柄": 320, "注文": 170, "sl/tpr": 195, "状態": 118},
             )
 
             png_paths: list[str] = []
 
             # 1) Orders + Position (main)
             if rows_orders:
-                img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "メモ"]
-                img_rows = _build_img_rows(rows_orders)
+                img_headers = ["#", "銘柄", "注文", "SL/TP\nR"]
+                img_rows = _build_main_img_rows(rows_orders, include_orderless_section=no_order_section_only)
                 title_orders = f"stockbotTOM {today_str} 注文サマリ"
                 try:
-                    # NOTE: `render_table_png` auto-detects risk columns from the header names
-                    # (e.g. columns containing "Risk" or "SL/TP" + "R").
-                    # Older drafts passed `risk_cols=...`, but the current `render_table_png`
-                    # implementation does not accept that argument.
-                    render_table_png(title_orders, img_headers, img_rows, png_main, style=style)
+                    render_table_png(title_orders, img_headers, img_rows, png_main, style=_style_for_rows(style_main, len(rows_orders), saucer=False))
                     png_paths.append(png_main)
                 except Exception as e:
                     if note_enabled:
@@ -1135,10 +1297,10 @@ def build_report(
             # 2) Saucer (daily)
             if rows_saucer_d:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
-                img_rows = _build_img_rows(rows_saucer_d)
+                img_rows = _build_saucer_img_rows(rows_saucer_d)
                 title_d = f"stockbotTOM {today_str} ソーサー（日足）"
                 try:
-                    render_table_png(title_d, img_headers, img_rows, png_d, style=style)
+                    render_table_png(title_d, img_headers, img_rows, png_d, style=_style_for_rows(style_saucer, len(rows_saucer_d), saucer=True))
                     png_paths.append(png_d)
                 except Exception as e:
                     if note_enabled:
@@ -1148,10 +1310,10 @@ def build_report(
             # 3) Saucer (weekly)
             if rows_saucer_w:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
-                img_rows = _build_img_rows(rows_saucer_w)
+                img_rows = _build_saucer_img_rows(rows_saucer_w)
                 title_w = f"stockbotTOM {today_str} ソーサー（週足）"
                 try:
-                    render_table_png(title_w, img_headers, img_rows, png_w, style=style)
+                    render_table_png(title_w, img_headers, img_rows, png_w, style=_style_for_rows(style_saucer, len(rows_saucer_w), saucer=True))
                     png_paths.append(png_w)
                 except Exception as e:
                     if note_enabled:
@@ -1161,10 +1323,10 @@ def build_report(
             # 4) Saucer (monthly)
             if rows_saucer_m:
                 img_headers = ["#", "銘柄", "注文", "SL/TP\nR", "状態"]
-                img_rows = _build_img_rows(rows_saucer_m)
+                img_rows = _build_saucer_img_rows(rows_saucer_m)
                 title_m = f"stockbotTOM {today_str} ソーサー（月足）"
                 try:
-                    render_table_png(title_m, img_headers, img_rows, png_m, style=style)
+                    render_table_png(title_m, img_headers, img_rows, png_m, style=_style_for_rows(style_saucer, len(rows_saucer_m), saucer=True))
                     png_paths.append(png_m)
                 except Exception as e:
                     if note_enabled:
@@ -1194,173 +1356,3 @@ def build_report(
             pass
 
     return "\n".join(lines).rstrip() + "\n"
-import pandas as pd
-
-from utils.table_image import save_table_image
-from utils.util import ensure_dir, human_yen, safe_float
-
-
-@dataclass
-class ReportBundle:
-    text: str
-    assets: Dict[str, str]
-
-
-def _cand_df(cands: List[Dict], lane_label: str) -> pd.DataFrame:
-    rows = []
-    for c in cands:
-        rows.append(
-            {
-                "Ticker": c.get("ticker", ""),
-                "Name": c.get("name", ""),
-                "Sector": c.get("sector", ""),
-                "Setup": c.get("setup", ""),
-                "Entry": c.get("order_text", ""),
-                "SL": safe_float(c.get("stop")),
-                "TP1": safe_float(c.get("tp1")),
-                "R": safe_float(c.get("rr")),
-                "Score": safe_float(c.get("score")),
-                "Why": c.get("why", lane_label),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def _summary_df(
-    market: Dict,
-    delta3: int,
-    futures_chg: float,
-    risk_on: bool,
-    macro_on: bool,
-    events_lines: Iterable[str],
-    no_trade: bool,
-    weekly_used: int,
-    weekly_max: int,
-    leverage: float,
-    policy_lines: Iterable[str],
-    pos_text: str,
-    positions_df: pd.DataFrame,
-    trend_count: int,
-    leader_count: int,
-) -> pd.DataFrame:
-    rows = [
-        {"Section": "Market", "Detail": f"score {market.get('score', '-')}, regime {market.get('label', '-')}, Δ3 {delta3:+d}"},
-        {"Section": "Futures", "Detail": f"{futures_chg:+.2f}% / {'risk-on' if risk_on else 'risk-off'}"},
-        {"Section": "Macro", "Detail": "warning on" if macro_on else "normal"},
-        {"Section": "Weekly", "Detail": f"new {weekly_used}/{weekly_max} | leverage {leverage:.2f}x | {'watch-only' if no_trade else 'active'}"},
-        {"Section": "Lanes", "Detail": f"trend {trend_count} | leaders {leader_count}"},
-        {"Section": "Positions", "Detail": pos_text},
-    ]
-    for line in list(market.get("lines", []))[:3]:
-        rows.append({"Section": "Market detail", "Detail": str(line)})
-    for line in list(events_lines)[:4]:
-        rows.append({"Section": "Event", "Detail": str(line)})
-    for line in list(policy_lines)[:5]:
-        rows.append({"Section": "Policy", "Detail": str(line)})
-    if positions_df is not None and not positions_df.empty:
-        for _, row in positions_df.head(6).iterrows():
-            detail = (
-                f"avg {safe_float(row.get('avg')):,.0f} / last {safe_float(row.get('last')):,.0f} "
-                f"/ PnL {safe_float(row.get('pnl_pct')):+.1f}% / SL {safe_float(row.get('sl')):,.0f}"
-            )
-            rows.append({"Section": f"Pos {row.get('ticker')}", "Detail": detail})
-    return pd.DataFrame(rows)
-
-
-def build_report(
-    *,
-    today_str: str,
-    market: Dict,
-    delta3: int,
-    futures_chg: float,
-    risk_on: bool,
-    macro_on: bool,
-    events_lines: Iterable[str],
-    no_trade: bool,
-    weekly_used: int,
-    weekly_max: int,
-    leverage: float,
-    policy_lines: Iterable[str],
-    trend_candidates: List[Dict],
-    leader_candidates: List[Dict],
-    pos_text: str,
-    positions_df: pd.DataFrame,
-    out_dir: str | Path = "out",
-) -> ReportBundle:
-    out = ensure_dir(out_dir)
-
-    trend_df = _cand_df(trend_candidates, "trend")
-    leaders_df = _cand_df(leader_candidates, "leaders")
-    summary_df = _summary_df(
-        market,
-        delta3,
-        futures_chg,
-        risk_on,
-        macro_on,
-        events_lines,
-        no_trade,
-        weekly_used,
-        weekly_max,
-        leverage,
-        policy_lines,
-        pos_text,
-        positions_df,
-        len(trend_candidates),
-        len(leader_candidates),
-    )
-
-    summary_png = save_table_image(
-        summary_df,
-        out / f"report_table_{today_str}.png",
-        title=f"stockbotTOM Summary | {today_str}",
-        subtitle="Order summary / regime / policies / positions",
-        notes=["saucer lane removed", "dual lanes = trend + leaders"],
-        max_rows=24,
-    )
-    trend_png = save_table_image(
-        trend_df,
-        out / f"report_table_{today_str}_trend.png",
-        title=f"順張りスクリーニング | {today_str}",
-        subtitle="Existing momentum lane retained",
-        notes=["A1 / A1-Strong / A2 / B", "execution plan reused from existing setup family"],
-        empty_text="trend candidates not found",
-    )
-    leaders_png = save_table_image(
-        leaders_df,
-        out / f"report_table_{today_str}_leaders.png",
-        title=f"Leaders スクリーニング | {today_str}",
-        subtitle="Research-based lane: RS + 52W high + contraction + liquidity",
-        notes=["primary triggers = leaders-only trend follow", "saucer moved to quality bonus, not primary lane"],
-        empty_text="leader candidates not found",
-    )
-
-    trend_df.to_csv(out / f"trend_candidates_{today_str}.csv", index=False)
-    leaders_df.to_csv(out / f"leaders_candidates_{today_str}.csv", index=False)
-    summary_df.to_csv(out / f"summary_{today_str}.csv", index=False)
-
-    lines = [
-        f"stockbotTOM {today_str}",
-        f"Market {market.get('score', '-')} ({market.get('label', '-')}) | Δ3 {delta3:+d} | Futures {futures_chg:+.2f}% {'risk-on' if risk_on else 'risk-off'}",
-        f"Weekly {weekly_used}/{weekly_max} | {'watch-only' if no_trade else 'active'} | leverage {leverage:.2f}x",
-        f"Trend lane {len(trend_candidates)} candidates | Leaders lane {len(leader_candidates)} candidates",
-        f"Positions: {pos_text}",
-    ]
-    if macro_on:
-        lines.append("Macro warning: on")
-    for line in list(events_lines)[:3]:
-        lines.append(f"Event: {line}")
-    for lane_name, lane_cands in (("Trend", trend_candidates), ("Leaders", leader_candidates)):
-        if lane_cands:
-            top = lane_cands[0]
-            lines.append(
-                f"{lane_name} top: {top.get('ticker')} {top.get('setup')} {top.get('order_text')} / SL {safe_float(top.get('stop')):,.0f} / R {safe_float(top.get('rr')):.2f}"
-            )
-    text = "\n".join(lines)
-    return ReportBundle(
-        text=text,
-        assets={
-            "summary_png": summary_png,
-            "trend_png": trend_png,
-            "leaders_png": leaders_png,
-        },
-    )
