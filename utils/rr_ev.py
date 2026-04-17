@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
-import os
 from dataclasses import dataclass
 from typing import Tuple
 
 from utils.screen_logic import rr_min_by_market, rday_min_by_setup
-from utils.util import clamp, append_csv_row
+from utils.util import clamp
 from utils.setup import SetupInfo
 import numpy as np
 
@@ -29,7 +27,7 @@ class EVInfo:
     time_penalty_pts: float
 
 
-def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
+def _reach_prob(setup: SetupInfo, mkt_score: int | None = None, breadth_score: float | None = None, breadth_regime: str | None = None, engine: str | None = None) -> float:
     """TP1到達確率（目安）
 
     仕様（監査OS）：
@@ -67,6 +65,33 @@ def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
     if mkt_score is not None:
         env = clamp((int(mkt_score) - 55) / 25.0, -1.0, 1.0)
         p += 0.03 * env
+
+    # Breadth regime: use internal market health to tilt probability.
+    # This is intentionally small — the goal is calibration, not hard prediction.
+    if breadth_score is not None:
+        try:
+            b = clamp((float(breadth_score) - 50.0) / 25.0, -1.0, 1.0)
+            p += 0.04 * b
+        except Exception:
+            pass
+
+    if breadth_regime:
+        rg = str(breadth_regime).upper()
+        eng = str(engine or getattr(setup, "engine", "PULLBACK")).upper()
+        if rg == "ATTACK":
+            if eng == "CONTINUATION":
+                p += 0.05
+            elif eng == "BREAKOUT":
+                p += 0.03
+            else:
+                p += 0.01
+        elif rg == "DEFENSE":
+            if eng == "BREAKOUT":
+                p -= 0.08
+            elif eng == "CONTINUATION":
+                p -= 0.04
+            else:
+                p -= 0.01
 
     # --- Additional structure/quality adjustments (lightweight; avoid overfitting)
     # 20日騰落（勢い）
@@ -108,7 +133,7 @@ def _reach_prob(setup: SetupInfo, mkt_score: int | None = None) -> float:
 
     return float(clamp(p, 0.30, 0.85))
 
-def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
+def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool, breadth_score: float | None = None, breadth_regime: str | None = None, engine: str | None = None) -> EVInfo:
     """CAGR寄与度一本化（TP1基準）。
 
     - 期待RはTP1基準で固定
@@ -125,7 +150,7 @@ def calc_ev(setup: SetupInfo, mkt_score: int, macro_on: bool) -> EVInfo:
     rr = expected_r
     expected_days = float(max(setup.expected_days, 0.5))
 
-    p = _reach_prob(setup, mkt_score=mkt_score)
+    p = _reach_prob(setup, mkt_score=mkt_score, breadth_score=breadth_score, breadth_regime=breadth_regime, engine=engine)
 
     # Expected value in R (TP1 basis): p*RR - (1-p)*1
     ev_r = float((p * expected_r) - ((1.0 - p) * 1.0))
