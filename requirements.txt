@@ -2,8 +2,7 @@
 numpy>=1.26
 pandas>=2.1
 requests>=2.31
-
 yfinance>=0.2.40
 
-# Optional but recommended: render report table to PNG (supports Japanese if fonts are installed)
+# PNG infographic (Noto Sans CJK JP required at OS level)
 Pillow>=10.0
