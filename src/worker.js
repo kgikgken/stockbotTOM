@@ -1,194 +1,125 @@
-// Cloudflare Worker (JavaScript version)
-//
-// Purpose:
-// - Accept text-only notifications (POST JSON: {text})
-// - Accept image uploads (POST multipart/form-data: image + optional text + optional key)
-// - Host uploaded images via GET /img/<key>
-// - Push to LINE Messaging API as:
-//     - text message(s)
-//     - image message (URL)
-//
-// Env vars (Cloudflare Worker "Variables and Secrets"):
-// - LINE_TOKEN (or LINE_CHANNEL_ACCESS_TOKEN)
-// - LINE_USER_ID (or LINE_TO)
-// - (optional) UPLOAD_TOKEN (or AUTH_TOKEN)
-// - (required for images) REPORTS: R2 bucket binding
-// - (optional) PUBLIC_BASE_URL: base URL for image links
-
-function json(data, init = {}) {
-  const headers = new Headers(init.headers || {});
-  headers.set("content-type", "application/json; charset=utf-8");
-  return new Response(JSON.stringify(data, null, 2), { ...init, headers });
-}
-
-function ok(data = { ok: true }) {
-  return json(data, { status: 200 });
-}
-
-function badRequest(message, extra = {}) {
-  return json({ ok: false, error: message, ...extra }, { status: 400 });
-}
-
-function unauthorized() {
-  return json({ ok: false, error: "unauthorized" }, { status: 401 });
-}
-
-function notFound() {
-  return json({ ok: false, error: "not found" }, { status: 404 });
-}
-
-function needConfig() {
-  return json(
-    {
-      ok: false,
-      error:
-        "missing LINE token/to or REPORTS binding. Set (LINE_CHANNEL_ACCESS_TOKEN & LINE_TO) or (LINE_TOKEN & LINE_USER_ID).",
-    },
-    { status: 500 },
-  );
-}
-
-function getLineToken(env) {
-  return ((env.LINE_CHANNEL_ACCESS_TOKEN || env.LINE_TOKEN) || "").trim();
-}
-
-function getLineTo(env) {
-  return ((env.LINE_TO || env.LINE_USER_ID) || "").trim();
-}
-
-function requireAuth(req, env) {
-  const token = ((env.UPLOAD_TOKEN || env.AUTH_TOKEN) || "").trim();
-  if (!token) return true;
-
-  const auth = (req.headers.get("authorization") || "").trim();
-  const xAuth = (req.headers.get("x-auth-token") || "").trim();
-  return auth === `Bearer ${token}` || xAuth === token;
-}
-
-async function pushToLine(env, messages) {
-  const token = getLineToken(env);
-  const to = getLineTo(env);
-  if (!token || !to) {
-    return needConfig();
-  }
-
-  const payload = { to, messages };
-
-  const res = await fetch("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const text = await res.text();
-  if (!res.ok) {
-    return json(
-      { ok: false, error: "LINE push failed", status: res.status, detail: text },
-      { status: 502 },
-    );
-  }
-
-  return ok({ ok: true, line: text ? safeJson(text) : "" });
-}
-
-function safeJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-async function handleNotify(request, env) {
-  // POST JSON: { text: "..." }
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return badRequest("invalid json");
-  }
-  const text = (body?.text || "").toString().trim();
-  if (!text) return badRequest("missing text");
-  return await pushToLine(env, [{ type: "text", text }]);
-}
-
-async function handleUpload(request, env) {
-  // POST multipart/form-data:
-  // - image: file (required)
-  // - text: string (optional)
-  // - key: string (optional)
-  if (!requireAuth(request, env)) return unauthorized();
-  if (!env.REPORTS) return needConfig();
-
-  const form = await request.formData();
-  const file = form.get("image");
-  if (!file || typeof file === "string") {
-    return badRequest("missing image file field 'image'");
-  }
-
-  const text = (form.get("text") || "").toString().trim();
-  const rawKey = (form.get("key") || "").toString().trim();
-  const key = rawKey ? `reports/${rawKey}` : `reports/report_${Date.now()}.png`;
-
-  const contentType = file.type || "image/png";
-  await env.REPORTS.put(key, file.stream(), {
-    httpMetadata: { contentType },
-  });
-
-  const baseUrl = (env.PUBLIC_BASE_URL || new URL(request.url).origin).replace(/\/$/, "");
-  const imgUrl = `${baseUrl}/img/${encodeURIComponent(key)}`;
-
-  const messages = [
-    { type: "image", originalContentUrl: imgUrl, previewImageUrl: imgUrl },
-  ];
-  if (text) messages.push({ type: "text", text });
-
-  const pushed = await pushToLine(env, messages);
-  // If LINE push failed, return that error.
-  if (pushed.status !== 200) return pushed;
-
-  return ok({ ok: true, key, url: imgUrl });
-}
-
-async function handleImg(request, env) {
-  if (!env.REPORTS) return needConfig();
-
-  const u = new URL(request.url);
-  const keyEnc = u.pathname.replace(/^\/img\//, "");
-  if (!keyEnc) return notFound();
-  const key = decodeURIComponent(keyEnc);
-
-  const obj = await env.REPORTS.get(key);
-  if (!obj) return notFound();
-
-  const headers = new Headers();
-  headers.set("content-type", obj.httpMetadata?.contentType || "application/octet-stream");
-  headers.set("cache-control", "public, max-age=604800");
-  return new Response(obj.body, { headers });
-}
+/**
+ * stockbot-worker — R2画像配信 + LINE Messaging API push
+ *
+ * Endpoints:
+ *   GET  /health        設定状態の確認(トークン値は返さない)
+ *   POST /upload        multipart {file, caption?} → R2保存 → LINEへ image push
+ *   POST /  or /push    JSON {"text": "..."}       → LINEへ text push
+ *   GET  /img/<key>     R2から画像配信(HTTPS公開URL)
+ *
+ * Secrets/Vars:
+ *   LINE_TOKEN   (互換: LINE_CHANNEL_ACCESS_TOKEN)
+ *   LINE_USER_ID (互換: LINE_TO)
+ *   UPLOAD_TOKEN (互換: AUTH_TOKEN) — 任意。設定時は Authorization: Bearer 必須
+ * Bindings:
+ *   REPORTS — R2 bucket
+ */
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const pathname = url.pathname;
+    const path = url.pathname;
 
-    if (request.method === "GET") {
-      if (pathname === "/" || pathname === "/health") return ok();
-      if (pathname.startsWith("/img/")) return await handleImg(request, env);
-      return notFound();
-    }
-
-    if (request.method === "POST") {
-      const ct = request.headers.get("content-type") || "";
-      if (ct.startsWith("multipart/form-data")) {
-        return await handleUpload(request, env);
+    try {
+      if (request.method === "GET" && path === "/health") {
+        return json({
+          ok: true,
+          line_token: !!(env.LINE_TOKEN || env.LINE_CHANNEL_ACCESS_TOKEN),
+          line_to: !!(env.LINE_USER_ID || env.LINE_TO),
+          r2: !!env.REPORTS,
+          auth_required: !!(env.UPLOAD_TOKEN || env.AUTH_TOKEN),
+        });
       }
-      return await handleNotify(request, env);
-    }
 
-    return notFound();
+      if (request.method === "GET" && path.startsWith("/img/")) {
+        if (!env.REPORTS) return json({ ok: false, error: "R2 binding REPORTS 未設定" }, 500);
+        const key = decodeURIComponent(path.slice(5));
+        const obj = await env.REPORTS.get(key);
+        if (!obj) return new Response("not found", { status: 404 });
+        return new Response(obj.body, {
+          headers: {
+            "Content-Type": obj.httpMetadata?.contentType || "image/png",
+            "Cache-Control": "public, max-age=604800",
+          },
+        });
+      }
+
+      if (request.method === "POST" && path === "/upload") {
+        const authErr = checkAuth(request, env);
+        if (authErr) return authErr;
+        if (!env.REPORTS) return json({ ok: false, error: "R2 binding REPORTS 未設定" }, 500);
+
+        const form = await request.formData();
+        const file = form.get("file");
+        if (!file || typeof file === "string") {
+          return json({ ok: false, error: "multipart field 'file' が必要" }, 400);
+        }
+        const caption = form.get("caption") || "";
+        const safeName = (file.name || "report.png").replace(/[^\w.\-]/g, "_");
+        const key = `${Date.now()}_${safeName}`;
+        await env.REPORTS.put(key, file.stream(), {
+          httpMetadata: { contentType: file.type || "image/png" },
+        });
+        const imgUrl = `${url.origin}/img/${encodeURIComponent(key)}`;
+
+        const messages = [];
+        if (caption) messages.push({ type: "text", text: String(caption).slice(0, 4900) });
+        messages.push({
+          type: "image",
+          originalContentUrl: imgUrl,
+          previewImageUrl: imgUrl,
+        });
+        const line = await pushLine(env, messages);
+        return json({ ok: line.ok, url: imgUrl, key, line }, line.ok ? 200 : 502);
+      }
+
+      if (request.method === "POST" && (path === "/" || path === "/push")) {
+        const authErr = checkAuth(request, env);
+        if (authErr) return authErr;
+        const body = await request.json().catch(() => ({}));
+        const text = String(body.text || "").slice(0, 4900);
+        if (!text) return json({ ok: false, error: "text が空" }, 400);
+        const line = await pushLine(env, [{ type: "text", text }]);
+        return json({ ok: line.ok, line }, line.ok ? 200 : 502);
+      }
+
+      return json({ ok: false, error: "not found" }, 404);
+    } catch (e) {
+      return json({ ok: false, error: String(e) }, 500);
+    }
   },
 };
+
+function checkAuth(request, env) {
+  const required = env.UPLOAD_TOKEN || env.AUTH_TOKEN;
+  if (!required) return null;
+  const h = request.headers.get("Authorization") || "";
+  const tok = h.startsWith("Bearer ") ? h.slice(7) : new URL(request.url).searchParams.get("token");
+  if (tok === required) return null;
+  return json({ ok: false, error: "unauthorized" }, 401);
+}
+
+async function pushLine(env, messages) {
+  const token = env.LINE_TOKEN || env.LINE_CHANNEL_ACCESS_TOKEN;
+  const to = env.LINE_USER_ID || env.LINE_TO;
+  if (!token || !to) {
+    return { ok: false, error: "LINE_TOKEN / LINE_USER_ID 未設定" };
+  }
+  const r = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ to, messages }),
+  });
+  const body = await r.text();
+  return { ok: r.ok, status: r.status, body: body.slice(0, 300) };
+}
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
