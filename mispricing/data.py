@@ -1,8 +1,7 @@
 """OHLCV data layer — yfinance batched fetch, or synthetic data in DRYRUN.
 
-出典表記: yfinance = Yahoo Finance 系の単一ソース。v4.1の規則上、
-ここから算出した指標はすべて「未確認(単一ソース)」であり、確定判定には
-ユーザーのブローカー画面照合(独立2ソース化)が必要。
+出典表記: yfinance = Yahoo Finance 系の単一ソース。v5.0では単一ソースを許容し
+確信度は減点しないが、本命は全件「仮点灯」。確定判定にはiSPEED照合が必要。
 """
 
 from __future__ import annotations
@@ -82,18 +81,33 @@ def _mk_series(seed: int, n: int, mode: str) -> pd.DataFrame:
     drift = 0.0002
     ret = rng.normal(drift, 0.018, n)
 
-    if mode == "oversold":
-        ret[-30:] -= 0.009                      # ゆるやかな売られ過ぎ(ニュース無=E想定)
-    elif mode == "overbought":
-        ret[-25:] += 0.011
-    elif mode == "crash_event":
-        ret[-4] = -0.16                          # 直近に急落イベント(A疑い想定)
-        ret[-3:] -= 0.01
-    elif mode == "pump_event":
-        ret[-3] = 0.17
-        ret[-2:] += 0.012
-
     close = 1000.0 * np.exp(np.cumsum(ret))
+
+    if mode in ("oversold", "crash_event", "overbought", "pump_event"):
+        base = float(close[-13])
+        if mode == "oversold":
+            close[-13:-5] = base * (1.0 + np.linspace(0, 0.012, 8))
+            peak = base * 1.02
+            close[-5] = peak
+            close[-4:] = peak * np.array([0.97, 0.935, 0.90, 0.865])
+        elif mode == "crash_event":
+            close[-13:-5] = base * (1.0 + np.linspace(0, 0.01, 8))
+            peak = base * 1.012
+            close[-5] = peak
+            close[-4] = peak * 0.80                       # 単日急落(-20%)
+            close[-3:] = close[-4] * np.array([0.99, 1.00, 0.985])
+        elif mode == "overbought":
+            close[-13:-5] = base * (1.0 - np.linspace(0, 0.012, 8))
+            trough = base * 0.98
+            close[-5] = trough
+            close[-4:] = trough * np.array([1.03, 1.065, 1.10, 1.135])
+        elif mode == "pump_event":
+            close[-13:-5] = base * (1.0 - np.linspace(0, 0.01, 8))
+            trough = base * 0.988
+            close[-5] = trough
+            close[-4] = trough * 1.22                      # 単日急騰(+22%)
+            close[-3:] = close[-4] * np.array([1.01, 1.00, 1.015])
+
     o = close * (1 + rng.normal(0, 0.004, n))
     h = np.maximum(o, close) * (1 + np.abs(rng.normal(0, 0.006, n)))
     l = np.minimum(o, close) * (1 - np.abs(rng.normal(0, 0.006, n)))
@@ -101,7 +115,7 @@ def _mk_series(seed: int, n: int, mode: str) -> pd.DataFrame:
     if mode == "crash_event":
         v[-4] *= 6.0
     if mode == "pump_event":
-        v[-3] *= 6.0
+        v[-4] *= 6.0
     return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": close, "Volume": v}, index=idx)
 
 
