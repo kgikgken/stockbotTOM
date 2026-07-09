@@ -1,4 +1,4 @@
-"""Technical indicators for Gate1 (単一ソース算出指標 → 既定で未確認扱い)."""
+"""Technical indicators for Gate1 (単一ソース算出指標)."""
 
 from __future__ import annotations
 
@@ -69,6 +69,11 @@ def compute_features(df: pd.DataFrame) -> dict | None:
             return True
         return False
 
+    # 押し目/リバウンド日数: 直近10営業日の高値(安値)から何日経過したか
+    c10 = c.iloc[-11:]
+    dip_days = int(len(c10) - 1 - int(np.argmax(c10.values)))
+    rebound_days = int(len(c10) - 1 - int(np.argmin(c10.values)))
+
     adv20_jpy = float((c * v).iloc[-21:-1].mean())
     low5 = float(l.iloc[-5:].min())
     high5 = float(h.iloc[-5:].max())
@@ -91,6 +96,7 @@ def compute_features(df: pd.DataFrame) -> dict | None:
         "rsi14": rsi14, "atr14": atr14, "atr_pct": float(atr_pct),
         "vol_z": float(vol_z_now), "adv20_jpy": adv20_jpy,
         "low5": low5, "high5": high5,
+        "dip_days": dip_days, "rebound_days": rebound_days,
         "down_trend": bool(dn_trend), "up_trend": bool(up_trend),
         "reg_10pct_hit": reg_hit,
         "event_signature": event_signature,
