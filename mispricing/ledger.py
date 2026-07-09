@@ -9,36 +9,41 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-PLAN_COLS = ["取引ID", "日付", "コード", "銘柄名", "方向", "タイプ", "根拠(正規化/縮退)",
-             "トリガー実測値", "計画IN", "損切り", "第1利確(+1R)", "2R参照水準",
-             "計画R", "計画ブレンドR参考", "リスク%", "リスク%根拠", "確信度", "確信度減点履歴",
+PLAN_COLS = ["取引ID", "日付", "コード", "銘柄名", "セクター", "方向", "エンジン種別",
+             "根拠(正規化/縮退/定性)", "非ファンダ性判定", "順流/逆流/中立タグ", "セクター段階",
+             "レジームタグ", "トリガー実測値", "計画IN", "損切り", "第1利確(+1R)", "2R参照水準",
+             "計画R", "計画ブレンドR参考", "概算ネットR", "リスク%", "リスク%根拠", "確信度", "確信度減点履歴",
              "地合いスコア", "VI", "保有期間", "時間ストップN", "候補有効期限",
              "ステータス", "反証要点"]
 
 RESULT_COLS = ["取引ID", "実IN", "実決済", "実現損益", "手数料スリッページ実額",
                "実現R(加重平均)", "第1利確到達YN", "残玉エグジット理由",
-               "結果ラベル", "エグジット理由(最終)", "実保有日数", "寄りギャップ",
+               "非ファンダ群vsファンダ群", "結果ラベル", "エグジット理由(最終)", "実保有日数", "寄りギャップ",
                "ゲート0_3事後的中タグ", "確信度x結果"]
 
 REJECT_COLS = ["棄却日", "コード", "銘柄名", "ゲート", "理由", "棄却時終値",
                "N営業日後リターン%", "事後正誤タグ"]
 
 
-def write_plan_log(outdir: str, today: str, picked: list, macro: dict, cfg) -> str:
+def write_plan_log(outdir: str, today: str, picked: list, macro: dict, flow: dict, cfg) -> str:
     path = Path(outdir) / f"plan_log_{today}.csv"
     rows = []
     for i, c in enumerate(picked, 1):
         rows.append({
             "取引ID": f"{today}-{i:02d}", "日付": today, "コード": c.code, "銘柄名": c.name,
-            "方向": c.direction, "タイプ": c.mtype, "根拠(正規化/縮退)": c.basis,
+            "セクター": c.sector, "方向": c.direction, "エンジン種別": c.engine,
+            "根拠(正規化/縮退/定性)": c.basis, "非ファンダ性判定": c.nonfund,
+            "順流/逆流/中立タグ": c.ftag, "セクター段階": c.sec_stage,
+            "レジームタグ": flow.get("regime", "不明"),
             "トリガー実測値": c.trigger_text,
             "計画IN": c.entry, "損切り": c.stop, "第1利確(+1R)": c.tp1, "2R参照水準": c.ref2r,
             "計画R": 2.0, "計画ブレンドR参考": "+0.5R(第1のみ)/+1.5R(2Rトレール)",
+            "概算ネットR": round(c.net2r, 2),
             "リスク%": c.risk_pct,
             "リスク%根拠": f"確信度{c.conf}×地合い係数{macro['lot_factor']}",
             "確信度": c.conf, "確信度減点履歴": " / ".join(c.conf_trail),
             "地合いスコア": macro["score"], "VI": f"{macro['vi']:.1f}" if macro["vi"] else "欠落",
-            "保有期間": "短期スイング", "時間ストップN": c.hold_days,
+            "保有期間": "短期スイング(2〜5営業日)", "時間ストップN": c.hold_days,
             "候補有効期限": f"{c.expiry_days}営業日",
             "ステータス": "仮点灯(未確認・単一ソース)",
             "反証要点": "ゲート0/3はチャット側(パス2)で実施",
