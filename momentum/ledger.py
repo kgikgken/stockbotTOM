@@ -15,6 +15,40 @@ RESULT_COLS = ["取引ID", "実IN", "実決済", "実現損益", "実現R", "最
 
 REJECT_COLS = ["棄却日", "コード", "銘柄名", "ゲート", "理由", "棄却時終値"]
 
+POSITION_ALERT_COLS = ["日付", "コード", "銘柄名", "状態C該当", "スコア劣化", "TOB急騰",
+                       "終値", "50日線", "シャンデリア水準", "備考"]
+
+FETCH_FAILURE_COLS = ["日付", "コード", "エラー種別"]
+
+
+def append_fetch_failures(outdir: str, today: str, tickers: List[str]) -> str:
+    """指示⑬: 取得失敗銘柄を記録のみ(原因分析は別途)。"""
+    path = Path(outdir) / "momentum_fetch_failures.csv"
+    new = not path.exists()
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(FETCH_FAILURE_COLS)
+        for t in tickers:
+            w.writerow([today, t.replace(".T", ""), "取得失敗(理由不明・一括ダウンロードから欠落)"])
+    return str(path)
+
+
+def append_position_alerts(outdir: str, today: str, alerts: List[dict]) -> str:
+    path = Path(outdir) / "momentum_position_alerts.csv"
+    new = not path.exists()
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(POSITION_ALERT_COLS)
+        for a in alerts:
+            def yn(v):
+                return "Y" if v else ("?" if v is None else "N")
+            w.writerow([today, a["code"], a["name"], yn(a.get("state_c")), yn(a.get("score_drop")),
+                       yn(a.get("tob_jump")), a.get("close", ""), a.get("sma50", ""),
+                       a.get("chandelier", ""), a.get("note", "")])
+    return str(path)
+
 
 def write_plan_log(outdir: str, today: str, picked: list, regime: dict, pool_stats: dict) -> str:
     path = Path(outdir) / f"momentum_plan_log_{today}.csv"
