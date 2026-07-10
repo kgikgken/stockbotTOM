@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
-from .indicators import momentum_score, chandelier_exit_long  # noqa: F401 (re-export for report use)
+from .indicators import chandelier_exit_long  # noqa: F401 (re-export for report use)
 
 
 @dataclass
@@ -60,8 +60,9 @@ def classify_state(feat: dict, cfg) -> str | None:
     return None
 
 
-def build_candidate(row: dict, feat: dict, state: str, cfg) -> Candidate | None:
-    """状態A/Bのみ新規ロング候補化。エントリー・初期ストップ・シャンデリア水準を算出。"""
+def build_candidate(row: dict, feat: dict, state: str, score: float, cfg) -> Candidate | None:
+    """状態A/Bのみ新規ロング候補化。エントリー・初期ストップ・シャンデリア水準を算出。
+    score はプール構築時にz-score母集団全体で算出済みの総合スコア(compute_pool_scores)を渡す。"""
     if state not in ("A", "B"):
         return None
     tkr = row["ticker"]
@@ -74,7 +75,6 @@ def build_candidate(row: dict, feat: dict, state: str, cfg) -> Candidate | None:
     if risk_w <= 0 or risk_w / entry * 100 > cfg.max_risk_width_pct:
         return None
 
-    score = momentum_score(feat, cfg)
     c = Candidate(ticker=tkr, code=code, name=row.get("name", ""), sector=row.get("sector", ""),
                  market=row.get("market", "Prime"), state=state, score=score, feat=feat)
     c.entry = _round_tick(entry)
@@ -90,5 +90,6 @@ def build_candidate(row: dict, feat: dict, state: str, cfg) -> Candidate | None:
         f"出来高が平均比{feat['vol_ratio_today']:.1f}倍の裏取り(板・歩み値で確認)",
         f"ADX({feat['adx']:.0f}) — トレンド強度の参考値(閾値{cfg.adx_trend_th:.0f}は目安・厳格なゲートではない)",
         "同業種で他に強い銘柄が無いか(セクター全体の動きか個別かの確認)",
+        "公開買付(TOB)・M&A等のコーポレートアクションが出ていないか(適時開示で確認)",
     ]
     return c
