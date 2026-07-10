@@ -1,4 +1,7 @@
-name: mispricing-screen
+name: momentum-screen
+
+# 全振り運用: 実行対象を main_momentum.py に切り替え済み。
+# 歪み系(main.py・mispricing/)のコードは温存(将来の比較・再併用のための保険として削除しない)。
 
 on:
   schedule:
@@ -10,7 +13,7 @@ on:
         default: "0"
 
 permissions:
-  contents: write   # out/ の棄却台帳をコミットで永続化するため
+  contents: write   # out_momentum/ の棄却台帳をコミットで永続化するため
 
 concurrency:
   group: screen
@@ -34,23 +37,22 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Run screening
+      - name: Run momentum screening
         env:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_AUTH_TOKEN: ${{ secrets.WORKER_AUTH_TOKEN }}
           ACCOUNT_EQUITY: ${{ vars.ACCOUNT_EQUITY }}
-          NIKKEI_VI_VALUE: ${{ vars.NIKKEI_VI_VALUE }}
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
           REQUIRE_LINE_DELIVERY: "0"
-        run: python main.py
+        run: python main_momentum.py
 
-      - name: Persist ledgers (reject_ledger etc.)
+      - name: Persist ledgers (momentum_reject_ledger etc.)
         if: always()
         run: |
           git config user.name "stockbot"
           git config user.email "stockbot@users.noreply.github.com"
-          git add out/reject_ledger.csv out/result_log_template.csv || true
-          git diff --cached --quiet || git commit -m "ledger: $(date -u +%F)"
+          git add out_momentum/momentum_reject_ledger.csv out_momentum/momentum_result_log_template.csv || true
+          git diff --cached --quiet || git commit -m "momentum ledger: $(date -u +%F)"
           git push || echo "push skipped"
 
       - name: Upload report artifacts
@@ -58,5 +60,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: report-${{ github.run_id }}
-          path: out/
+          path: out_momentum/
           retention-days: 30
