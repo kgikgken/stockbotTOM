@@ -21,6 +21,7 @@ from momentum.config import load_config
 from momentum.data import fetch_ohlcv
 from momentum.regime import compute_regime
 from momentum.screen import run_screen
+from momentum.position_check import check_held_positions, backfill_entry_scores
 from momentum.report_text import build_text
 from momentum.report_png import render_png
 from momentum import ledger
@@ -39,7 +40,7 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     # ---- STEP1: レジームフィルター(絶対遵守・最優先) ----
-    regime = compute_regime(cfg)
+    regime = compute_regime(cfg, today=today)
     print(f"[1/6] レジーム: {regime.get('mode')} attack={regime.get('attack')}")
 
     # ---- data ----
@@ -50,6 +51,9 @@ def main() -> None:
     ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun)
     meta["data_warn"] = meta["data_coverage"] < cfg.data_coverage_min
     print(f"[2/6] OHLCV {meta['data_ok']}/{meta['data_total']} ({meta['data_coverage']*100:.0f}%)")
+    if meta.get("fetch_failures"):
+        ledger.append_fetch_failures(cfg.outdir, today, meta["fetch_failures"])
+        print(f"       取得失敗 {len(meta['fetch_failures'])}件をmomentum_fetch_failures.csvに記録(指示⑬)")
 
     bench_logclose = None
     if regime.get("ok"):
@@ -65,21 +69,32 @@ def main() -> None:
     print(f"[4/6] プール{res['stats']['pool_size']}銘柄 点灯{res['stats']['fired']}件 "
           f"→ 採用{res['stats']['picked']}件 state={res['stats']['state_count']}")
 
-    # ---- 既存ポジ注記 / ログ ----
+    # ---- 既存ポジ注記 / entry_score自動転記(指示⑩) / 状態C・スコア劣化・TOB監視(指示③⑥⑦⑪) / ログ ----
+    n_backfilled = backfill_entry_scores("positions.csv", res.get("eligible"), today, cfg.dryrun, cfg)
+    if n_backfilled:
+        print(f"[5.4/6] positions.csv の entry_score を{n_backfilled}件自動転記(指示⑩)")
     pos = load_positions("positions.csv")
     _, pos_note = open_risk_from_positions(pos, cfg.account_equity)
+    position_alerts = check_held_positions(pos, uni, cfg, eligible=res.get("eligible"))
+    if position_alerts:
+        ledger.append_position_alerts(cfg.outdir, today, position_alerts)
+    n_c = sum(1 for a in position_alerts if a.get("state_c"))
+    n_sd = sum(1 for a in position_alerts if a.get("score_drop"))
+    n_tob = sum(1 for a in position_alerts if a.get("tob_jump"))
+    print(f"[5.5/6] 保有銘柄チェック {len(position_alerts)}件 (状態C{n_c}/スコア劣化{n_sd}/TOB急騰{n_tob})")
+
     ledger.append_reject_ledger(cfg.outdir, today, res["rejects"])
     plan_path = ledger.write_plan_log(cfg.outdir, today, res["picked"], regime, res["pool_stats"])
     ledger.ensure_result_template(cfg.outdir)
     print(f"[5/6] ログ出力 {plan_path}")
 
     # ---- report ----
-    text = build_text(today, meta, regime, res, pos_note, cfg)
+    text = build_text(today, meta, regime, res, pos_note, cfg, position_alerts=position_alerts)
     (outdir / f"momentum_report_{today}.txt").write_text(text, encoding="utf-8")
 
     png_path = str(outdir / f"momentum_report_table_{today}.png")
     try:
-        render_png(png_path, today, meta, regime, res, pos_note, cfg)
+        render_png(png_path, today, meta, regime, res, pos_note, cfg, position_alerts=position_alerts)
         images = [png_path]
     except Exception:
         traceback.print_exc()
@@ -96,13 +111,16 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # ★指示⑮: デッドマンズスイッチ。正常終了時は通常の候補配信(0件でも実行できたことが分かる文面、
+    # main()内で既に保証済み)。異常終了時もLINEへ必ず何か通知する(詳細はログのみ・LINEには種別のみ)。
     try:
         main()
     except Exception as e:
         tb = traceback.format_exc()
-        print(tb)
+        print(tb)  # 詳細なスタックトレースはGitHub Actionsログにのみ記録
         try:
-            send_line(f"stockbotTOM(momentum) ERROR\n{type(e).__name__}: {e}\n(GitHub Actions log参照)")
+            send_line(f"⚠️stockbotTOM(momentum) 本日のスクリーニングが実行エラーで停止しました\n"
+                     f"エラー種別: {type(e).__name__}\n詳細はGitHub Actionsのログを確認してください")
         except Exception as ee:
             print(f"[WARN] LINE通知失敗: {ee}")
         raise
