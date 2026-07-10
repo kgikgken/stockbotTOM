@@ -55,7 +55,7 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
     f = F(cfg)
     alerts = [a for a in (position_alerts or [])
              if a.get("state_c") or a.get("score_drop") or a.get("tob_jump") or a.get("state_c") is None]
-    est_h = 520 + 70 + len(alerts) * 130 + len(res["picked"]) * 420 + len(res.get("watch", [])) * 120 + 360
+    est_h = 600 + 70 + 90 + len(alerts) * 130 + len(res["picked"]) * 460 + len(res.get("watch", [])) * 120 + 360
     img = Image.new("RGB", (W, est_h), "white")
     d = ImageDraw.Draw(img)
     y = MARGIN
@@ -73,14 +73,17 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
     y += 6
 
     attack = regime.get("attack", False)
-    d.rounded_rectangle([MARGIN, y, W - MARGIN, y + 92], 14,
+    detail_lines = _wrap(d, regime.get("detail", regime.get("reason", "")), f(18), W - 2 * MARGIN - 40)
+    box_h = 60 + len(detail_lines) * 25
+    d.rounded_rectangle([MARGIN, y, W - MARGIN, y + box_h], 14,
                         fill=BG_ATTACK if attack else BG_DEFENSE,
                         outline=GREEN if attack else RED, width=3)
     text(MARGIN + 20, y + 8, regime.get("mode", "-"), 28, INK, True)
-    for ln in _wrap(d, regime.get("detail", regime.get("reason", "")), f(18), W - 2 * MARGIN - 40):
-        text(MARGIN + 20, y + 50, ln, 18, SUB)
-        break
-    y += 110
+    yy = y + 50
+    for ln in detail_lines:
+        text(MARGIN + 20, yy, ln, 18, SUB)
+        yy += 25
+    y += box_h + 18
 
     if alerts:
         y = text(MARGIN, y, "保有銘柄アラート", 22, INK, True)
@@ -130,6 +133,17 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
              19, RED, True)
         y += 64
 
+    if st.get("regime_caution") and res["picked"]:
+        cau_lines = _wrap(d, f"⚠相場全体が防御モード。個別シグナルの期待値はレジーム条件付き(Hanauer 2014等)。"
+                          f"銘柄選定は通常どおりだが通常より慎重に。", f(18, True), W - 2 * MARGIN - 32)
+        cau_h = 12 + len(cau_lines) * 24 + 8
+        d.rounded_rectangle([MARGIN, y, W - MARGIN, y + cau_h], 10, fill=(255, 246, 225), outline=GOLD, width=2)
+        yy = y + 12
+        for ln in cau_lines:
+            text(MARGIN + 14, yy, ln, 18, GOLD, True)
+            yy += 24
+        y += cau_h + 12
+
     state_col = {"A": GREEN, "B": GOLD}
     card_textw = W - 2 * MARGIN - 44
     for i, c in enumerate(res["picked"], 1):
@@ -172,7 +186,7 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
         y += ch + 16
 
     if not res["picked"]:
-        reason = st.get("blocked_reason") or "該当なし — ゼロ件はゼロ件。"
+        reason = "該当なし — ゼロ件はゼロ件。"
         d.rounded_rectangle([MARGIN, y, W - MARGIN, y + 90], 14, fill=BG_CARD, outline=LINE, width=2)
         for ln in _wrap(d, reason, f(20, True), W - 2 * MARGIN - 40):
             text(MARGIN + 20, y + 26, ln, 20, SUB, True)
