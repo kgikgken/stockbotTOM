@@ -51,9 +51,11 @@ def _wrap(d, text, font, maxw):
 
 
 def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
-               pos_note: str, cfg) -> str:
+               pos_note: str, cfg, position_alerts: list[dict] | None = None) -> str:
     f = F(cfg)
-    est_h = 520 + len(res["picked"]) * 420 + 360
+    alerts = [a for a in (position_alerts or [])
+             if a.get("state_c") or a.get("score_drop") or a.get("tob_jump") or a.get("state_c") is None]
+    est_h = 520 + 70 + len(alerts) * 130 + len(res["picked"]) * 420 + len(res.get("watch", [])) * 120 + 360
     img = Image.new("RGB", (W, est_h), "white")
     d = ImageDraw.Draw(img)
     y = MARGIN
@@ -80,16 +82,53 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
         break
     y += 110
 
+    if alerts:
+        y = text(MARGIN, y, "保有銘柄アラート", 22, INK, True)
+        for a in alerts:
+            if a.get("state_c") or (a.get("tob_jump") and a.get("tob_stage") == "confirmed"):
+                tag_col = RED
+                tag = "状態C" if a.get("state_c") else "TOB疑い(要確認)"
+            elif a.get("tob_jump") and a.get("tob_stage") == "day0":
+                tag_col = GOLD
+                tag = "急騰検知(参考)"
+            elif a.get("score_drop"):
+                tag_col = GOLD
+                tag = "スコア劣化"
+            else:
+                tag_col = GOLD
+                tag = "要確認"
+            lines = _wrap(d, f"⚠{tag} {a['code']} {a['name']}: {a['note']}", f(17, True), W - 2 * MARGIN - 32)
+            box_h = 16 + len(lines) * 23 + 10
+            d.rounded_rectangle([MARGIN, y, W - MARGIN, y + box_h], 10, fill=(255, 246, 240), outline=tag_col, width=2)
+            yy = y + 12
+            for ln in lines:
+                text(MARGIN + 14, yy, ln, 17, tag_col, True)
+                yy += 23
+            y += box_h + 8
+        y += 4
+
     cov = meta.get("data_coverage", 0.0)
     y = text(MARGIN, y, f"データ {meta.get('data_ok',0)}/{meta.get('data_total',0)}({cov*100:.0f}%) "
              f"{meta.get('source','')}", 18, SUB)
     y = text(MARGIN, y, "単一ソース(yfinance)。本命は全件仮点灯 — 確定はiSPEED照合後。", 18, GOLD)
+    if meta.get("data_warn"):
+        y = text(MARGIN, y, f"⚠ データ被覆率不足(<{cfg.data_coverage_min*100:.0f}%) — プール精度に影響の可能性", 20, RED, True)
     st = res["stats"]
     sc = st.get("state_count", {})
-    y = text(MARGIN, y, f"候補プール{st.get('pool_size',0)}銘柄 → 状態A{sc.get('A',0)}/B{sc.get('B',0)}/C{sc.get('C',0)} "
+    tob_note = f" (TOB疑い{st['tob_excluded']}件除外済)" if st.get("tob_excluded") else ""
+    y = text(MARGIN, y, f"候補プール{st.get('pool_size',0)}銘柄{tob_note} → 状態A{sc.get('A',0)}/B{sc.get('B',0)}/C{sc.get('C',0)} "
              f"→ アクション候補{st.get('picked',0)}件(上限{cfg.max_positions}銘柄・1業種1銘柄)",
              18, SUB)
+    if st.get("top_sectors"):
+        sec_txt = " / ".join(f"{s}{n}" for s, n in st["top_sectors"])
+        y = text(MARGIN, y, f"(指示⑨診断) プール業種上位{cfg.sector_diag_top_n}: {sec_txt}", 16, SUB)
     y = hline(y + 4)
+
+    if res["picked"] or res.get("watch"):
+        d.rounded_rectangle([MARGIN, y, W - MARGIN, y + 52], 10, fill=(255, 240, 240), outline=RED, width=2)
+        text(MARGIN + 16, y + 12, "[要確認] iSPEEDで適時開示(TOB/M&A/大量保有報告等)を確認するまで発注不可",
+             19, RED, True)
+        y += 64
 
     state_col = {"A": GREEN, "B": GOLD}
     card_textw = W - 2 * MARGIN - 44
@@ -139,6 +178,17 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
             text(MARGIN + 20, y + 26, ln, 20, SUB, True)
             break
         y += 106
+
+    if res.get("watch"):
+        BG_WATCH = (245, 247, 250)
+        y = text(MARGIN, y, "参考層(本命の次点)", 22, INK, True)
+        for c in res["watch"]:
+            d.rounded_rectangle([MARGIN, y, W - MARGIN, y + 96], 12, fill=BG_WATCH, outline=LINE, width=2)
+            d.text((MARGIN + 16, y + 10), f"{c.code} {c.name}  [状態{c.state}]", font=f(20, True), fill=INK)
+            d.text((MARGIN + 16, y + 42), f"{c.sector} / スコア{c.score:.1f}", font=f(17), fill=SUB)
+            d.text((MARGIN + 16, y + 68), "監視のみ・直接エントリーは規律違反(3銘柄枠or同業種枠が空けば昇格)",
+                   font=f(17, True), fill=GOLD)
+            y += 108
 
     y = hline(y + 2)
     y = text(MARGIN, y, f"総リスク: 新規計 {st['total_risk']:.2f}% / 上限 {st['risk_cap']:.1f}%   |   {pos_note}", 19, INK)
