@@ -46,12 +46,14 @@ jobs:
           REQUIRE_LINE_DELIVERY: "0"
         run: python main_momentum.py
 
-      - name: Persist ledgers (momentum_reject_ledger etc.)
+      - name: Persist ledgers (momentum_reject_ledger, regime history, etc.)
         if: always()
         run: |
           git config user.name "stockbot"
           git config user.email "stockbot@users.noreply.github.com"
-          git add out_momentum/momentum_reject_ledger.csv out_momentum/momentum_result_log_template.csv || true
+          git add out_momentum/momentum_reject_ledger.csv out_momentum/momentum_result_log_template.csv \
+                  out_momentum/momentum_position_alerts.csv out_momentum/momentum_fetch_failures.csv \
+                  momentum_regime_history.csv positions.csv || true
           git diff --cached --quiet || git commit -m "momentum ledger: $(date -u +%F)"
           git push || echo "push skipped"
 
