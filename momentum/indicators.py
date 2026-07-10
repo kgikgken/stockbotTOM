@@ -105,8 +105,82 @@ def compute_momentum_features(df: pd.DataFrame, bench_logclose: pd.Series | None
     }
 
 
+def tob_suspect(df: pd.DataFrame, cfg) -> tuple[bool, str]:
+    """公開買付(TOB)・M&A等のコーポレートアクション疑いを検出する簡易ヒューリスティック.
+
+    典型的なTOBの値動き: 発表日に単日で大きく跳ね上がり(買付価格近辺まで一気に上昇)、
+    その後は成立を織り込んで買付価格に張り付き、ボラティリティが急激に低下する。
+    これは通常のモメンタム(方向感を伴う継続的な値動き)とは性質が異なり、
+    上値・下値とも買付条件に規定されるため、ATRベースの損切り・トレール設計が機能しない。
+    価格データのみでの検出のため確定的ではなく、あくまで「疑い」の除外(要人間確認)。
+    """
+    c = df["Close"].dropna()
+    if len(c) < cfg.tob_lookback_days + 40:
+        return False, ""
+    lr = np.log(c / c.shift(1)).dropna()
+    window = lr.iloc[-cfg.tob_lookback_days:]
+    jump_idx = window.abs().idxmax()
+    jump_ret = float(window.loc[jump_idx])
+    if jump_ret < cfg.tob_jump_threshold:
+        return False, ""
+
+    days_since = int((c.index >= jump_idx).sum()) - 1
+    if days_since < 3:
+        return False, ""  # ジャンプ直後すぎてボラティリティ収束を判定できない
+
+    post = lr.loc[lr.index >= jump_idx].iloc[1:]  # ジャンプ当日自体は除く
+    if len(post) < 3:
+        return False, ""
+    post_vol = float(post.std(ddof=0))
+
+    pre = lr.loc[lr.index < jump_idx].iloc[-40:]
+    if len(pre) < 15:
+        return False, ""
+    pre_vol = float(pre.std(ddof=0))
+
+    if pre_vol > 1e-9 and post_vol < pre_vol * cfg.tob_vol_collapse_ratio:
+        return True, (f"{days_since}営業日前に単日{jump_ret*100:+.0f}%の急騰後、"
+                      f"変動率が平常時の{post_vol/pre_vol*100:.0f}%に急低下"
+                      "(公開買付/M&A等で価格が固定されている疑い・要確認)")
+    return False, ""
+
+
+def zscore_list(values: list) -> list:
+    """母集団全体でz-score化。NaN/欠損は個別にNaNのまま返す(呼び出し側でその項を除外)。
+    母数が少ない・無分散の場合は中立化(全て0)して数字の捏造を避ける。"""
+    arr = np.array([v for v in values if v is not None and not (isinstance(v, float) and np.isnan(v))])
+    if len(arr) < 5 or float(arr.std(ddof=0)) < 1e-12:
+        return [0.0 if (v is not None and not (isinstance(v, float) and np.isnan(v))) else np.nan for v in values]
+    mu, sd = float(arr.mean()), float(arr.std(ddof=0))
+    return [np.nan if (v is None or (isinstance(v, float) and np.isnan(v))) else (v - mu) / sd for v in values]
+
+
+def compute_pool_scores(items: list, cfg) -> list:
+    """items: [{'row':dict,'feat':dict}, ...] 流動性・TOB除外を通過した全銘柄。
+    3つの連続値(12-1モメンタム・52週高値近接度・対TOPIX相対強度)を母集団z-score化してから
+    加重合成する(指示①: 素点のまま合成すると単位が揃わず名目上の重みと実際の寄与度がズレるため)。
+    トレンド整列ボーナスは二値のためz化対象外、素点のまま維持。"""
+    z_mom = zscore_list([it["feat"]["mom_12_1"] for it in items])
+    z_h52 = zscore_list([it["feat"]["high52w_proximity"] for it in items])
+    z_rs = zscore_list([it["feat"]["rel_strength"] for it in items])
+
+    for it, zm, zh, zr in zip(items, z_mom, z_h52, z_rs):
+        parts = []
+        if not (isinstance(zm, float) and np.isnan(zm)):
+            parts.append((zm, cfg.w_mom_12_1))
+        if not (isinstance(zh, float) and np.isnan(zh)):
+            parts.append((zh, cfg.w_high52w))
+        if not (isinstance(zr, float) and np.isnan(zr)):
+            parts.append((zr, cfg.w_relstrength))
+        parts.append((1.0 if it["feat"]["trend_align"] else 0.0, cfg.w_trend_align))
+        total_w = sum(w for _, w in parts)
+        it["score"] = (sum(v * w for v, w in parts) / total_w) if total_w > 0 else float("-inf")
+    return items
+
+
 def momentum_score(feat: dict, cfg) -> float:
-    """候補プール選定用の総合スコア(z化はプール内で相対的に行うため、ここでは素点)。"""
+    """単銘柄の簡易スコア(母集団z化ができない文脈=保有銘柄チェック等でのフォールバック用)。
+    候補プール選定の主経路は compute_pool_scores を使うこと。"""
     parts = []
     if not (feat["mom_12_1"] is None or np.isnan(feat["mom_12_1"])):
         parts.append(("mom_12_1", feat["mom_12_1"] * 100, cfg.w_mom_12_1))
