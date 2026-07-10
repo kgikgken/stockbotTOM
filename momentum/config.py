@@ -46,7 +46,13 @@ class Config:
     # --- ★ポジション構成のハード制約(ユーザー明示指定) ---
     max_positions: int = field(default_factory=lambda: _i("MOM_MAX_POSITIONS", 3))
     max_per_sector: int = field(default_factory=lambda: _i("MOM_MAX_PER_SECTOR", 1))
+    max_watch: int = field(default_factory=lambda: _i("MOM_MAX_WATCH", 2))  # 本命3+参考2=表示5
     risk_pct_fixed: float = field(default_factory=lambda: _f("MOM_RISK_PCT_FIXED", 0.5))
+    # ★指示②(既定OFF): "fixed"=ユーザー指定のハード制約どおり固定0.5%を維持。
+    # "atr_scaled"に切り替えるとATR%に応じて0.5%を可変化する(要ユーザー確認の上で有効化すること)。
+    sizing_mode: str = field(default_factory=lambda: os.getenv("MOM_SIZING_MODE", "fixed"))
+    atr_scale_min: float = field(default_factory=lambda: _f("ATR_SCALE_MIN", 0.6))
+    atr_scale_max: float = field(default_factory=lambda: _f("ATR_SCALE_MAX", 1.5))
     total_risk_cap: float = field(default_factory=lambda: _f("TOTAL_RISK_CAP", 2.0))
     account_equity: float = field(default_factory=lambda: _f("ACCOUNT_EQUITY", 0.0))
     min_exec_jpy: float = field(default_factory=lambda: _f("MIN_EXEC_JPY", 1.0e6))
@@ -54,7 +60,7 @@ class Config:
     # --- STEP1: レジームフィルター(TOPIX、絶対遵守) ---
     regime_ticker_primary: str = field(default_factory=lambda: os.getenv("REGIME_TICKER", "1306.T"))
     regime_ticker_fallback: str = field(default_factory=lambda: os.getenv("REGIME_TICKER_FALLBACK", "^N225"))
-    regime_sma_days: int = field(default_factory=lambda: _i("REGIME_SMA_DAYS", 200))
+    regime_sma_days: int = field(default_factory=lambda: _i("REGIME_SMA_DAYS", 150))  # 指示⑤a: 200→150(反応速度優先)
     regime_mom_days: int = field(default_factory=lambda: _i("REGIME_MOM_DAYS", 252))
 
     # --- STEP2: 候補プール(広く維持) ---
@@ -82,6 +88,28 @@ class Config:
     donchian_days: int = field(default_factory=lambda: _i("DONCHIAN_DAYS", 20))
     # 状態C(流出)
     breakdown_sma: int = field(default_factory=lambda: _i("BREAKDOWN_SMA", 50))
+
+    # --- TOB/コーポレートアクション疑いの検出(価格ヒューリスティック) ---
+    tob_lookback_days: int = field(default_factory=lambda: _i("TOB_LOOKBACK_DAYS", 90))
+    tob_jump_threshold: float = field(default_factory=lambda: _f("TOB_JUMP_THRESHOLD", 0.15))
+    tob_vol_collapse_ratio: float = field(default_factory=lambda: _f("TOB_VOL_COLLAPSE_RATIO", 0.35))
+
+    # --- 保有銘柄監視(指示⑥⑦) ---
+    score_drop_sd_threshold: float = field(default_factory=lambda: _f("SCORE_DROP_SD_THRESHOLD", 1.0))
+    position_tob_jump_threshold: float = field(default_factory=lambda: _f("POSITION_TOB_JUMP_THRESHOLD", 0.15))
+    position_tob_confirm_days: int = field(default_factory=lambda: _i("POSITION_TOB_CONFIRM_DAYS", 3))
+    position_tob_baseline_days: int = field(default_factory=lambda: _i("POSITION_TOB_BASELINE_DAYS", 20))
+
+    # --- entry_score自動転記の信頼性ガード(指示⑭) ---
+    entry_score_max_gap_bdays: int = field(default_factory=lambda: _i("ENTRY_SCORE_MAX_GAP_BDAYS", 2))
+
+    # --- レジーム非対称ヒステリシス(指示⑧) ---
+    regime_confirm_days: int = field(default_factory=lambda: _i("REGIME_CONFIRM_DAYS", 2))
+    regime_history_path: str = field(default_factory=lambda: os.getenv(
+        "REGIME_HISTORY_PATH", "momentum_regime_history.csv"))
+
+    # --- z-score業種偏り診断(指示⑨・診断のみ、スコア式は変更しない) ---
+    sector_diag_top_n: int = field(default_factory=lambda: _i("SECTOR_DIAG_TOP_N", 5))
 
     # --- 出口設計:シャンデリア・トレーリング + 初期ストップ ---
     atr_period: int = field(default_factory=lambda: _i("ATR_PERIOD", 22))
