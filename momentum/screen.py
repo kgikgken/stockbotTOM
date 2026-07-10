@@ -3,8 +3,10 @@
 ポジション構成のハード制約(ユーザー明示指定・裁量による例外なし):
 - 実保有は最大3銘柄
 - 同一業種は1銘柄まで
-- リスク%は確信度に関わらず固定0.5%
-- レジームが防御モードなら新規は例外なくゼロ
+- リスク%は確信度に関わらず固定0.5%(レジームに関わらず変更しない・ユーザー明示指定)
+- レジームが防御モードでも新規エントリーはブロックしない(ユーザー判断で撤廃)。
+  個別シグナルに期待値があるという前提で銘柄選定は通常どおり実行し、防御モード中は
+  候補・レポートに注意フラグを付けるのみ(警告に留め、機械的な足切りはしない)。
 """
 
 from __future__ import annotations
@@ -92,47 +94,50 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
     overflow: List[Candidate] = []
     sector_used: Dict[str, int] = {}
     rejects: List[dict] = list(tob_rejects)
-    blocked_reason = None
+    regime_caution = None
 
+    # ★変更: レジーム防御モードはもはや新規エントリーの機械的ブロックではない(ユーザー判断で撤廃)。
+    # 銘柄自身の状態A/Bシグナルに期待値があるという前提で、位置構築(3銘柄上限・セクター分散・
+    # 固定リスク%)は通常どおり実行する。防御モード中は各候補に注意フラグを付け、
+    # レポート全体にも警告バナーを出す(リスク%は縮小しない・ユーザー明示指定)。
     if not regime.get("attack", False):
-        blocked_reason = f"レジーム防御モードにつき新規エントリー全停止({regime.get('detail','')})"
-        for c in fired:
-            rejects.append({"code": c.code, "name": c.name, "stage": "レジーム",
-                            "reason": blocked_reason, "close": round(c.feat["close"], 1)})
-    else:
-        for c in fired:
-            if len(picked) >= cfg.max_positions:
-                rejects.append({"code": c.code, "name": c.name, "stage": "上限",
-                                "reason": f"実保有上限{cfg.max_positions}銘柄に到達 → 参考層",
+        regime_caution = f"レジーム防御モード({regime.get('detail','')}) — 相場全体の地合いに注意。銘柄選定自体は通常どおり実行"
+
+    for c in fired:
+        if regime_caution:
+            c.flags.append("⚠相場全体が防御モード。個別シグナルの期待値はレジーム条件付きである点に留意(通常より慎重に)")
+        if len(picked) >= cfg.max_positions:
+            rejects.append({"code": c.code, "name": c.name, "stage": "上限",
+                            "reason": f"実保有上限{cfg.max_positions}銘柄に到達 → 参考層",
+                            "close": round(c.feat["close"], 1)})
+            overflow.append(c)
+            continue
+        n_sector = sector_used.get(c.sector, 0)
+        if n_sector >= cfg.max_per_sector:
+            rejects.append({"code": c.code, "name": c.name, "stage": "セクター分散",
+                            "reason": f"同一業種({c.sector})は{cfg.max_per_sector}銘柄まで → 参考層",
+                            "close": round(c.feat["close"], 1)})
+            overflow.append(c)
+            continue
+
+        c.risk_pct = cfg.risk_pct_fixed
+        if cfg.sizing_mode == "atr_scaled" and median_atr_pct:
+            this_atr_pct = c.feat["atr"] / c.feat["close"] * 100 if c.feat["close"] > 0 else median_atr_pct
+            factor = median_atr_pct / this_atr_pct if this_atr_pct > 0 else 1.0
+            factor = max(cfg.atr_scale_min, min(cfg.atr_scale_max, factor))
+            c.risk_pct = cfg.risk_pct_fixed * factor
+            c.flags.append(f"ATR連動サイジング: 基準ATR%比 係数{factor:.2f}倍(指示②・確認要)")
+        if cfg.account_equity > 0:
+            risk_amount = cfg.account_equity * c.risk_pct / 100
+            c.shares = int(risk_amount / c.risk_w // 100 * 100)
+            if c.shares * c.entry < cfg.min_exec_jpy:
+                rejects.append({"code": c.code, "name": c.name, "stage": "サイジング",
+                                "reason": f"サイズ過小(≈{c.shares*c.entry/1e4:.0f}万円)につき見送り",
                                 "close": round(c.feat["close"], 1)})
-                overflow.append(c)
-                continue
-            n_sector = sector_used.get(c.sector, 0)
-            if n_sector >= cfg.max_per_sector:
-                rejects.append({"code": c.code, "name": c.name, "stage": "セクター分散",
-                                "reason": f"同一業種({c.sector})は{cfg.max_per_sector}銘柄まで → 参考層",
-                                "close": round(c.feat["close"], 1)})
-                overflow.append(c)
                 continue
 
-            c.risk_pct = cfg.risk_pct_fixed
-            if cfg.sizing_mode == "atr_scaled" and median_atr_pct:
-                this_atr_pct = c.feat["atr"] / c.feat["close"] * 100 if c.feat["close"] > 0 else median_atr_pct
-                factor = median_atr_pct / this_atr_pct if this_atr_pct > 0 else 1.0
-                factor = max(cfg.atr_scale_min, min(cfg.atr_scale_max, factor))
-                c.risk_pct = cfg.risk_pct_fixed * factor
-                c.flags.append(f"ATR連動サイジング: 基準ATR%比 係数{factor:.2f}倍(指示②・確認要)")
-            if cfg.account_equity > 0:
-                risk_amount = cfg.account_equity * c.risk_pct / 100
-                c.shares = int(risk_amount / c.risk_w // 100 * 100)
-                if c.shares * c.entry < cfg.min_exec_jpy:
-                    rejects.append({"code": c.code, "name": c.name, "stage": "サイジング",
-                                    "reason": f"サイズ過小(≈{c.shares*c.entry/1e4:.0f}万円)につき見送り",
-                                    "close": round(c.feat["close"], 1)})
-                    continue
-
-            picked.append(c)
-            sector_used[c.sector] = n_sector + 1
+        picked.append(c)
+        sector_used[c.sector] = n_sector + 1
 
     watch = overflow[: cfg.max_watch]
 
@@ -153,7 +158,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         "rejected": len(rejects),
         "total_risk": total_risk,
         "risk_cap": cfg.total_risk_cap,
-        "blocked_reason": blocked_reason,
+        "regime_caution": regime_caution,
     }
     return {"picked": picked, "watch": watch, "rejects": rejects, "stats": stats,
             "pool_stats": pool_stats, "eligible": eligible}
