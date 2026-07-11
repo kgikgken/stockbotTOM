@@ -26,13 +26,14 @@ def _mk_series_swing(seed: int, n: int, mode: str) -> pd.DataFrame:
     idx = pd.bdate_range(end=end, periods=n)
 
     if mode == "low_turnover_oversold":
-        # 低〜中回転率(出来高少なめ)。決定的な緩やかな上昇トレンド+直近5日で業種内相対に売られ過ぎ
+        # 低〜中回転率(出来高少なめ)。決定的な緩やかな上昇トレンド+直近5日で業種内相対に売られ過ぎ、
+        # ただし直近2日ははっきり反発(bounce_confirmedの要件=2日前より高値で引ける、を満たす形)
         t = np.arange(n)
         trend = 1000.0 * np.exp(0.0003 * t)
         close = trend * (1 + rng.normal(0, 0.006, n))
         v = rng.integers(500_000, 800_000, n).astype(float)  # 低回転率(ただし流動性フィルター5億円は超える水準)
         base = float(close[-6])
-        close[-5:] = base * np.linspace(1.0, 0.93, 5)  # 直近5日で-7%程度の急な押し目
+        close[-5:] = base * np.array([1.0, 0.970, 0.935, 0.945, 0.960])  # 3日下押し→直近2日で反発
     elif mode == "high_turnover_gap":
         # 高回転率(出来高多め)。平常運転+直近2日以内に決算ギャップ想定の単日急騰+出来高急増
         ret = rng.normal(0.0002, 0.014, n)
@@ -75,6 +76,10 @@ def _mk_series_swing(seed: int, n: int, mode: str) -> pd.DataFrame:
     o = close * (1 + rng.normal(0, 0.004, n))
     h = np.maximum(o, close) * (1 + np.abs(rng.normal(0, 1, n)) * hl_scale)
     l = np.minimum(o, close) * (1 - np.abs(rng.normal(0, 1, n)) * hl_scale)
+    if mode == "low_turnover_oversold":
+        o[-1] = close[-1] * 0.993
+        l[-1] = close[-1] * 0.988
+        h[-1] = close[-1] * 1.003
     return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": close, "Volume": v}, index=idx)
 
 
