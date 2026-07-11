@@ -181,14 +181,46 @@ def zscore_list(values: list) -> list:
     return [np.nan if (v is None or (isinstance(v, float) and np.isnan(v))) else (v - mu) / sd for v in values]
 
 
+def compute_sector_strength(items: list, cfg) -> dict:
+    """各業種の代表モメンタムを、構成銘柄の対TOPIX相対強度の中央値(価格データのみ)で算出し、
+    業種間でz-score化して返す({セクター名: z値})。
+
+    業種指数そのものは持たないため、構成銘柄の等ウェイト代理値として計算する
+    (歪み系の資金循環マップ「業種指数=構成銘柄等ウェイト代理」と同じ考え方)。
+    ニュース・決算等は一切読まない。「なぜ強いか」ではなく「価格上、強いかどうか」のみ検出する。
+    構成銘柄が少なすぎる業種(既定3銘柄未満)は代表値として使わない(少数銘柄のノイズ排除)。
+    """
+    by_sector: dict = {}
+    for it in items:
+        sec = it["row"].get("sector") or "不明"
+        rs = it["feat"]["rel_strength"]
+        if rs is not None and not (isinstance(rs, float) and np.isnan(rs)):
+            by_sector.setdefault(sec, []).append(rs)
+
+    sector_medians = {sec: float(np.median(vals)) for sec, vals in by_sector.items()
+                      if len(vals) >= cfg.sector_strength_min_members}
+    if len(sector_medians) < 3:
+        return {}  # 業種数が少なすぎてz化しても意味がない
+
+    secs = list(sector_medians.keys())
+    arr = np.array([sector_medians[s] for s in secs])
+    sd = float(arr.std(ddof=0))
+    if sd < 1e-12:
+        return {s: 0.0 for s in secs}
+    mu = float(arr.mean())
+    return {s: (sector_medians[s] - mu) / sd for s in secs}
+
+
 def compute_pool_scores(items: list, cfg) -> list:
     """items: [{'row':dict,'feat':dict}, ...] 流動性・TOB除外を通過した全銘柄。
     3つの連続値(12-1モメンタム・52週高値近接度・対TOPIX相対強度)を母集団z-score化してから
     加重合成する(指示①: 素点のまま合成すると単位が揃わず名目上の重みと実際の寄与度がズレるため)。
-    トレンド整列ボーナスは二値のためz化対象外、素点のまま維持。"""
+    トレンド整列ボーナスは二値のためz化対象外、素点のまま維持。
+    ★セクター強度(価格データのみの機械的加点)を第5要素として追加。"""
     z_mom = zscore_list([it["feat"]["mom_12_1"] for it in items])
     z_h52 = zscore_list([it["feat"]["high52w_proximity"] for it in items])
     z_rs = zscore_list([it["feat"]["rel_strength"] for it in items])
+    sector_z = compute_sector_strength(items, cfg)
 
     for it, zm, zh, zr in zip(items, z_mom, z_h52, z_rs):
         parts = []
@@ -199,6 +231,11 @@ def compute_pool_scores(items: list, cfg) -> list:
         if not (isinstance(zr, float) and np.isnan(zr)):
             parts.append((zr, cfg.w_relstrength))
         parts.append((1.0 if it["feat"]["trend_align"] else 0.0, cfg.w_trend_align))
+        sec = it["row"].get("sector") or "不明"
+        sz = sector_z.get(sec)
+        if sz is not None:
+            parts.append((sz, cfg.w_sector_strength))
+        it["sector_strength_z"] = sz
         total_w = sum(w for _, w in parts)
         it["score"] = (sum(v * w for v, w in parts) / total_w) if total_w > 0 else float("-inf")
     return items
