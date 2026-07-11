@@ -73,6 +73,9 @@ class Config:
     w_high52w: float = field(default_factory=lambda: _f("W_HIGH52W", 0.25))
     w_relstrength: float = field(default_factory=lambda: _f("W_RELSTRENGTH", 0.25))
     w_trend_align: float = field(default_factory=lambda: _f("W_TREND_ALIGN", 0.10))
+    # ★セクター強度加点(新規・価格データのみで機械的に算出。ニュース等は使わない)
+    w_sector_strength: float = field(default_factory=lambda: _f("W_SECTOR_STRENGTH", 0.15))
+    sector_strength_min_members: int = field(default_factory=lambda: _i("SECTOR_STRENGTH_MIN_MEMBERS", 3))
 
     # --- STEP3: 3状態分類 ---
     adx_trend_th: float = field(default_factory=lambda: _f("ADX_TREND_TH", 25.0))
