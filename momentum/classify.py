@@ -46,16 +46,32 @@ def _round_tick(p: float) -> float:
 
 
 def classify_state(feat: dict, cfg) -> str | None:
-    """A / B / C / None(いずれでもない)を返す。優先順位: C(流出) > B(初動) > A(継続)。"""
+    """A / B / C / None(いずれでもない)を返す。優先順位: C(流出) > B(初動) > A(継続)。
+
+    状態Aの判定基準は調査レポート(2026-07-11)を反映して精緻化済み:
+    ①非対称な押し目ゾーン(MAの上+2.5%〜下-5%) ②深さ上限(ATR×3以内 かつ 50日線-10%以内)
+    ③継続期間上限(スイング高値から20営業日以内) ④反発確認(CLV≥0.5相当) ⑤健全性(52週高値の75%以上)
+    のいずれも満たす場合のみ状態A。旧来の対称±2.5%・深さ無制限・期間無制限からの精緻化。
+    """
     if feat["breakdown"]:
         return "C"
     if feat["vcp_now"] and feat["close"] > feat["donchian_prev"] \
             and feat["vol_ratio_today"] >= cfg.vcp_breakout_vol_mult:
         return "B"
-    tol = cfg.pullback_tolerance_pct / 100
-    near_fast = abs(feat["close"] / feat["sma10"] - 1) <= tol
-    near_slow = abs(feat["close"] / feat["sma20"] - 1) <= tol
-    if feat["trend_align"] and (near_fast or near_slow):
+
+    # ①非対称な押し目ゾーン(20日線基準。上+2.5%〜下-5%)
+    ratio20 = feat["close"] / feat["sma20"] - 1
+    in_zone = (-cfg.pullback_lower_pct / 100) <= ratio20 <= (cfg.pullback_upper_pct / 100)
+    # ②深さ上限(スイング高値からATR×3以内、かつ50日線の-10%を下回らない)
+    depth_ok = feat["pullback_depth_atr"] <= cfg.pullback_depth_atr_mult
+    ma50_floor_ok = feat["close"] >= feat["sma50"] * (1 - cfg.pullback_ma50_floor_pct / 100)
+    # ③継続期間上限(スイング高値から20営業日以内)
+    duration_ok = feat["days_since_swing_high"] <= cfg.pullback_max_duration_days
+    # ⑤健全性(52週高値の75%以上。George & Hwang 2004、モメンタムクラッシュのloser側除外)
+    health_ok = feat["high52w_proximity"] >= cfg.health_high52w_min
+
+    if (feat["trend_align"] and in_zone and depth_ok and ma50_floor_ok and duration_ok
+            and health_ok and feat.get("bounce_confirmed")):
         return "A"
     return None
 
@@ -83,7 +99,11 @@ def build_candidate(row: dict, feat: dict, state: str, score: float, cfg) -> Can
     c.risk_w = risk_w
 
     if state == "A":
-        c.flags.append("押し目買い: 10/20日線付近での反発を確認してからの発注を推奨")
+        c.flags.append(f"押し目買い(精緻化基準): 20日線の上+{cfg.pullback_upper_pct:.1f}%〜下-{cfg.pullback_lower_pct:.1f}%・"
+                      f"深さATR×{feat['pullback_depth_atr']:.1f}(上限{cfg.pullback_depth_atr_mult:.1f})・"
+                      f"経過{feat['days_since_swing_high']}営業日(上限{cfg.pullback_max_duration_days})・"
+                      f"52週高値比{feat['high52w_proximity']*100:.0f}%・反発確認済み、を全て満たす")
+        c.flags.append("⚠寄り付きで大きく上に窓が開いていたら追撃しない(この水準からの反発という前提が崩れる)")
     else:
         c.flags.append("ブレイク当日: 寄り付き直後の値動きで再確認してから発注(ダマシ注意)")
     c.checks = [
