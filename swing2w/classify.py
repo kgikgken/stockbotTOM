@@ -90,8 +90,9 @@ def classify_engine_r(item: dict, sector_z: dict, cfg) -> Candidate | None:
     if not (ma50_ok or atr_ok):
         return None
 
-    # 強化反発確認: CLV相当(bounce_confirmed) かつ 前日高値を上抜け(bounce_confirmed_strong)
-    if not (feat.get("bounce_confirmed") and feat.get("bounce_confirmed_strong")):
+    # 強化反発確認: CLV相当(bounce_confirmed) または 前日高値を上抜け(bounce_confirmed_strong)。
+    # ★両方AND必須は絞り込みすぎと判明、いずれか一方で十分とするOR条件に緩和
+    if not (feat.get("bounce_confirmed") or feat.get("bounce_confirmed_strong")):
         return None
 
     c = _finalize(item["row"], feat, "R",
