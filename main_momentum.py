@@ -1,12 +1,14 @@
-"""stockbotTOM — モメンタム・スクリーニング entry point(歪み系mispricing/とは完全独立).
+"""stockbotTOM — モメンタム + 2週間スイング 統合entry point(歪み系mispricing/とは完全独立).
 
 「全振り」運用の実体: GitHub Actionsの実行対象を main.py からこのファイルに切り替えるだけで、
-配信されるのはこのモメンタム・スクリーニングのみになる。main.py(歪み系)のコードは
-削除せず温存(将来の比較・再併用のための保険)。
+配信されるのはこのモメンタム・スクリーニング(+2週間スイング)のみになる。main.py(歪み系)の
+コードは削除せず温存(将来の比較・再併用のための保険)。
 
 ハード制約(ユーザー明示指定・裁量による例外なし):
-実保有最大3銘柄・同一業種1銘柄まで・リスク固定0.5%。レジーム防御モードは機械的ブロックではなく
-注意喚起のみ(個別シグナルの期待値を優先する設計にユーザー判断で変更・銘柄選定は通常どおり実行)。
+- モメンタム: 実保有最大3銘柄・同一業種1銘柄まで・リスク固定0.5%
+- 2週間スイング(swing2w): モメンタムとは★別枠★で実保有最大3銘柄・同一業種1銘柄まで・リスク固定0.5%
+  (回転率二分のエンジンR/M、固定利確+時間ストップのハイブリッド出口。詳細はswing2w/config.py参照)
+レジーム防御モードは機械的ブロックではなく注意喚起のみ(モメンタム側のみに適用・ユーザー判断で変更)。
 """
 
 from __future__ import annotations
@@ -26,6 +28,10 @@ from momentum.position_check import check_held_positions, backfill_entry_scores
 from momentum.report_text import build_text
 from momentum.report_png import render_png
 from momentum import ledger
+
+from swing2w.config import load_config as load_config_swing2w
+from swing2w.screen import run_screen as run_screen_swing2w
+from swing2w.position_check import load_positions_swing2w, check_held_positions as check_held_swing2w
 
 from mispricing.universe import load_universe, load_positions, open_risk_from_positions
 from mispricing.line_send import send_line
@@ -90,20 +96,39 @@ def main() -> None:
     ledger.ensure_result_template(cfg.outdir)
     print(f"[5/6] ログ出力 {plan_path}")
 
-    # ---- report ----
-    text = build_text(today, meta, regime, res, pos_note, cfg, position_alerts=position_alerts)
+    # ---- swing2w(2週間スイング・別枠3銘柄・モメンタムと同じ取得済みohlcvを再利用) ----
+    cfg2 = load_config_swing2w()
+    res2 = run_screen_swing2w(uni, ohlcv, cfg2)
+    st2 = res2["stats"]
+    print(f"[5.6/6] swing2w 母集団{st2['universe_considered']}銘柄 "
+          f"低回転{st2['low_turnover_n']}/高回転{st2['high_turnover_n']} "
+          f"点灯R{st2['fired_r']}/M{st2['fired_m']} → 採用{st2['picked']}件")
+
+    pos2 = load_positions_swing2w("positions_swing2w.csv")
+    pos2_note = f"既存ポジ{len(pos2)}件(swing2w別枠)" if len(pos2) else "既存ポジ: なし(swing2w別枠)"
+    position_alerts2 = check_held_swing2w(pos2, uni, cfg2, today=today)
+    n_hit = sum(1 for a in position_alerts2 if a.get("hit"))
+    print(f"[5.7/6] swing2w保有銘柄チェック {len(position_alerts2)}件(到達{n_hit}件)")
+
+    # ---- report(モメンタム+swing2wを1本の統合レポートに) ----
+    text = build_text(today, meta, regime, res, pos_note, cfg, position_alerts=position_alerts,
+                      swing2w_res=res2, swing2w_alerts=position_alerts2,
+                      swing2w_pos_note=pos2_note, swing2w_cfg=cfg2)
     (outdir / f"momentum_report_{today}.txt").write_text(text, encoding="utf-8")
 
     png_path = str(outdir / f"momentum_report_table_{today}.png")
     try:
-        render_png(png_path, today, meta, regime, res, pos_note, cfg, position_alerts=position_alerts)
+        render_png(png_path, today, meta, regime, res, pos_note, cfg, position_alerts=position_alerts,
+                  swing2w_res=res2, swing2w_alerts=position_alerts2,
+                  swing2w_pos_note=pos2_note, swing2w_cfg=cfg2)
         images = [png_path]
     except Exception:
         traceback.print_exc()
         images = []
 
     result = send_line(text, image_paths=images,
-                       image_caption=f"モメンタム・スクリーニング {today} 候補{res['stats']['picked']}件")
+                       image_caption=f"モメンタム{today} 候補{res['stats']['picked']}件 / "
+                                     f"2週間スイング候補{res2['stats']['picked']}件")
     print("[6/6] LINE result:", {k: result.get(k) for k in
                                  ("ok", "text_ok", "image_ok", "backend", "status_code")})
 
