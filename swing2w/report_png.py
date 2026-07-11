@@ -6,7 +6,8 @@ from momentum.report_png import _wrap, INK, SUB, LINE, RED, GREEN, GOLD, BLUE, B
 
 
 def estimate_height(res: dict, position_alerts: list) -> int:
-    notable_pos = [a for a in (position_alerts or []) if a.get("hit") or a.get("hit") is None]
+    notable_pos = [a for a in (position_alerts or [])
+                  if a.get("hit") or a.get("hit") is None or a.get("breakeven_due")]
     return (120 + len(notable_pos) * 90 + len(res["picked"]) * 300
             + len(res.get("watch", [])) * 80 + 140)
 
@@ -24,11 +25,19 @@ def render_section(d, f, y: int, W: int, MARGIN: int, res: dict, position_alerts
     y = hline(y + 6)
     y = text(MARGIN, y, "2週間スイング(回転率二分・固定利確+時間ストップ)", 26, GREEN, True)
 
-    notable_pos = [a for a in (position_alerts or []) if a.get("hit") or a.get("hit") is None]
+    notable_pos = [a for a in (position_alerts or [])
+                  if a.get("hit") or a.get("hit") is None or a.get("breakeven_due")]
     if notable_pos:
         for a in notable_pos:
-            tag_col = RED if a.get("hit") in ("stop", "time") else (GREEN if a.get("hit") == "target" else GOLD)
-            tag = {"target": "利確到達", "stop": "ストップ到達", "time": "時間ストップ"}.get(a.get("hit"), "要確認")
+            if a.get("hit"):
+                tag_col = RED if a.get("hit") in ("stop", "time") else GREEN
+                tag = {"target": "利確到達", "stop": "ストップ到達", "time": "時間ストップ"}.get(a.get("hit"), "要確認")
+            elif a.get("breakeven_due"):
+                tag_col = GREEN
+                tag = "建値移動検討"
+            else:
+                tag_col = GOLD
+                tag = "要確認"
             lines = _wrap(d, f"⚠{tag} {a['code']} {a['name']}: {a['note']}", f(17, True), W - 2 * MARGIN - 32)
             box_h = 16 + len(lines) * 23 + 10
             d.rounded_rectangle([MARGIN, y, W - MARGIN, y + box_h], 10, fill=(255, 246, 240), outline=tag_col, width=2)
