@@ -84,6 +84,22 @@ class Config:
     pullback_sma_fast: int = field(default_factory=lambda: _i("PULLBACK_SMA_FAST", 10))
     pullback_sma_slow: int = field(default_factory=lambda: _i("PULLBACK_SMA_SLOW", 20))
     pullback_tolerance_pct: float = field(default_factory=lambda: _f("PULLBACK_TOLERANCE_PCT", 2.5))
+    # ★調査(2026-07-11)反映: 「±2.5%」対称帯を非対称帯に置換(20日線基準・下側を広く)
+    pullback_upper_pct: float = field(default_factory=lambda: _f("PULLBACK_UPPER_PCT", 2.5))   # MAの上+2.5%まで
+    pullback_lower_pct: float = field(default_factory=lambda: _f("PULLBACK_LOWER_PCT", 5.0))   # MAの下-5.0%まで
+    # 深さ上限(追加): ATR倍数上限 + 50日線からの下限%。Alajbeg et al.(2017)「MAから大きく下は最低リターン」に対応
+    pullback_depth_atr_mult: float = field(default_factory=lambda: _f("PULLBACK_DEPTH_ATR_MULT", 3.0))
+    pullback_ma50_floor_pct: float = field(default_factory=lambda: _f("PULLBACK_MA50_FLOOR_PCT", 10.0))
+    swing_high_lookback_days: int = field(default_factory=lambda: _i("SWING_HIGH_LOOKBACK_DAYS", 60))
+    # 継続期間上限(追加): 短期リバーサルの窓(概ね1ヶ月)を超えたらトレンド劣化とみなす
+    pullback_max_duration_days: int = field(default_factory=lambda: _i("PULLBACK_MAX_DURATION_DAYS", 20))
+    # 健全性フィルター(追加): 52週高値近接度。George & Hwang(2004)。モメンタムクラッシュのloser側を除外
+    health_high52w_min: float = field(default_factory=lambda: _f("HEALTH_HIGH52W_MIN", 0.75))
+    # ★押し目の反発確認(新規): ゾーン内にいるだけでなく実際に反発し始めていることを要求する
+    bounce_lookback_days: int = field(default_factory=lambda: _i("BOUNCE_LOOKBACK_DAYS", 2))
+    # ★調査(2026-07-11)反映: CLV≥0.5(伝統的な-1〜+1のClose Location Value)は
+    # close_position(0〜1スケール)に換算すると0.75に相当(CLV=2×close_position-1)。0.5→0.75へ厳格化。
+    bounce_min_close_position: float = field(default_factory=lambda: _f("BOUNCE_MIN_CLOSE_POSITION", 0.75))
     # 状態B(初動・VCPブレイク)
     vcp_lookback: int = field(default_factory=lambda: _i("VCP_LOOKBACK", 20))
     vcp_contraction_ratio: float = field(default_factory=lambda: _f("VCP_CONTRACTION_RATIO", 0.75))
