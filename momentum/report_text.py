@@ -69,7 +69,7 @@ def build_text(today: str, meta: dict, regime: dict, res: dict, pos_note: str, c
            + f" / リスク幅{c.risk_w/c.entry*100:.1f}%")
         for fl in c.flags:
             ap(f"   ⚠{fl}")
-        ap(f"   iSPEED確認: " + " / ".join(c.checks[:2]))
+        ap(f"   iSPEED確認: " + " / ".join(c.checks[:3]))
     ap("")
 
     if res.get("watch"):
