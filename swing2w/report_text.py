@@ -8,11 +8,17 @@ def build_text_section(today: str, res: dict, position_alerts: list, pos_note: s
     ap = L.append
     st = res["stats"]
 
-    notable_pos = [a for a in (position_alerts or []) if a.get("hit") or a.get("hit") is None]
+    notable_pos = [a for a in (position_alerts or [])
+                  if a.get("hit") or a.get("hit") is None or a.get("breakeven_due")]
     if notable_pos:
         ap("【2週間スイング・保有銘柄アラート】")
         for a in notable_pos:
-            tag = {"target": "✅利確到達", "stop": "⚠ストップ到達", "time": "⏱時間ストップ"}.get(a.get("hit"), "要確認")
+            if a.get("hit"):
+                tag = {"target": "✅利確到達", "stop": "⚠ストップ到達", "time": "⏱時間ストップ"}.get(a.get("hit"), "要確認")
+            elif a.get("breakeven_due"):
+                tag = "📈建値移動検討"
+            else:
+                tag = "要確認"
             ap(f"・{a['code']} {a['name']}: {tag} — {a['note']}")
         ap("")
 
