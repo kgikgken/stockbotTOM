@@ -73,7 +73,9 @@ def check_held_positions(pos_df: pd.DataFrame, universe: pd.DataFrame, cfg: Conf
 
         notes = []
         hit = None
+        breakeven_due = False
 
+        entry_price = _to_float(p.get("entry_price"))
         target_price = _to_float(p.get("target_price"))
         stop_price = _to_float(p.get("stop_price"))
         if target_price is not None and close_now >= target_price:
@@ -82,6 +84,16 @@ def check_held_positions(pos_df: pd.DataFrame, universe: pd.DataFrame, cfg: Conf
         elif stop_price is not None and close_now <= stop_price:
             hit = "stop"
             notes.append(f"初期ストップ({stop_price:,.0f}円)に到達(終値{close_now:,.0f}円)。手仕舞い検討")
+
+        # ★指示: 精査で発覚した未実装機能を実装。1R到達でストップを建値へ移動する(利益の確保)。
+        # entry_price/stop_priceの両方が記録されており、まだ建値に移動していない(stop<entry)場合のみ判定。
+        if hit is None and entry_price is not None and stop_price is not None and entry_price > stop_price:
+            risk_w = entry_price - stop_price
+            current_r = (close_now - entry_price) / risk_w if risk_w > 0 else 0.0
+            if current_r >= cfg.breakeven_trigger_r:
+                breakeven_due = True
+                notes.append(f"{current_r:.1f}R到達 — ストップを建値({entry_price:,.0f}円)へ引き上げ検討"
+                            f"(現在のストップ{stop_price:,.0f}円のまま据え置き中)")
 
         entry_date = str(p.get("entry_date", "")).strip()
         days_held = _business_days_since(entry_date, today) if entry_date else None
@@ -93,7 +105,7 @@ def check_held_positions(pos_df: pd.DataFrame, universe: pd.DataFrame, cfg: Conf
 
         alerts.append({
             "code": code, "name": name, "hit": hit, "close": close_now,
-            "days_held": days_held,
+            "days_held": days_held, "breakeven_due": breakeven_due,
             "note": " / ".join(notes) if notes else "利確・ストップ・時間ストップいずれも未到達(平常)",
         })
     return alerts
