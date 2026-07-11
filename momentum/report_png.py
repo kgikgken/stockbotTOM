@@ -51,11 +51,16 @@ def _wrap(d, text, font, maxw):
 
 
 def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
-               pos_note: str, cfg, position_alerts: list[dict] | None = None) -> str:
+               pos_note: str, cfg, position_alerts: list[dict] | None = None,
+               swing2w_res: dict | None = None, swing2w_alerts: list | None = None,
+               swing2w_pos_note: str = "", swing2w_cfg=None) -> str:
     f = F(cfg)
     alerts = [a for a in (position_alerts or [])
              if a.get("state_c") or a.get("score_drop") or a.get("tob_jump") or a.get("state_c") is None]
     est_h = 600 + 70 + 90 + len(alerts) * 130 + len(res["picked"]) * 460 + len(res.get("watch", [])) * 120 + 360
+    if swing2w_res is not None:
+        from swing2w.report_png import estimate_height as _swing2w_h
+        est_h += _swing2w_h(swing2w_res, swing2w_alerts)
     img = Image.new("RGB", (W, est_h), "white")
     d = ImageDraw.Draw(img)
     y = MARGIN
@@ -216,6 +221,10 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
     ]:
         for ln in _wrap(d, s, f(18, bold), W - 2 * MARGIN):
             y = text(MARGIN, y, ln, 18, col, bold)
+
+    if swing2w_res is not None:
+        from swing2w.report_png import render_section as _swing2w_render
+        y = _swing2w_render(d, f, y, W, MARGIN, swing2w_res, swing2w_alerts, swing2w_pos_note, swing2w_cfg)
 
     img = img.crop((0, 0, W, min(est_h, y + MARGIN)))
     Path(outpath).parent.mkdir(parents=True, exist_ok=True)
