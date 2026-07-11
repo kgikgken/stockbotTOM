@@ -4,7 +4,9 @@ from __future__ import annotations
 
 
 def build_text(today: str, meta: dict, regime: dict, res: dict, pos_note: str, cfg,
-               position_alerts: list[dict] | None = None) -> str:
+               position_alerts: list[dict] | None = None,
+               swing2w_res: dict | None = None, swing2w_alerts: list | None = None,
+               swing2w_pos_note: str = "", swing2w_cfg=None) -> str:
     L = []
     ap = L.append
 
@@ -89,4 +91,10 @@ def build_text(today: str, meta: dict, regime: dict, res: dict, pos_note: str, c
     ap("【免責】AIの候補提示で投資助言ではない。モメンタムクラッシュ(急な逆転)のリスクは"
        "レジームフィルターとロングオンリー運用でも完全には消えない。"
        "最終判断と結果責任はユーザーにある。")
+
+    if swing2w_res is not None:
+        from swing2w.report_text import build_text_section
+        ap("")
+        L.extend(build_text_section(today, swing2w_res, swing2w_alerts, swing2w_pos_note, swing2w_cfg))
+
     return "\n".join(L)
