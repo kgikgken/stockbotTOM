@@ -60,7 +60,7 @@ def compute_momentum_features(df: pd.DataFrame, bench_logclose: pd.Series | None
     c, h, l, o, v = df["Close"], df["High"], df["Low"], df["Open"], df["Volume"]
     close_now = float(c.iloc[-1])
 
-    sma10, sma20 = sma(c, cfg.pullback_sma_fast), sma(c, cfg.pullback_sma_slow)
+    sma20 = sma(c, cfg.pullback_sma_slow)
     sma50, sma150, sma200 = sma(c, 50), sma(c, 150), sma(c, 200)
     atr_n = atr_wilder(h, l, c, cfg.atr_period)
     adx_n = adx(h, l, c, cfg.adx_period)
@@ -96,7 +96,7 @@ def compute_momentum_features(df: pd.DataFrame, bench_logclose: pd.Series | None
 
     return {
         "close": close_now, "atr": float(atr_n.iloc[-1]), "adx": float(adx_n.iloc[-1]),
-        "sma10": float(sma10.iloc[-1]), "sma20": float(sma20.iloc[-1]),
+        "sma20": float(sma20.iloc[-1]),
         "sma50": float(sma50.iloc[-1]), "sma150": float(sma150.iloc[-1]), "sma200": float(sma200.iloc[-1]),
         "chandelier": float(chand.iloc[-1]), "donchian_prev": float(donch_prev.iloc[-1]) if not pd.isna(donch_prev.iloc[-1]) else np.nan,
         "vcp_now": vcp_now, "vol_ratio_today": vol_ratio_today,
