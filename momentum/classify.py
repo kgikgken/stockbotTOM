@@ -1,6 +1,6 @@
 """STEP3: 3状態の日次分類 + エントリー水準の算出.
 
-状態A(すでに流入): trend_align かつ 10/20日線付近の押し目 → 新規ロング候補
+状態A(すでに流入): trend_align かつ 20日線基準の非対称帯での押し目(精緻化基準) → 新規ロング候補
 状態B(初動): VCP収縮 かつ 出来高を伴うドンチアン・ブレイク → 新規ロング候補
 状態C(流出): 50日線割れ → 新規対象外(保有ポジションの手仕舞い判定にのみ使用)
 
@@ -45,12 +45,35 @@ def _round_tick(p: float) -> float:
     return round(p / t) * t
 
 
+def state_a_gate_diagnostics(feat: dict, cfg) -> list[str]:
+    """状態Aの各ゲートのうち、この銘柄がどこで落ちたかを診断用に返す(trend_align=True前提)。
+    判定ロジック自体(classify_state)は変更しない。棄却台帳の精査用の補助関数。"""
+    failed = []
+    if not feat["trend_align"]:
+        failed.append("trend_align")
+        return failed  # これが落ちていれば他は無意味
+    ratio20 = feat["close"] / feat["sma20"] - 1
+    if not ((-cfg.pullback_lower_pct / 100) <= ratio20 <= (cfg.pullback_upper_pct / 100)):
+        failed.append("in_zone")
+    if not (feat["pullback_depth_atr"] <= cfg.pullback_depth_atr_mult):
+        failed.append("depth_ok")
+    if not (feat["close"] >= feat["sma50"] * (1 - cfg.pullback_ma50_floor_pct / 100)):
+        failed.append("ma50_floor_ok")
+    if not (feat["days_since_swing_high"] <= cfg.pullback_max_duration_days):
+        failed.append("duration_ok")
+    if not (feat["high52w_proximity"] >= cfg.health_high52w_min):
+        failed.append("health_ok")
+    if not feat.get("bounce_confirmed"):
+        failed.append("bounce_confirmed")
+    return failed
+
+
 def classify_state(feat: dict, cfg) -> str | None:
     """A / B / C / None(いずれでもない)を返す。優先順位: C(流出) > B(初動) > A(継続)。
 
-    状態Aの判定基準は調査レポート(2026-07-11)を反映して精緻化済み:
+    状態Aの判定基準は調査レポート(2026-07-11)を反映して精緻化済み(実運用の絞り込みすぎ判明後に一部緩和済み):
     ①非対称な押し目ゾーン(MAの上+2.5%〜下-5%) ②深さ上限(ATR×3以内 かつ 50日線-10%以内)
-    ③継続期間上限(スイング高値から20営業日以内) ④反発確認(CLV≥0.5相当) ⑤健全性(52週高値の75%以上)
+    ③継続期間上限(スイング高値から35営業日以内) ④反発確認(CLV≥0.5相当) ⑤健全性(52週高値の60%以上)
     のいずれも満たす場合のみ状態A。旧来の対称±2.5%・深さ無制限・期間無制限からの精緻化。
     """
     if feat["breakdown"]:
