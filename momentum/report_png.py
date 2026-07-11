@@ -111,8 +111,9 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
         y += 4
 
     cov = meta.get("data_coverage", 0.0)
+    recov_note = f" (2巡目で{meta['recovered_2nd_pass']}件回収)" if meta.get("recovered_2nd_pass") else ""
     y = text(MARGIN, y, f"データ {meta.get('data_ok',0)}/{meta.get('data_total',0)}({cov*100:.0f}%) "
-             f"{meta.get('source','')}", 18, SUB)
+             f"{meta.get('source','')}{recov_note}", 18, SUB)
     y = text(MARGIN, y, "単一ソース(yfinance)。本命は全件仮点灯 — 確定はiSPEED照合後。", 18, GOLD)
     if meta.get("data_warn"):
         y = text(MARGIN, y, f"⚠ データ被覆率不足(<{cfg.data_coverage_min*100:.0f}%) — プール精度に影響の可能性", 20, RED, True)
