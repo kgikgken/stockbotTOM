@@ -90,9 +90,16 @@ class Config:
     breakdown_sma: int = field(default_factory=lambda: _i("BREAKDOWN_SMA", 50))
 
     # --- TOB/コーポレートアクション疑いの検出(価格ヒューリスティック) ---
-    tob_lookback_days: int = field(default_factory=lambda: _i("TOB_LOOKBACK_DAYS", 90))
+    tob_lookback_days: int = field(default_factory=lambda: _i("TOB_LOOKBACK_DAYS", 250))  # 90→250(古い案件対策)
     tob_jump_threshold: float = field(default_factory=lambda: _f("TOB_JUMP_THRESHOLD", 0.15))
     tob_vol_collapse_ratio: float = field(default_factory=lambda: _f("TOB_VOL_COLLAPSE_RATIO", 0.35))
+    # 単日ジャンプ非依存の持続的ボラ圧縮検出(MBO等の緩やかな値動き対策・新規)
+    tob_sustained_recent_days: int = field(default_factory=lambda: _i("TOB_SUSTAINED_RECENT_DAYS", 20))
+    tob_sustained_baseline_days: int = field(default_factory=lambda: _i("TOB_SUSTAINED_BASELINE_DAYS", 60))
+    tob_sustained_vol_ratio: float = field(default_factory=lambda: _f("TOB_SUSTAINED_VOL_RATIO", 0.25))
+    # 直近の絶対的な値動きの薄さ(相対比較なしのシンプルな直接判定・新規)
+    tob_flat_recent_days: int = field(default_factory=lambda: _i("TOB_FLAT_RECENT_DAYS", 15))
+    tob_flat_vol_threshold: float = field(default_factory=lambda: _f("TOB_FLAT_VOL_THRESHOLD", 0.0015))
 
     # --- 保有銘柄監視(指示⑥⑦) ---
     score_drop_sd_threshold: float = field(default_factory=lambda: _f("SCORE_DROP_SD_THRESHOLD", 1.0))
