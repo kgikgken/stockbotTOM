@@ -82,7 +82,8 @@ def render_section(d, f, y: int, W: int, MARGIN: int, res: dict, position_alerts
         cy += 92
 
         lot = f"リスク {c.risk_pct:.2f}%" + (f" ≈{c.shares:,}株" if c.shares else "")
-        d.text((cx, cy), f"{lot} / 時間ストップ{cfg.time_stop_days}営業日", font=f(19, True), fill=INK); cy += 28
+        d.text((cx, cy), f"{lot}  リスク幅{c.risk_w/c.entry*100:.1f}% / 時間ストップ{cfg.time_stop_days}営業日",
+               font=f(19, True), fill=INK); cy += 28
         for ln in flag_lines:
             d.text((cx, cy), ln, font=f(17, True), fill=GOLD); cy += 23
         y += ch + 16
