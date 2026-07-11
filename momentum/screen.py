@@ -78,6 +78,10 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         state_count[state] = state_count.get(state, 0) + 1
         c = build_candidate(item["row"], item["feat"], state, item["score"], cfg)
         if c is not None:
+            sz = item.get("sector_strength_z")
+            if sz is not None:
+                tag = "強い" if sz >= 0.5 else ("弱い" if sz <= -0.5 else "中立")
+                c.checks.insert(1, f"セクター強度(価格ベース・機械算出): {c.sector}は業種間比較で{tag}(z={sz:+.1f})")
             fired.append(c)
 
     fired.sort(key=lambda x: -x.score)
