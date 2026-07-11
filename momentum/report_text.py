@@ -33,7 +33,8 @@ def build_text(today: str, meta: dict, regime: dict, res: dict, pos_note: str, c
 
     cov = meta.get("data_coverage", 0.0)
     ap(f"【データ】{meta.get('data_ok',0)}/{meta.get('data_total',0)} ({cov*100:.0f}%) "
-       f"出典:{meta.get('source','?')} {meta.get('fetched_at','')}")
+       f"出典:{meta.get('source','?')} {meta.get('fetched_at','')}"
+       + (f" (2巡目で{meta['recovered_2nd_pass']}件回収)" if meta.get("recovered_2nd_pass") else ""))
     ap("※単一ソース(yfinance)。本命は全件仮点灯、確定はiSPEED照合+チャット側確認後")
     if meta.get("data_warn"):
         ap(f"⚠データ被覆率<{cfg.data_coverage_min*100:.0f}% → プール規模・ランキングの精度に影響の可能性")
