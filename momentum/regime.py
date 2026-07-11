@@ -62,7 +62,15 @@ def _check_history_gap(path: str, today: str) -> str:
 
 def _git_commit_history(path: str) -> str:
     """指示⑫-1: 履歴ファイルをPythonから直接commit/pushし、当日のレポートに結果を反映できるようにする。
-    ワークフロー側の一括永続化ステップより先に実行されるため、失敗検知が当日中に間に合う。"""
+    ワークフロー側の一括永続化ステップより先に実行されるため、失敗検知が当日中に間に合う。
+
+    ★バグ修正: gitの生のエラーメッセージ(改行を含む)をそのままレポートに埋め込むと、
+    PNG側の行数計算が実際の描画行数とズレて後続テキストと重なる不具合があった。
+    ユーザー向けメッセージは1行の要約のみとし、詳細はGitHub Actionsのログにだけ出す
+    (指示⑮のデッドマンズスイッチと同じ「詳細はログのみ」の設計に統一)。
+    ★あわせて、pushの前に pull --rebase を試みる。Tomが同時期に手動pushした場合等の
+    non-fast-forward reject(ローカルがリモートより遅れている)を減らすための予防策。
+    """
     try:
         subprocess.run(["git", "config", "user.name", "stockbot"], capture_output=True, timeout=15)
         subprocess.run(["git", "config", "user.email", "stockbot@users.noreply.github.com"],
@@ -74,13 +82,23 @@ def _git_commit_history(path: str) -> str:
         commit = subprocess.run(["git", "commit", "-m", "momentum regime history (auto)"],
                                 capture_output=True, timeout=15, text=True)
         if commit.returncode != 0:
-            return f"⚠レジーム履歴のgit commitに失敗: {commit.stderr[:150]}"
+            print(f"[WARN] レジーム履歴のgit commit失敗:\n{commit.stderr}")
+            return "⚠レジーム履歴のgit commitに失敗(詳細はGitHub Actionsログ参照)"
+
+        # リモートが進んでいる可能性(手動pushとの競合等)に備え、pushの前にrebaseを試みる。
+        pull = subprocess.run(["git", "pull", "--rebase"], capture_output=True, timeout=30, text=True)
+        if pull.returncode != 0:
+            subprocess.run(["git", "rebase", "--abort"], capture_output=True, timeout=15)
+            print(f"[WARN] レジーム履歴のgit pull --rebase失敗(pushは試行継続):\n{pull.stderr}")
+
         push = subprocess.run(["git", "push"], capture_output=True, timeout=30, text=True)
         if push.returncode != 0:
-            return f"⚠レジーム履歴のgit pushに失敗: {push.stderr[:150]}(連続日数カウントが引き継がれない可能性)"
+            print(f"[WARN] レジーム履歴のgit push失敗:\n{push.stderr}")
+            return "⚠レジーム履歴のgit pushに失敗(連続日数カウントが引き継がれない可能性・詳細はGitHub Actionsログ参照)"
         return ""
     except Exception as e:
-        return f"⚠レジーム履歴の永続化処理で例外: {str(e)[:150]}"
+        print(f"[WARN] レジーム履歴永続化処理で例外: {e}")
+        return "⚠レジーム履歴の永続化処理で例外が発生(詳細はGitHub Actionsログ参照)"
 
 
 def _append_history(path: str, today: str, raw_attack: bool, final_attack: bool) -> None:
