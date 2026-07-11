@@ -150,7 +150,7 @@ def render_png(outpath: str, today: str, meta: dict, regime: dict, res: dict,
         flag_lines = []
         for fl in c.flags:
             flag_lines.extend(_wrap(d, "⚠ " + fl, f(18, True), card_textw))
-        check_lines = _wrap(d, "確認 → " + " / ".join(c.checks[:2]), f(18), card_textw)
+        check_lines = _wrap(d, "確認 → " + " / ".join(c.checks[:3]), f(18), card_textw)
         fixed_h = 16 + 52 + 34 + 92 + 28 + 28  # header+meta+price boxes+risk line+trail note
         ch = fixed_h + len(flag_lines) * 25 + len(check_lines) * 24 + 16
 
