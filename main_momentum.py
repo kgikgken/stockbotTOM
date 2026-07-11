@@ -51,7 +51,8 @@ def main() -> None:
     tickers = uni["ticker"].tolist()
     ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun)
     meta["data_warn"] = meta["data_coverage"] < cfg.data_coverage_min
-    print(f"[2/6] OHLCV {meta['data_ok']}/{meta['data_total']} ({meta['data_coverage']*100:.0f}%)")
+    print(f"[2/6] OHLCV {meta['data_ok']}/{meta['data_total']} ({meta['data_coverage']*100:.0f}%)"
+          + (f" (2巡目で{meta['recovered_2nd_pass']}件回収)" if meta.get("recovered_2nd_pass") else ""))
     if meta.get("fetch_failures"):
         ledger.append_fetch_failures(cfg.outdir, today, meta["fetch_failures"])
         print(f"       取得失敗 {len(meta['fetch_failures'])}件をmomentum_fetch_failures.csvに記録(指示⑬)")
