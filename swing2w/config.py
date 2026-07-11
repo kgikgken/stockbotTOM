@@ -83,9 +83,9 @@ class Config:
     r_max_dip_days: int = field(default_factory=lambda: _i("R_MAX_DIP_DAYS", 5))
     # ★調査(2026-07-11)反映: z値基準は維持しつつ、深さレンジ(浅すぎ/深すぎを除外)を追加。
     # 「50日線の-5%〜-15%」または「ATR2〜5倍の下落」のいずれかを満たすことを要求する。
-    r_depth_ma50_min_pct: float = field(default_factory=lambda: _f("R_DEPTH_MA50_MIN_PCT", 5.0))
+    r_depth_ma50_min_pct: float = field(default_factory=lambda: _f("R_DEPTH_MA50_MIN_PCT", 3.0))  # 5.0→3.0(絞りすぎ緩和)
     r_depth_ma50_max_pct: float = field(default_factory=lambda: _f("R_DEPTH_MA50_MAX_PCT", 15.0))
-    r_depth_atr_min: float = field(default_factory=lambda: _f("R_DEPTH_ATR_MIN", 2.0))
+    r_depth_atr_min: float = field(default_factory=lambda: _f("R_DEPTH_ATR_MIN", 1.5))  # 2.0→1.5(絞りすぎ緩和)
     r_depth_atr_max: float = field(default_factory=lambda: _f("R_DEPTH_ATR_MAX", 5.0))
     swing_high_lookback_days: int = field(default_factory=lambda: _i("SWING_HIGH_LOOKBACK_DAYS", 60))
     # ★押し目の反発確認(新規): ゾーン内にいるだけでなく実際に反発し始めていることを要求する(momentumと共通仕様)
