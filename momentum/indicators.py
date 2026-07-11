@@ -106,11 +106,17 @@ def compute_momentum_features(df: pd.DataFrame, bench_logclose: pd.Series | None
 
 
 def tob_suspect(df: pd.DataFrame, cfg) -> tuple[bool, str]:
-    """公開買付(TOB)・M&A等のコーポレートアクション疑いを検出する簡易ヒューリスティック.
+    """公開買付(TOB)・MBO・M&A等のコーポレートアクション疑いを検出する簡易ヒューリスティック.
 
-    典型的なTOBの値動き: 発表日に単日で大きく跳ね上がり(買付価格近辺まで一気に上昇)、
-    その後は成立を織り込んで買付価格に張り付き、ボラティリティが急激に低下する。
-    これは通常のモメンタム(方向感を伴う継続的な値動き)とは性質が異なり、
+    2つの独立した経路で判定する:
+    経路A(単日ジャンプ→ボラ収縮): 発表日に単日で大きく跳ね上がり、その後は成立を織り込んで
+      買付価格に張り付き、ボラティリティが急激に低下するという典型的なTOBの値動きを検出。
+    経路B(持続的な絶対ボラ圧縮・ジャンプ非依存): MBOはプレミアムが小さく段階的な値上がりで
+      単日ジャンプとして検出できない場合や、発表がlookback_days(既定250営業日)より前で
+      経路Aの観測窓に収まらない場合でも、「直近の変動率がそれ以前と比べ持続的に極端に低い」
+      という状態(=価格が固定されている)を独立に検出する。
+
+    いずれも通常のモメンタム(方向感を伴う継続的な値動き)とは性質が異なり、
     上値・下値とも買付条件に規定されるため、ATRベースの損切り・トレール設計が機能しない。
     価格データのみでの検出のため確定的ではなく、あくまで「疑い」の除外(要人間確認)。
     """
@@ -118,30 +124,50 @@ def tob_suspect(df: pd.DataFrame, cfg) -> tuple[bool, str]:
     if len(c) < cfg.tob_lookback_days + 40:
         return False, ""
     lr = np.log(c / c.shift(1)).dropna()
+
+    # ---- 経路A: 単日ジャンプ→ボラ収縮(観測窓を250営業日に拡張済み) ----
     window = lr.iloc[-cfg.tob_lookback_days:]
     jump_idx = window.abs().idxmax()
     jump_ret = float(window.loc[jump_idx])
-    if jump_ret < cfg.tob_jump_threshold:
-        return False, ""
+    if jump_ret >= cfg.tob_jump_threshold:
+        days_since = int((c.index >= jump_idx).sum()) - 1
+        if days_since >= 3:
+            post = lr.loc[lr.index >= jump_idx].iloc[1:]
+            if len(post) >= 3:
+                post_vol = float(post.std(ddof=0))
+                pre = lr.loc[lr.index < jump_idx].iloc[-40:]
+                if len(pre) >= 15:
+                    pre_vol = float(pre.std(ddof=0))
+                    if pre_vol > 1e-9 and post_vol < pre_vol * cfg.tob_vol_collapse_ratio:
+                        return True, (f"{days_since}営業日前に単日{jump_ret*100:+.0f}%の急騰後、"
+                                      f"変動率が平常時の{post_vol/pre_vol*100:.0f}%に急低下"
+                                      "(公開買付/M&A等で価格が固定されている疑い・要確認)")
 
-    days_since = int((c.index >= jump_idx).sum()) - 1
-    if days_since < 3:
-        return False, ""  # ジャンプ直後すぎてボラティリティ収束を判定できない
+    # ---- 経路B: 持続的な絶対ボラ圧縮(単日ジャンプの検出可否によらない・MBO等の緩やかな値動き対策) ----
+    need = cfg.tob_sustained_baseline_days + cfg.tob_sustained_recent_days
+    if len(lr) >= need:
+        recent = lr.iloc[-cfg.tob_sustained_recent_days:]
+        baseline = lr.iloc[-need:-cfg.tob_sustained_recent_days]
+        if len(recent) >= 10 and len(baseline) >= 30:
+            recent_vol = float(recent.std(ddof=0))
+            baseline_vol = float(baseline.std(ddof=0))
+            if baseline_vol > 1e-9 and recent_vol < baseline_vol * cfg.tob_sustained_vol_ratio:
+                return True, (f"直近{cfg.tob_sustained_recent_days}営業日の変動率が、"
+                              f"それ以前{cfg.tob_sustained_baseline_days}営業日の"
+                              f"{recent_vol/baseline_vol*100:.0f}%まで持続的に低下"
+                              "(単日ジャンプは観測窓内で未検出だが、MBO/TOB等で価格が"
+                              "固定されている疑い・要確認)")
 
-    post = lr.loc[lr.index >= jump_idx].iloc[1:]  # ジャンプ当日自体は除く
-    if len(post) < 3:
-        return False, ""
-    post_vol = float(post.std(ddof=0))
+    # ---- 経路C: 直近の絶対的な値動きの薄さ(相対比較なしのシンプルな直接判定・新規) ----
+    # 経路A/Bはいずれも「過去と比べて」という相対判定。経路Cは「今、単純に動いていない」を
+    # 直接見る。相対比較のベースラインが取りにくいケースへの保険。
+    recent_flat = lr.iloc[-cfg.tob_flat_recent_days:]
+    if len(recent_flat) >= cfg.tob_flat_recent_days:
+        flat_vol = float(recent_flat.std(ddof=0))
+        if flat_vol < cfg.tob_flat_vol_threshold:
+            return True, (f"直近{cfg.tob_flat_recent_days}営業日の変動率が{flat_vol*100:.2f}%と極めて低い"
+                          "(絶対水準として値動きがほぼ無い。TOB/MBO等で価格が固定されている疑い・要確認)")
 
-    pre = lr.loc[lr.index < jump_idx].iloc[-40:]
-    if len(pre) < 15:
-        return False, ""
-    pre_vol = float(pre.std(ddof=0))
-
-    if pre_vol > 1e-9 and post_vol < pre_vol * cfg.tob_vol_collapse_ratio:
-        return True, (f"{days_since}営業日前に単日{jump_ret*100:+.0f}%の急騰後、"
-                      f"変動率が平常時の{post_vol/pre_vol*100:.0f}%に急低下"
-                      "(公開買付/M&A等で価格が固定されている疑い・要確認)")
     return False, ""
 
 
