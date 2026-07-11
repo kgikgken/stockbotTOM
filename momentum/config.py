@@ -80,10 +80,8 @@ class Config:
     # --- STEP3: 3状態分類 ---
     adx_trend_th: float = field(default_factory=lambda: _f("ADX_TREND_TH", 25.0))
     adx_period: int = field(default_factory=lambda: _i("ADX_PERIOD", 14))
-    # 状態A(すでに流入): 押し目ゾーン
-    pullback_sma_fast: int = field(default_factory=lambda: _i("PULLBACK_SMA_FAST", 10))
+    # 状態A(すでに流入): 押し目ゾーン(20日線基準の非対称帯。下記pullback_upper/lower_pctを使用)
     pullback_sma_slow: int = field(default_factory=lambda: _i("PULLBACK_SMA_SLOW", 20))
-    pullback_tolerance_pct: float = field(default_factory=lambda: _f("PULLBACK_TOLERANCE_PCT", 2.5))
     # ★調査(2026-07-11)反映: 「±2.5%」対称帯を非対称帯に置換(20日線基準・下側を広く)
     pullback_upper_pct: float = field(default_factory=lambda: _f("PULLBACK_UPPER_PCT", 2.5))   # MAの上+2.5%まで
     pullback_lower_pct: float = field(default_factory=lambda: _f("PULLBACK_LOWER_PCT", 5.0))   # MAの下-5.0%まで
