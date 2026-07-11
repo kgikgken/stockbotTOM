@@ -1,7 +1,8 @@
 """OHLCV data layer — yfinance batched fetch, or synthetic data in DRYRUN.
 
-出典表記: yfinance = Yahoo Finance 系の単一ソース。v5.0では単一ソースを許容し
-確信度は減点しないが、本命は全件「仮点灯」。確定判定にはiSPEED照合が必要。
+出典表記: yfinance = Yahoo Finance 系の単一ソース。v4.1の規則上、
+ここから算出した指標はすべて「未確認(単一ソース)」であり、確定判定には
+ユーザーのブローカー画面照合(独立2ソース化)が必要。
 """
 
 from __future__ import annotations
@@ -20,40 +21,58 @@ def fetch_ohlcv(tickers: List[str], history_days: int, dryrun: bool = False,
 
     import yfinance as yf
 
-    out: Dict[str, pd.DataFrame] = {}
-    chunks = [tickers[i:i + 200] for i in range(0, len(tickers), 200)]
     period = f"{max(history_days, 400)}d"
-    for ci, chunk in enumerate(chunks):
-        for attempt in range(3):
+
+    def _download_chunk(chunk: List[str], attempts: int, base_backoff: float):
+        for attempt in range(attempts):
             try:
-                raw = yf.download(
+                return yf.download(
                     tickers=" ".join(chunk), period=period, interval="1d",
                     group_by="ticker", auto_adjust=False, actions=False,
                     threads=True, progress=False,
                 )
-                break
             except Exception:
-                if attempt == 2:
-                    raw = None
-                else:
-                    time.sleep(3 * (attempt + 1))
+                if attempt == attempts - 1:
+                    return None
+                time.sleep(base_backoff * (attempt + 1))
+        return None
+
+    def _extract(raw, chunk: List[str], out: Dict[str, pd.DataFrame]):
         if raw is None or len(raw) == 0:
-            continue
+            return
         if len(chunk) == 1:
             df = raw.dropna(how="all")
             if len(df):
                 out[chunk[0]] = df
-        else:
-            for t in chunk:
-                try:
-                    df = raw[t].dropna(how="all")
-                except Exception:
-                    continue
-                if len(df) >= 60:
-                    out[t] = df
+            return
+        for t in chunk:
+            try:
+                df = raw[t].dropna(how="all")
+            except Exception:
+                continue
+            if len(df) >= 60:
+                out[t] = df
+
+    out: Dict[str, pd.DataFrame] = {}
+    chunks = [tickers[i:i + 200] for i in range(0, len(tickers), 200)]
+    for chunk in chunks:
+        raw = _download_chunk(chunk, attempts=3, base_backoff=3)
+        _extract(raw, chunk, out)
         time.sleep(1.0)
 
+    # ★2巡目(新規): 1巡目で欠落した銘柄だけ、小さいチャンクで再取得を試みる。
+    # チャンク単位の一時的な失敗(該当チャンク内の1銘柄の問題が全体に波及する等)による
+    # 取りこぼしを回収する狙い。1巡目の成功分の挙動は変えない(追加のみ・既存動作は不変)。
+    first_pass_missing = [t for t in tickers if t not in out]
+    if first_pass_missing:
+        retry_chunks = [first_pass_missing[i:i + 50] for i in range(0, len(first_pass_missing), 50)]
+        for chunk in retry_chunks:
+            raw = _download_chunk(chunk, attempts=2, base_backoff=4)
+            _extract(raw, chunk, out)
+            time.sleep(1.5)
+
     meta = _coverage(tickers, out, source="yfinance(Yahoo Finance) 単一ソース")
+    meta["recovered_2nd_pass"] = len(first_pass_missing) - len([t for t in first_pass_missing if t not in out])
     return out, meta
 
 
@@ -80,6 +99,17 @@ def _mk_series(seed: int, n: int, mode: str) -> pd.DataFrame:
     idx = pd.bdate_range(end=end, periods=n)
     drift = 0.0002
     ret = rng.normal(drift, 0.018, n)
+
+    if mode == "oversold":
+        ret[-3:] -= 0.045                       # 直近3日で急落(ゆるやかな30日下げでなく鋭い押し目)
+    elif mode == "overbought":
+        ret[-3:] += 0.05
+    elif mode == "crash_event":
+        ret[-4] = -0.22                          # 深い急落(オーバーシュート要件を確実にクリア)
+        ret[-3:-1] -= 0.01
+    elif mode == "pump_event":
+        ret[-3] = 0.20
+        ret[-2:] += 0.012
 
     close = 1000.0 * np.exp(np.cumsum(ret))
 
@@ -115,7 +145,7 @@ def _mk_series(seed: int, n: int, mode: str) -> pd.DataFrame:
     if mode == "crash_event":
         v[-4] *= 6.0
     if mode == "pump_event":
-        v[-4] *= 6.0
+        v[-3] *= 6.0
     return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": close, "Volume": v}, index=idx)
 
 
