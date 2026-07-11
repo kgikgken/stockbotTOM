@@ -79,8 +79,6 @@ class Config:
     rel_min_sector_members: int = field(default_factory=lambda: _i("R_REL_MIN_SECTOR_MEMBERS", 5))  # 3→5(統計の安定性優先)
     rsi_period: int = field(default_factory=lambda: _i("RSI_PERIOD", 14))
     rsi_secondary_th: float = field(default_factory=lambda: _f("RSI_SECONDARY_TH", 40.0))  # 補助確認(主軸ではない)
-    r_min_dip_days: int = field(default_factory=lambda: _i("R_MIN_DIP_DAYS", 2))
-    r_max_dip_days: int = field(default_factory=lambda: _i("R_MAX_DIP_DAYS", 5))
     # ★調査(2026-07-11)反映: z値基準は維持しつつ、深さレンジ(浅すぎ/深すぎを除外)を追加。
     # 「50日線の-5%〜-15%」または「ATR2〜5倍の下落」のいずれかを満たすことを要求する。
     r_depth_ma50_min_pct: float = field(default_factory=lambda: _f("R_DEPTH_MA50_MIN_PCT", 3.0))  # 5.0→3.0(絞りすぎ緩和)
