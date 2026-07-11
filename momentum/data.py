@@ -72,7 +72,10 @@ def _mk_series_momentum(seed: int, n: int, mode: str) -> pd.DataFrame:
         close = trend * (1 + rng.normal(0, 0.004, n))
         v = rng.integers(200_000, 900_000, n).astype(float)
         base = float(close[-9])
-        close[-9:] = base * np.linspace(1.0, 0.992, 9)  # 直近9日で滑らかな浅い押し目
+        # 直近9日: 7日かけて下押し→直近2日ではっきり反発(bounce_confirmedの要件を満たす形)
+        decline = np.linspace(1.0, 0.975, 7)
+        bounce = np.array([0.975 * 1.006, 0.975 * 1.012])
+        close[-9:] = base * np.concatenate([decline, bounce])
     elif mode == "state_b":
         drift, noise = 0.0004, 0.013
         ret = rng.normal(drift, noise, n)
@@ -127,6 +130,11 @@ def _mk_series_momentum(seed: int, n: int, mode: str) -> pd.DataFrame:
     o = close * (1 + rng.normal(0, 0.004, n))
     h = np.maximum(o, close) * (1 + np.abs(rng.normal(0, 1, n)) * hl_scale)
     l = np.minimum(o, close) * (1 - np.abs(rng.normal(0, 1, n)) * hl_scale)
+    if mode == "state_a":
+        # 最終日ははっきり「安値圏で寄り付き高値圏で引ける」反発陽線の形に固定する
+        o[-1] = close[-1] * 0.994
+        l[-1] = close[-1] * 0.990
+        h[-1] = close[-1] * 1.002
     return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": close, "Volume": v}, index=idx)
 
 
