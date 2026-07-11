@@ -69,19 +69,44 @@ def _finalize(row: dict, feat: dict, engine: str, trigger: str, score: float, cf
 
 
 def classify_engine_r(item: dict, sector_z: dict, cfg) -> Candidate | None:
-    """低〜中回転率母集団向け: 業種内相対で売られ過ぎ(主軸) + RSI(補助確認のみ)。"""
+    """低〜中回転率母集団向け: 業種内相対で売られ過ぎ(主軸・維持) + 深さレンジ(追加) +
+    強化反発確認(追加) + RSI(補助確認のみ)。
+
+    調査レポート(2026-07-11)を反映: z値基準(≤-1.2)はそのまま維持しつつ、
+    ①深さが浅すぎない/深すぎない(50日線-5%〜-15% または ATR2〜5倍)、
+    ②反発確認を強化(CLV≥0.5相当 かつ 前日高値を上抜け)、を追加条件とした。
+    """
     feat = item["feat"]
     ticker = item["row"]["ticker"]
     z = sector_z.get(ticker)
     if z is None or z > cfg.rel_oversold_z:
         return None
+
+    # 深さレンジ(浅すぎ/深すぎを除外)。50日線基準とATR基準のどちらかを満たせばよい。
+    ma50_ok = False
+    if feat.get("ma50_ratio") == feat.get("ma50_ratio"):  # NaNでない
+        ma50_ok = -cfg.r_depth_ma50_max_pct / 100 <= feat["ma50_ratio"] <= -cfg.r_depth_ma50_min_pct / 100
+    atr_ok = cfg.r_depth_atr_min <= feat.get("pullback_depth_atr", 0) <= cfg.r_depth_atr_max
+    if not (ma50_ok or atr_ok):
+        return None
+
+    # 強化反発確認: CLV相当(bounce_confirmed) かつ 前日高値を上抜け(bounce_confirmed_strong)
+    if not (feat.get("bounce_confirmed") and feat.get("bounce_confirmed_strong")):
+        return None
+
     c = _finalize(item["row"], feat, "R",
-                 f"業種内相対z={z:.2f}(直近{cfg.rel_lookback_days}日)+ RSI({feat['rsi']:.0f})",
+                 f"業種内相対z={z:.2f}(直近{cfg.rel_lookback_days}日)+ 深さATR×{feat['pullback_depth_atr']:.1f}"
+                 f"+ 強化反発確認 + RSI({feat['rsi']:.0f})",
                  score=-z, cfg=cfg)  # zが低い(より売られている)ほどスコア高
     if c is not None:
-        c.flags.append("エンジンR(反転): 業種内で相対的に売られ過ぎの残りを取る設計。深追い厳禁")
+        c.flags.append("エンジンR(反転・精緻化基準): 業種内で相対的に売られ過ぎ + 深さが浅すぎず深すぎず"
+                      "(falling knife除外) + 前日高値を上抜ける強い反発を確認済み。深追い厳禁")
+        c.flags.append("⚠寄り付きで大きく上に窓が開いていたら追撃しない(この水準からの反発という前提が崩れる)")
         if feat["rsi"] <= cfg.rsi_secondary_th:
             c.flags.append(f"RSI({feat['rsi']:.0f})も過熱感の解消を示唆(補助確認・主軸ではない)")
+        if feat.get("low_volume_decline") is True:
+            c.flags.append("(参考)下落局面の出来高は過去20日平均より少なめ — 健全な押し目の傍証"
+                          "(学術的裏付けは弱いため参考情報に留める)")
     return c
 
 
