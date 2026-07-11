@@ -89,6 +89,8 @@ def compute_momentum_features(df: pd.DataFrame, bench_logclose: pd.Series | None
     trend_align = bool(close_now > sma50.iloc[-1] > sma150.iloc[-1] > sma200.iloc[-1]) \
         if not (pd.isna(sma50.iloc[-1]) or pd.isna(sma150.iloc[-1]) or pd.isna(sma200.iloc[-1])) else False
     breakdown = bool(close_now < sma(c, cfg.breakdown_sma).iloc[-1])
+    bounce = bounce_confirmed(df, cfg.bounce_lookback_days, cfg.bounce_min_close_position)
+    swing_high, days_since_high, depth_atr = swing_high_depth(df, atr_n, cfg.swing_high_lookback_days)
 
     adv20_jpy = float((c * v).iloc[-21:-1].mean())
 
@@ -99,10 +101,55 @@ def compute_momentum_features(df: pd.DataFrame, bench_logclose: pd.Series | None
         "chandelier": float(chand.iloc[-1]), "donchian_prev": float(donch_prev.iloc[-1]) if not pd.isna(donch_prev.iloc[-1]) else np.nan,
         "vcp_now": vcp_now, "vol_ratio_today": vol_ratio_today,
         "mom_12_1": mom_12_1, "high52w_proximity": high52w_proximity, "rel_strength": rel_strength,
-        "trend_align": trend_align, "breakdown": breakdown,
+        "trend_align": trend_align, "breakdown": breakdown, "bounce_confirmed": bounce,
+        "swing_high": swing_high, "days_since_swing_high": days_since_high, "pullback_depth_atr": depth_atr,
         "adv20_jpy": adv20_jpy,
         "last_date": str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1]),
     }
+
+
+def swing_high_depth(df: pd.DataFrame, atr_series: pd.Series, lookback_days: int = 60) -> tuple[float, int, float]:
+    """直近lookback_days日以内の高値(スイング高値)から現在までの下落を測る(押し目の深さ・期間の共有計算)。
+    戻り値: (スイング高値, スイング高値からの経過営業日数, ATR倍数での下落幅)。
+    調査レポート(2026-07-11)の「深さはATR正規化が望ましい」「継続期間20営業日以内」提案に対応。"""
+    h, c = df["High"], df["Close"]
+    window_h = h.iloc[-lookback_days:]
+    swing_high = float(window_h.max())
+    swing_high_idx = window_h.idxmax()
+    days_since = int((df.index >= swing_high_idx).sum()) - 1
+    close_now = float(c.iloc[-1])
+    atr_now = float(atr_series.iloc[-1])
+    depth_atr = (swing_high - close_now) / atr_now if atr_now > 0 else 0.0
+    return swing_high, days_since, depth_atr
+
+
+def bounce_confirmed(df: pd.DataFrame, lookback_days: int = 2, min_close_position: float = 0.5) -> bool:
+    """押し目が「ゾーンに近いだけ」ではなく「実際に反発し始めている」かを確認する。
+
+    ①当日の終値が高値-安値レンジの上位側(既定50%以上)で引けている(下げ止まりの気配)
+    ②直近lookback_days日の終値変化がプラス(短期の向きが上を向いている)
+    の両方を満たす場合のみTrueとする。まだ下げている途中の銘柄を「押し目ゾーン内」という
+    理由だけで拾ってしまうのを防ぐための追加フィルター(単体の predictive signal としてではなく、
+    既存のより実証的な条件—トレンド整列・業種内相対—の上に重ねるタイミング確認として使う)。
+    """
+    c, h, l = df["Close"], df["High"], df["Low"]
+    if len(c) < lookback_days + 1:
+        return False
+    today_range = float(h.iloc[-1] - l.iloc[-1])
+    if today_range <= 1e-9:
+        return False
+    close_position = float(c.iloc[-1] - l.iloc[-1]) / today_range
+    short_term_turn = float(c.iloc[-1]) > float(c.iloc[-1 - lookback_days])
+    return close_position >= min_close_position and short_term_turn
+
+
+def bounce_confirmed_strong(df: pd.DataFrame) -> bool:
+    """反転エンジン向けの強化反発確認: 前日高値を上抜けている(ミニブレイク型の反発)。
+    調査レポートの「反転エンジンはより厳格な反発確認を推奨(CLV+前日高値上抜け)」に対応。"""
+    c, h = df["Close"], df["High"]
+    if len(c) < 2:
+        return False
+    return float(c.iloc[-1]) > float(h.iloc[-2])
 
 
 def tob_suspect(df: pd.DataFrame, cfg) -> tuple[bool, str]:
