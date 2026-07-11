@@ -75,11 +75,22 @@ class Config:
 
     # --- エンジンR(反転・低〜中回転率) ---
     rel_lookback_days: int = field(default_factory=lambda: _i("R_REL_LOOKBACK_DAYS", 5))
-    rel_oversold_z: float = field(default_factory=lambda: _f("R_REL_OVERSOLD_Z", -1.0))  # 業種内相対z値の下側閾値
+    rel_oversold_z: float = field(default_factory=lambda: _f("R_REL_OVERSOLD_Z", -1.2))  # 業種内相対z値の下側閾値(安定性重視で-1.0→-1.2)
+    rel_min_sector_members: int = field(default_factory=lambda: _i("R_REL_MIN_SECTOR_MEMBERS", 5))  # 3→5(統計の安定性優先)
     rsi_period: int = field(default_factory=lambda: _i("RSI_PERIOD", 14))
     rsi_secondary_th: float = field(default_factory=lambda: _f("RSI_SECONDARY_TH", 40.0))  # 補助確認(主軸ではない)
     r_min_dip_days: int = field(default_factory=lambda: _i("R_MIN_DIP_DAYS", 2))
     r_max_dip_days: int = field(default_factory=lambda: _i("R_MAX_DIP_DAYS", 5))
+    # ★調査(2026-07-11)反映: z値基準は維持しつつ、深さレンジ(浅すぎ/深すぎを除外)を追加。
+    # 「50日線の-5%〜-15%」または「ATR2〜5倍の下落」のいずれかを満たすことを要求する。
+    r_depth_ma50_min_pct: float = field(default_factory=lambda: _f("R_DEPTH_MA50_MIN_PCT", 5.0))
+    r_depth_ma50_max_pct: float = field(default_factory=lambda: _f("R_DEPTH_MA50_MAX_PCT", 15.0))
+    r_depth_atr_min: float = field(default_factory=lambda: _f("R_DEPTH_ATR_MIN", 2.0))
+    r_depth_atr_max: float = field(default_factory=lambda: _f("R_DEPTH_ATR_MAX", 5.0))
+    swing_high_lookback_days: int = field(default_factory=lambda: _i("SWING_HIGH_LOOKBACK_DAYS", 60))
+    # ★押し目の反発確認(新規): ゾーン内にいるだけでなく実際に反発し始めていることを要求する(momentumと共通仕様)
+    bounce_lookback_days: int = field(default_factory=lambda: _i("BOUNCE_LOOKBACK_DAYS", 2))
+    bounce_min_close_position: float = field(default_factory=lambda: _f("BOUNCE_MIN_CLOSE_POSITION", 0.75))
 
     # --- エンジンM(モメンタム入口・高回転率) ---
     gap_threshold: float = field(default_factory=lambda: _f("M_GAP_THRESHOLD", 0.04))  # 単日+4%以上
