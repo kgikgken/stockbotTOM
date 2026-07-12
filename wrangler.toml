@@ -1,8 +1,0 @@
-name = "stockbot-worker"
-main = "src/worker.js"
-compatibility_date = "2025-12-07"
-workers_dev = true
-
-[[r2_buckets]]
-binding = "REPORTS"
-bucket_name = "stockbot-reports"
