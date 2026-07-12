@@ -68,7 +68,8 @@ def check_held_positions(pos_df: pd.DataFrame, universe: pd.DataFrame, cfg: Conf
         feat = compute_swing_features(df, cfg)
         close_now = feat["close"] if feat else (float(df["Close"].dropna().iloc[-1]) if len(df["Close"].dropna()) else None)
         if close_now is None:
-            alerts.append({"code": code, "name": name, "hit": None, "note": "データ不足(算出不可)"})
+            alerts.append({"code": code, "name": name, "hit": None,
+                           "note": f"データ不足(算出不可・取得{len(df)}行)"})
             continue
 
         notes = []
