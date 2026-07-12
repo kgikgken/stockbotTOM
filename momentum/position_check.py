@@ -183,8 +183,11 @@ def check_held_positions(pos_df: pd.DataFrame, universe: pd.DataFrame, cfg: Conf
                 continue
             feat = compute_momentum_features(df, None, cfg)
             if feat is None:
+                need = max(cfg.regime_mom_days, 260) + 5
                 alerts.append({"code": code, "name": name, "state_c": None, "score_drop": False,
-                               "tob_jump": False, "note": "データ不足(算出不可)"})
+                               "tob_jump": False,
+                               "note": f"データ不足(算出不可・取得{len(df)}行/必要{need}行以上。"
+                                       f"翌日も続く場合はこの銘柄のデータ品質を疑う)"})
                 continue
 
             notes = []
