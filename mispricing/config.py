@@ -1,4 +1,4 @@
-"""v5.0 歪み×資金循環 screener — configuration (env-driven)."""
+"""v4.1 mispricing screener — configuration (env-driven)."""
 
 from __future__ import annotations
 
@@ -33,13 +33,13 @@ class Config:
     dryrun: bool = field(default_factory=lambda: _b("SCREEN_DRYRUN", False))
     outdir: str = field(default_factory=lambda: os.getenv("REPORT_OUTDIR", "out"))
 
-    # --- universe / liquidity prefilter (ADV5億円・ロット/ADV比は自動充足) ---
+    # --- universe / liquidity prefilter (ロット/ADV比の代理) ---
     min_price: float = field(default_factory=lambda: _f("MIN_PRICE", 100.0))
     min_adv_jpy: float = field(default_factory=lambda: _f("MIN_ADV_JPY", 5.0e8))
     lot_jpy: float = field(default_factory=lambda: _f("LOT_JPY", 1.5e6))
     max_lot_adv_ratio: float = field(default_factory=lambda: _f("MAX_LOT_ADV_RATIO", 0.01))
 
-    # --- Gate1: normalized primary triggers (補助・絶対値/RSI) ---
+    # --- Gate1: normalized primary triggers ---
     z_dev_th: float = field(default_factory=lambda: _f("Z_DEV_TH", 2.0))
     pctl_th: float = field(default_factory=lambda: _f("PCTL_TH", 5.0))
     rsi_long: float = field(default_factory=lambda: _f("RSI_LONG", 30.0))
@@ -47,7 +47,7 @@ class Config:
     rsi_ext_long: float = field(default_factory=lambda: _f("RSI_EXT_LONG", 20.0))
     rsi_ext_short: float = field(default_factory=lambda: _f("RSI_EXT_SHORT", 80.0))
 
-    # --- Gate1: bucket fallback thresholds (絶対乖離%・業種系列が作れない場合) ---
+    # --- Gate1: bucket fallback thresholds (縮退・市場区分バケット, dev25 in %) ---
     bucket_dev: dict = field(default_factory=lambda: {
         "Prime": _f("BUCKET_DEV_PRIME", 12.0),
         "Standard": _f("BUCKET_DEV_STANDARD", 15.0),
@@ -109,9 +109,9 @@ class Config:
     stop_atr_mult_hivol: float = field(default_factory=lambda: _f("STOP_ATR_MULT_HIVOL", 2.0))
     stop_buffer_pct: float = field(default_factory=lambda: _f("STOP_BUFFER_PCT", 0.3))
     max_risk_width_pct: float = field(default_factory=lambda: _f("MAX_RISK_WIDTH_PCT", 8.0))
-    hold_days: int = field(default_factory=lambda: _i("HOLD_DAYS", 5))
-    expiry_days: int = field(default_factory=lambda: _i("CANDIDATE_EXPIRY_DAYS", 3))
-    trail_days: int = field(default_factory=lambda: _i("TRAIL_DAYS", 3))
+    hold_days: int = field(default_factory=lambda: _i("HOLD_DAYS", 5))           # 時間ストップN(≒保有期間上限・2〜5営業日設計)
+    expiry_days: int = field(default_factory=lambda: _i("CANDIDATE_EXPIRY_DAYS", 3))  # 未エントリー失効
+    trail_days: int = field(default_factory=lambda: _i("TRAIL_DAYS", 3))          # 直近N日安値/高値
 
     # --- 確信度→リスク% / 総リスク上限 ---
     risk_pct_high: float = field(default_factory=lambda: _f("RISK_PCT_HIGH", 1.0))

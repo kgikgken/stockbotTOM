@@ -95,7 +95,7 @@ def render_png(outpath: str, today: str, meta: dict, macro: dict, flow: dict,
          22, RED if macro["half_lot"] else SUB, macro["half_lot"])
     y += 110
 
-    # ---------- 保有ポジション評価(日次再評価・新規) ----------
+    # ---------- 保有ポジション評価(日次再評価・新規追加) ----------
     if positions:
         y = text(MARGIN, y, "保有ポジション評価(日次再評価)", 24, INK, True)
         for p in positions:

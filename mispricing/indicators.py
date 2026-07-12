@@ -1,4 +1,4 @@
-"""Technical indicators for Gate1 (単一ソース算出指標)."""
+"""Technical indicators for Gate1 (単一ソース算出指標 → 既定で未確認扱い)."""
 
 from __future__ import annotations
 
