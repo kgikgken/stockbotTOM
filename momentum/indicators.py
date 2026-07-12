@@ -53,6 +53,11 @@ def compute_momentum_features(df: pd.DataFrame, bench_logclose: pd.Series | None
     """df: OHLCV daily。bench_logclose: ベンチマーク(TOPIX)のlog(close)系列(日付整列前)。"""
     if df is None or len(df) < max(cfg.regime_mom_days, 260) + 5:
         return None
+    # ★不正なticker(表記ゆれ・上場廃止等)でyfinanceが列欠損の異常なDataFrameを返すことがある。
+    # 想定列が揃っていない場合はデータ不足として安全にNoneを返す(KeyErrorでの全体クラッシュを防ぐ)。
+    required_cols = {"Open", "High", "Low", "Close", "Volume"}
+    if not required_cols.issubset(set(df.columns)):
+        return None
     df = df.dropna(subset=["Close"]).copy()
     if len(df) < 260:
         return None
