@@ -1,8 +1,14 @@
-"""stockbotTOM — v5.0 歪み×資金循環スクリーニング(パス1自動化) entry point.
+"""stockbotTOM — v4.1歪みスクリーニング(パス1自動化) entry point.
 
-旧トレンドフォロー(v2.0系)・v4.1タイプ体系は全廃し、v5.0エンジン体系
-(A=業種内リバーサル / S=逆流戻り売り / B疑い=PEAD)へ再編。
-資金循環マップ(STEP1.5)と保有ポジション日次評価を搭載。utils/依存なし。
+旧トレンドフォロー(トレンドテンプレート/ソーサー)ロジックは全廃し、
+v4.1ミスプライシング枠組みの「定量パス1」に全面置換。
+utils/ パッケージへの依存なし(自己完結)。
+
+★2026-07-12: 3システム統合(main_all.py)対応でパイプラインを関数化。
+- run_pipeline(): 取得済みデータを受け取りレポートまで組み立てる(main_all.pyから共有呼び出し)
+- main(): 単独実行用の従来エントリ(取得→run_pipeline→LINE送信)。挙動は従来と同一
+- 保有ポジションは positions_mispricing.csv に分離(positions.csvはモメンタム専用。
+  momentum側の状態C監視ロジックが歪みポジを誤判定しないようにするため)
 """
 
 from __future__ import annotations
@@ -27,22 +33,17 @@ from mispricing.line_send import send_line
 
 JST = timezone(timedelta(hours=9))
 
+POSITIONS_PATH = "positions_mispricing.csv"
 
-def main() -> None:
-    cfg = load_config()
-    now_jst = datetime.now(JST)
-    today = now_jst.strftime("%Y-%m-%d")
+
+def run_pipeline(uni_full, uni, ohlcv: dict, meta: dict, cfg, today: str, month: int) -> dict:
+    """歪み×資金循環パイプライン本体(データ取得とLINE送信を除く全て)。
+    main.py単独実行とmain_all.py(3システム統合)の両方から呼ばれる。
+    戻り値: {"text", "images", "caption", "picked"}"""
+    meta = dict(meta)  # 共有metaを汚さない(data_warnは各システムの基準で独立に判定)
+    meta["data_warn"] = meta["data_coverage"] < cfg.data_coverage_min
     outdir = Path(cfg.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-
-    # ---- data ----
-    uni_full = load_universe("universe_jpx.csv")
-    uni = uni_full.head(60).copy() if cfg.dryrun else uni_full
-    tickers = uni["ticker"].tolist()
-    print(f"[1/8] universe {len(tickers)}銘柄 / dryrun={cfg.dryrun}")
-
-    ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun)
-    meta["data_warn"] = meta["data_coverage"] < cfg.data_coverage_min
     print(f"[2/8] OHLCV {meta['data_ok']}/{meta['data_total']} "
           f"({meta['data_coverage']*100:.0f}%) warn={meta['data_warn']}")
 
@@ -53,15 +54,16 @@ def main() -> None:
     print(f"[4/8] 資金循環マップ ok={flow.get('ok')} レジーム={flow.get('regime')}")
 
     # ---- screen ----
-    res = run_screen(uni, ohlcv, cfg, macro, flow, now_jst.month)
+    res = run_screen(uni, ohlcv, cfg, macro, flow, month)
     print(f"[5/8] 検討{res['stats']['considered']} 棄却{res['stats']['rejected']} "
           f"本命{res['stats']['picked']} 参考層{res['stats']['watch']} "
           f"engine={res['stats']['by_engine']}")
 
-    # ---- STEP4 既存ポジ / 保有評価 / STEP5 ログ ----
-    pos = load_positions("positions.csv")
+    # ---- STEP4 既存ポジ / STEP5 ログ ----
+    pos = load_positions(POSITIONS_PATH)
     _, pos_note = open_risk_from_positions(pos, cfg.account_equity)
-    positions_eval = check_positions(pos, uni_full, cfg, macro, flow, now_jst.month)
+    pos_note = f"{pos_note}(歪み系・{POSITIONS_PATH})"
+    positions_eval = check_positions(pos, uni_full, cfg, macro, flow, month)
     print(f"[6/8] 保有ポジション評価 {len(positions_eval)}件")
 
     backfilled = ledger.backfill_reject_returns(cfg.outdir, ohlcv, cfg.reject_backfill_bdays)
@@ -71,23 +73,44 @@ def main() -> None:
     print(f"[7/8] ログ出力 {plan_path} / 棄却台帳追記{len(res['rejects'])}件 / 追記{backfilled}件")
 
     # ---- report ----
-    events = load_week_events("events.csv", now_jst.date())
+    events = load_week_events("events.csv", datetime.now(JST).date())
     text = build_text(today, meta, macro, flow, res, pos_note, events, backfilled, cfg,
                       positions=positions_eval)
     (outdir / f"report_{today}.txt").write_text(text, encoding="utf-8")
 
     png_path = str(outdir / f"report_table_{today}.png")
+    images: list[str] = []
     try:
         render_png(png_path, today, meta, macro, flow, res, pos_note, events, cfg,
                   positions=positions_eval)
         images = [png_path]
     except Exception:
         traceback.print_exc()
-        images = []
+
+    return {
+        "text": text, "images": images,
+        "caption": f"歪み×資金循環スクリーニング {today} 本命{res['stats']['picked']}件",
+        "picked": res["stats"]["picked"],
+    }
+
+
+def main() -> None:
+    cfg = load_config()
+    now_jst = datetime.now(JST)
+    today = now_jst.strftime("%Y-%m-%d")
+
+    # ---- data ----
+    uni_full = load_universe("universe_jpx.csv")
+    uni = uni_full.head(60).copy() if cfg.dryrun else uni_full
+    tickers = uni["ticker"].tolist()
+    print(f"[1/8] universe {len(tickers)}銘柄 / dryrun={cfg.dryrun}")
+
+    ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun)
+
+    out = run_pipeline(uni_full, uni, ohlcv, meta, cfg, today, now_jst.month)
 
     # ---- LINE ----
-    result = send_line(text, image_paths=images,
-                       image_caption=f"歪み×資金循環スクリーニング {today} 本命{res['stats']['picked']}件")
+    result = send_line(out["text"], image_paths=out["images"], image_caption=out["caption"])
     print("[8/8] LINE result:", {k: result.get(k) for k in
                                  ("ok", "text_ok", "image_ok", "backend", "status_code")})
 

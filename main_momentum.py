@@ -1,13 +1,13 @@
-"""stockbotTOM — モメンタム + 2週間スイング 統合entry point(歪み系mispricing/とは完全独立).
+"""stockbotTOM — モメンタム + 2週間スイング entry point.
 
-「全振り」運用の実体: GitHub Actionsの実行対象を main.py からこのファイルに切り替えるだけで、
-配信されるのはこのモメンタム・スクリーニング(+2週間スイング)のみになる。main.py(歪み系)の
-コードは削除せず温存(将来の比較・再併用のための保険)。
+★2026-07-12: 3システム統合(main_all.py)対応でパイプラインを関数化。
+- run_pipeline(): 取得済みデータを受け取りレポートまで組み立てる(main_all.pyから共有呼び出し)
+- main(): 単独実行用の従来エントリ(取得→run_pipeline→LINE送信)。挙動は従来と同一
 
 ハード制約(ユーザー明示指定・裁量による例外なし):
-- モメンタム: 実保有最大3銘柄・同一業種1銘柄まで・リスク固定0.5%
+- モメンタム: 実保有最大3銘柄・同一業種1銘柄まで・リスク固定0.5%(保有記録=positions.csv)
 - 2週間スイング(swing2w): モメンタムとは★別枠★で実保有最大3銘柄・同一業種1銘柄まで・リスク固定0.5%
-  (回転率二分のエンジンR/M、固定利確+時間ストップのハイブリッド出口。詳細はswing2w/config.py参照)
+  (回転率二分のエンジンR/M、固定利確+時間ストップのハイブリッド出口。保有記録=positions_swing2w.csv)
 レジーム防御モードは機械的ブロックではなく注意喚起のみ(モメンタム側のみに適用・ユーザー判断で変更)。
 """
 
@@ -39,24 +39,19 @@ from mispricing.line_send import send_line
 JST = timezone(timedelta(hours=9))
 
 
-def main() -> None:
-    cfg = load_config()
-    now_jst = datetime.now(JST)
-    today = now_jst.strftime("%Y-%m-%d")
+def run_pipeline(uni, ohlcv: dict, meta: dict, cfg, today: str) -> dict:
+    """モメンタム+swing2wパイプライン本体(データ取得とLINE送信を除く全て)。
+    main_momentum.py単独実行とmain_all.py(3システム統合)の両方から呼ばれる。
+    戻り値: {"text", "images", "caption", "picked", "picked_swing2w"}"""
+    meta = dict(meta)  # 共有metaを汚さない
+    meta["data_warn"] = meta["data_coverage"] < cfg.data_coverage_min
     outdir = Path(cfg.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # ---- STEP1: レジームフィルター(絶対遵守・最優先) ----
+    # ---- STEP1: レジームフィルター(警告のみ・ブロックしない) ----
     regime = compute_regime(cfg, today=today)
     print(f"[1/6] レジーム: {regime.get('mode')} attack={regime.get('attack')}")
 
-    # ---- data ----
-    uni = load_universe("universe_jpx.csv")
-    if cfg.dryrun:
-        uni = uni.head(60).copy()
-    tickers = uni["ticker"].tolist()
-    ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun)
-    meta["data_warn"] = meta["data_coverage"] < cfg.data_coverage_min
     print(f"[2/6] OHLCV {meta['data_ok']}/{meta['data_total']} ({meta['data_coverage']*100:.0f}%)"
           + (f" (2巡目で{meta['recovered_2nd_pass']}件回収)" if meta.get("recovered_2nd_pass") else ""))
     if meta.get("fetch_failures"):
@@ -65,7 +60,6 @@ def main() -> None:
 
     bench_logclose = None
     if regime.get("ok"):
-        series, _ = None, None
         from momentum.data import fetch_regime_series
         bseries, _src = fetch_regime_series(cfg)
         if bseries is not None:
@@ -76,6 +70,10 @@ def main() -> None:
     res = run_screen(uni, ohlcv, bench_logclose, regime, cfg)
     print(f"[4/6] プール{res['stats']['pool_size']}銘柄 点灯{res['stats']['fired']}件 "
           f"→ 採用{res['stats']['picked']}件 state={res['stats']['state_count']}")
+    gfc = res['stats'].get('gate_fail_counter', {})
+    if gfc:
+        print(f"[4.5/6] 状態A診断: trend_align=True但し非該当 {res['stats']['trend_align_true_n']}件 "
+              f"— 落ちたゲート内訳(重複可): {dict(sorted(gfc.items(), key=lambda x: -x[1]))}")
 
     # ---- 既存ポジ注記 / entry_score自動転記(指示⑩) / 状態C・スコア劣化・TOB監視(指示③⑥⑦⑪) / ログ ----
     n_backfilled = backfill_entry_scores("positions.csv", res.get("eligible"), today, cfg.dryrun, cfg)
@@ -117,6 +115,7 @@ def main() -> None:
     (outdir / f"momentum_report_{today}.txt").write_text(text, encoding="utf-8")
 
     png_path = str(outdir / f"momentum_report_table_{today}.png")
+    images: list[str] = []
     try:
         render_png(png_path, today, meta, regime, res, pos_note, cfg, position_alerts=position_alerts,
                   swing2w_res=res2, swing2w_alerts=position_alerts2,
@@ -124,11 +123,29 @@ def main() -> None:
         images = [png_path]
     except Exception:
         traceback.print_exc()
-        images = []
 
-    result = send_line(text, image_paths=images,
-                       image_caption=f"モメンタム{today} 候補{res['stats']['picked']}件 / "
-                                     f"2週間スイング候補{res2['stats']['picked']}件")
+    return {
+        "text": text, "images": images,
+        "caption": f"モメンタム{today} 候補{res['stats']['picked']}件 / "
+                   f"2週間スイング候補{res2['stats']['picked']}件",
+        "picked": res["stats"]["picked"], "picked_swing2w": res2["stats"]["picked"],
+    }
+
+
+def main() -> None:
+    cfg = load_config()
+    now_jst = datetime.now(JST)
+    today = now_jst.strftime("%Y-%m-%d")
+
+    uni = load_universe("universe_jpx.csv")
+    if cfg.dryrun:
+        uni = uni.head(60).copy()
+    tickers = uni["ticker"].tolist()
+    ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun)
+
+    out = run_pipeline(uni, ohlcv, meta, cfg, today)
+
+    result = send_line(out["text"], image_paths=out["images"], image_caption=out["caption"])
     print("[6/6] LINE result:", {k: result.get(k) for k in
                                  ("ok", "text_ok", "image_ok", "backend", "status_code")})
 
