@@ -70,9 +70,20 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
     pool, pool_stats, tob_rejects, eligible = build_pool(universe, ohlcv, bench_logclose, cfg)
 
     state_count = {"A": 0, "B": 0, "C": 0}
+    from collections import Counter
+    gate_fail_counter: Counter = Counter()
+    trend_align_true_n = 0
     fired: List[Candidate] = []
     for item in pool:
-        state = classify_state(item["feat"], cfg)
+        feat = item["feat"]
+        state = classify_state(feat, cfg)
+        # ★診断(指示: 精査): state Aに届かなかったtrend_align=True銘柄が、どのゲートで
+        # 落ちたかを集計する。判定ロジック自体には影響しない、集計専用。
+        if state is None and feat.get("trend_align"):
+            trend_align_true_n += 1
+            from .classify import state_a_gate_diagnostics
+            for g in state_a_gate_diagnostics(feat, cfg):
+                gate_fail_counter[g] += 1
         if state is None:
             continue
         state_count[state] = state_count.get(state, 0) + 1
@@ -163,6 +174,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         "total_risk": total_risk,
         "risk_cap": cfg.total_risk_cap,
         "regime_caution": regime_caution,
+        "gate_fail_counter": dict(gate_fail_counter), "trend_align_true_n": trend_align_true_n,
     }
     return {"picked": picked, "watch": watch, "rejects": rejects, "stats": stats,
             "pool_stats": pool_stats, "eligible": eligible}

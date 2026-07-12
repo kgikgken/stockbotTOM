@@ -57,12 +57,8 @@ def state_a_gate_diagnostics(feat: dict, cfg) -> list[str]:
         failed.append("in_zone")
     if not (feat["pullback_depth_atr"] <= cfg.pullback_depth_atr_mult):
         failed.append("depth_ok")
-    if not (feat["close"] >= feat["sma50"] * (1 - cfg.pullback_ma50_floor_pct / 100)):
-        failed.append("ma50_floor_ok")
     if not (feat["days_since_swing_high"] <= cfg.pullback_max_duration_days):
         failed.append("duration_ok")
-    if not (feat["high52w_proximity"] >= cfg.health_high52w_min):
-        failed.append("health_ok")
     if not feat.get("bounce_confirmed"):
         failed.append("bounce_confirmed")
     return failed
@@ -71,10 +67,16 @@ def state_a_gate_diagnostics(feat: dict, cfg) -> list[str]:
 def classify_state(feat: dict, cfg) -> str | None:
     """A / B / C / None(いずれでもない)を返す。優先順位: C(流出) > B(初動) > A(継続)。
 
-    状態Aの判定基準は調査レポート(2026-07-11)を反映して精緻化済み(実運用の絞り込みすぎ判明後に一部緩和済み):
-    ①非対称な押し目ゾーン(MAの上+2.5%〜下-5%) ②深さ上限(ATR×3以内 かつ 50日線-10%以内)
-    ③継続期間上限(スイング高値から35営業日以内) ④反発確認(CLV≥0.5相当) ⑤健全性(52週高値の60%以上)
-    のいずれも満たす場合のみ状態A。旧来の対称±2.5%・深さ無制限・期間無制限からの精緻化。
+    状態Aは以下5ゲートのAND(2026-07-12凍結版・懐疑的レビューを受けた整理後):
+    ①トレンド整列(終値>50日>150日>200日) ②非対称な押し目ゾーン(20日線の上+2.5%〜下-5%、Alajbeg et al. 2017)
+    ③深さ上限(スイング高値からATR×3以内) ④継続期間上限(スイング高値から35営業日以内・仮置き)
+    ⑤反発確認(CLV≥0.5相当+直近2日プラス転換)
+
+    整理の記録(2026-07-12):
+    - 旧「50日線-10%フロア」は削除。①が終値>50日線を要求するため数学的に常に真(死んだ条件)だった。
+    - 旧「52週高値60%以上」ゲートは削除。スコア側(w_high52w=0.25)と二重取りな上、
+      60%という閾値は候補数を見て緩めた経緯(75→60)があり実証的根拠を持たないため。
+      52週高値近接度はランキング要素としてのみ使う(George & Hwang 2004の使い方に整合)。
     """
     if feat["breakdown"]:
         return "C"
@@ -82,19 +84,16 @@ def classify_state(feat: dict, cfg) -> str | None:
             and feat["vol_ratio_today"] >= cfg.vcp_breakout_vol_mult:
         return "B"
 
-    # ①非対称な押し目ゾーン(20日線基準。上+2.5%〜下-5%)
+    # ②非対称な押し目ゾーン(20日線基準。上+2.5%〜下-5%)
     ratio20 = feat["close"] / feat["sma20"] - 1
     in_zone = (-cfg.pullback_lower_pct / 100) <= ratio20 <= (cfg.pullback_upper_pct / 100)
-    # ②深さ上限(スイング高値からATR×3以内、かつ50日線の-10%を下回らない)
+    # ③深さ上限(スイング高値からATR×3以内)
     depth_ok = feat["pullback_depth_atr"] <= cfg.pullback_depth_atr_mult
-    ma50_floor_ok = feat["close"] >= feat["sma50"] * (1 - cfg.pullback_ma50_floor_pct / 100)
-    # ③継続期間上限(スイング高値から20営業日以内)
+    # ④継続期間上限(スイング高値からの経過営業日)
     duration_ok = feat["days_since_swing_high"] <= cfg.pullback_max_duration_days
-    # ⑤健全性(52週高値の75%以上。George & Hwang 2004、モメンタムクラッシュのloser側除外)
-    health_ok = feat["high52w_proximity"] >= cfg.health_high52w_min
 
-    if (feat["trend_align"] and in_zone and depth_ok and ma50_floor_ok and duration_ok
-            and health_ok and feat.get("bounce_confirmed")):
+    if (feat["trend_align"] and in_zone and depth_ok and duration_ok
+            and feat.get("bounce_confirmed")):
         return "A"
     return None
 
@@ -122,10 +121,10 @@ def build_candidate(row: dict, feat: dict, state: str, score: float, cfg) -> Can
     c.risk_w = risk_w
 
     if state == "A":
-        c.flags.append(f"押し目買い(精緻化基準): 20日線の上+{cfg.pullback_upper_pct:.1f}%〜下-{cfg.pullback_lower_pct:.1f}%・"
+        c.flags.append(f"押し目買い(凍結版基準): 20日線の上+{cfg.pullback_upper_pct:.1f}%〜下-{cfg.pullback_lower_pct:.1f}%・"
                       f"深さATR×{feat['pullback_depth_atr']:.1f}(上限{cfg.pullback_depth_atr_mult:.1f})・"
                       f"経過{feat['days_since_swing_high']}営業日(上限{cfg.pullback_max_duration_days})・"
-                      f"52週高値比{feat['high52w_proximity']*100:.0f}%・反発確認済み、を全て満たす")
+                      f"反発確認済み、を全て満たす(参考: 52週高値比{feat['high52w_proximity']*100:.0f}%)")
         c.flags.append("⚠寄り付きで大きく上に窓が開いていたら追撃しない(この水準からの反発という前提が崩れる)")
     else:
         c.flags.append("ブレイク当日: 寄り付き直後の値動きで再確認してから発注(ダマシ注意)")

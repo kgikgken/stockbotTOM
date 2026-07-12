@@ -85,15 +85,14 @@ class Config:
     # ★調査(2026-07-11)反映: 「±2.5%」対称帯を非対称帯に置換(20日線基準・下側を広く)
     pullback_upper_pct: float = field(default_factory=lambda: _f("PULLBACK_UPPER_PCT", 2.5))   # MAの上+2.5%まで
     pullback_lower_pct: float = field(default_factory=lambda: _f("PULLBACK_LOWER_PCT", 5.0))   # MAの下-5.0%まで
-    # 深さ上限(追加): ATR倍数上限 + 50日線からの下限%。Alajbeg et al.(2017)「MAから大きく下は最低リターン」に対応
+    # 深さ上限(追加): ATR倍数上限。Alajbeg et al.(2017)「MAから大きく下は最低リターン」に対応
+    # ※旧「50日線-10%フロア」はtrend_align(終値>50日線)により数学的に常に真=死んだ条件だったため削除(2026-07-12整理)
+    # ※旧「52週高値60%ゲート」はスコア(w_high52w)との二重取り+閾値が候補数由来で根拠なしのため削除(同上)
     pullback_depth_atr_mult: float = field(default_factory=lambda: _f("PULLBACK_DEPTH_ATR_MULT", 3.0))
-    pullback_ma50_floor_pct: float = field(default_factory=lambda: _f("PULLBACK_MA50_FLOOR_PCT", 10.0))
     swing_high_lookback_days: int = field(default_factory=lambda: _i("SWING_HIGH_LOOKBACK_DAYS", 60))
     # 継続期間上限(追加): 短期リバーサルの窓を超えたらトレンド劣化とみなす。
-    # ★初期値20日は実運用で絞り込みすぎと判明、35日に緩和(短期反転の1〜1.5ヶ月相当の窓)
+    # ★初期値20日は実運用で絞り込みすぎと判明、35日に緩和(短期反転の1〜1.5ヶ月相当の窓。仮置き・未検証)
     pullback_max_duration_days: int = field(default_factory=lambda: _i("PULLBACK_MAX_DURATION_DAYS", 35))
-    # 健全性フィルター(追加): 52週高値近接度。★初期値75%は絞り込みすぎと判明、60%に緩和
-    health_high52w_min: float = field(default_factory=lambda: _f("HEALTH_HIGH52W_MIN", 0.60))
     # ★押し目の反発確認(新規): ゾーン内にいるだけでなく実際に反発し始めていることを要求する
     bounce_lookback_days: int = field(default_factory=lambda: _i("BOUNCE_LOOKBACK_DAYS", 2))
     # ★調査(2026-07-11)反映: CLV≥0.5(伝統的な-1〜+1のClose Location Value)は
