@@ -175,85 +175,92 @@ def check_held_positions(pos_df: pd.DataFrame, universe: pd.DataFrame, cfg: Conf
         name = str(urow["name"]) if urow is not None else ticker
         code = ticker.replace(".T", "")
 
-        df = ohlcv.get(ticker)
-        if df is None:
+        try:
+            df = ohlcv.get(ticker)
+            if df is None:
+                alerts.append({"code": code, "name": name, "state_c": None, "score_drop": False,
+                               "tob_jump": False, "note": "データ取得不可(コード不一致・上場廃止等、要確認)"})
+                continue
+            feat = compute_momentum_features(df, None, cfg)
+            if feat is None:
+                alerts.append({"code": code, "name": name, "state_c": None, "score_drop": False,
+                               "tob_jump": False, "note": "データ不足(算出不可)"})
+                continue
+
+            notes = []
+            is_c = bool(feat["breakdown"])
+            if is_c:
+                notes.append(f"状態Cに該当(終値{feat['close']:,.0f}円が50日線{feat['sma50']:,.0f}円を下回った)。"
+                            f"シャンデリア水準({feat['chandelier']:,.0f}円)到達まで自動手仕舞いはされない点に注意")
+
+            # ---- 指示⑥: スコア劣化早期警告(状態Cの手前) ----
+            score_drop = False
+            if not is_c:
+                item = eligible_by_ticker.get(ticker)
+                today_score = item["score"] if item else None
+                if today_score is None:
+                    notes.append("本日の候補プール母集団に含まれず(流動性未達等)、スコア追跡不可")
+                else:
+                    fell_out = ticker not in top_pool_tickers
+                    sd_drop = None
+                    entry_score = entry_scores.get(ticker)
+                    if entry_score is not None and pop_std and pop_std > 1e-9:
+                        sd_drop = (entry_score - today_score) / pop_std
+                    if fell_out or (sd_drop is not None and sd_drop >= cfg.score_drop_sd_threshold):
+                        score_drop = True
+                        reason_bits = []
+                        if fell_out:
+                            reason_bits.append(f"候補プール上位{pool_cut_rank}位から脱落")
+                        if sd_drop is not None and sd_drop >= cfg.score_drop_sd_threshold:
+                            reason_bits.append(f"エントリー時比 標準偏差{sd_drop:.1f}分低下")
+                        notes.append("スコア劣化警告(状態Cではないが弱含み): " + " / ".join(reason_bits))
+                    elif entry_score is None:
+                        notes.append("entry_score未記録のためエントリー比の劣化判定は不可(プール順位のみ判定)")
+
+            # ---- 指示⑦⑪: TOB急騰検知(2段階化・誤検知抑制) ----
+            # Day0: 単日+15%以上のジャンプ → 弱い「参考」通知(TOBか通常のブレイク加速か当日は区別不能)
+            # Day cfg.position_tob_confirm_days: ジャンプ後のボラが崩れていれば強い警告に格上げ。
+            #      崩れていなければ通常のブレイク加速とみなし、追加アラートは出さない(静かに終わる)。
+            tob_jump = False
+            tob_stage = None
+            c = df["Close"].dropna()
+            lr_all = np.log(c / c.shift(1)).dropna()
+            if len(lr_all) >= cfg.position_tob_baseline_days + cfg.position_tob_confirm_days:
+                lookback = lr_all.iloc[-(cfg.position_tob_confirm_days + 5):]
+                if len(lookback) and float(lookback.abs().max()) >= cfg.position_tob_jump_threshold:
+                    jump_idx = lookback.abs().idxmax()
+                    jump_ret = float(lookback.loc[jump_idx])
+                    days_since = int((lr_all.index >= jump_idx).sum()) - 1
+                    if days_since == 0:
+                        tob_jump, tob_stage = True, "day0"
+                        notes.append(f"直近1営業日で単日{jump_ret*100:+.0f}%の急騰を検知(参考)。"
+                                    "TOB等の可能性と、通常のブレイクアウト加速の可能性の両方があり、"
+                                    f"本日時点では判別不可。{cfg.position_tob_confirm_days}営業日後に"
+                                    "ボラティリティの状況を再確認する")
+                    elif days_since >= cfg.position_tob_confirm_days:
+                        post = lr_all.loc[lr_all.index > jump_idx]
+                        pre = lr_all.loc[lr_all.index < jump_idx].iloc[-cfg.position_tob_baseline_days:]
+                        if len(post) >= 2 and len(pre) >= 10:
+                            post_vol, pre_vol = float(post.std(ddof=0)), float(pre.std(ddof=0))
+                            if pre_vol > 1e-9 and post_vol < pre_vol * cfg.tob_vol_collapse_ratio:
+                                tob_jump, tob_stage = True, "confirmed"
+                                notes.append(f"{days_since}営業日前の単日{jump_ret*100:+.0f}%急騰後、"
+                                            f"変動率が平常時の{post_vol/pre_vol*100:.0f}%に低下 → "
+                                            "TOB疑いアラート(要確認)に格上げ。シャンデリア・エグジットは"
+                                            "通常ボラティリティ前提のため機能しない可能性。"
+                                            "iSPEEDで適時開示を確認してください")
+                            # 崩れていなければ通常のブレイク加速とみなし、何も出さない(意図的な沈黙)
+
+            alerts.append({
+                "code": code, "name": name, "state_c": is_c, "score_drop": score_drop,
+                "tob_jump": tob_jump, "tob_stage": tob_stage,
+                "close": feat["close"], "sma50": feat["sma50"], "chandelier": feat["chandelier"],
+                "note": " / ".join(notes) if notes else "状態C非該当・スコア劣化なし・急騰なし(平常)",
+            })
+        except Exception as e:
+            # ★不正なticker表記・想定外のデータ形状などで、1銘柄の処理が異常終了しても
+            # 全体をクラッシュさせない(defense-in-depth)。詳細はログのみ、通知は安全な要約のみ。
+            print(f"[WARN] 保有銘柄チェックで例外(ticker={ticker}): {type(e).__name__}: {e}")
             alerts.append({"code": code, "name": name, "state_c": None, "score_drop": False,
-                           "tob_jump": False, "note": "データ取得不可(コード不一致・上場廃止等、要確認)"})
-            continue
-        feat = compute_momentum_features(df, None, cfg)
-        if feat is None:
-            alerts.append({"code": code, "name": name, "state_c": None, "score_drop": False,
-                           "tob_jump": False, "note": "データ不足(算出不可)"})
-            continue
-
-        notes = []
-        is_c = bool(feat["breakdown"])
-        if is_c:
-            notes.append(f"状態Cに該当(終値{feat['close']:,.0f}円が50日線{feat['sma50']:,.0f}円を下回った)。"
-                        f"シャンデリア水準({feat['chandelier']:,.0f}円)到達まで自動手仕舞いはされない点に注意")
-
-        # ---- 指示⑥: スコア劣化早期警告(状態Cの手前) ----
-        score_drop = False
-        if not is_c:
-            item = eligible_by_ticker.get(ticker)
-            today_score = item["score"] if item else None
-            if today_score is None:
-                notes.append("本日の候補プール母集団に含まれず(流動性未達等)、スコア追跡不可")
-            else:
-                fell_out = ticker not in top_pool_tickers
-                sd_drop = None
-                entry_score = entry_scores.get(ticker)
-                if entry_score is not None and pop_std and pop_std > 1e-9:
-                    sd_drop = (entry_score - today_score) / pop_std
-                if fell_out or (sd_drop is not None and sd_drop >= cfg.score_drop_sd_threshold):
-                    score_drop = True
-                    reason_bits = []
-                    if fell_out:
-                        reason_bits.append(f"候補プール上位{pool_cut_rank}位から脱落")
-                    if sd_drop is not None and sd_drop >= cfg.score_drop_sd_threshold:
-                        reason_bits.append(f"エントリー時比 標準偏差{sd_drop:.1f}分低下")
-                    notes.append("スコア劣化警告(状態Cではないが弱含み): " + " / ".join(reason_bits))
-                elif entry_score is None:
-                    notes.append("entry_score未記録のためエントリー比の劣化判定は不可(プール順位のみ判定)")
-
-        # ---- 指示⑦⑪: TOB急騰検知(2段階化・誤検知抑制) ----
-        # Day0: 単日+15%以上のジャンプ → 弱い「参考」通知(TOBか通常のブレイク加速か当日は区別不能)
-        # Day cfg.position_tob_confirm_days: ジャンプ後のボラが崩れていれば強い警告に格上げ。
-        #      崩れていなければ通常のブレイク加速とみなし、追加アラートは出さない(静かに終わる)。
-        tob_jump = False
-        tob_stage = None
-        c = df["Close"].dropna()
-        lr_all = np.log(c / c.shift(1)).dropna()
-        if len(lr_all) >= cfg.position_tob_baseline_days + cfg.position_tob_confirm_days:
-            lookback = lr_all.iloc[-(cfg.position_tob_confirm_days + 5):]
-            if len(lookback) and float(lookback.abs().max()) >= cfg.position_tob_jump_threshold:
-                jump_idx = lookback.abs().idxmax()
-                jump_ret = float(lookback.loc[jump_idx])
-                days_since = int((lr_all.index >= jump_idx).sum()) - 1
-                if days_since == 0:
-                    tob_jump, tob_stage = True, "day0"
-                    notes.append(f"直近1営業日で単日{jump_ret*100:+.0f}%の急騰を検知(参考)。"
-                                "TOB等の可能性と、通常のブレイクアウト加速の可能性の両方があり、"
-                                f"本日時点では判別不可。{cfg.position_tob_confirm_days}営業日後に"
-                                "ボラティリティの状況を再確認する")
-                elif days_since >= cfg.position_tob_confirm_days:
-                    post = lr_all.loc[lr_all.index > jump_idx]
-                    pre = lr_all.loc[lr_all.index < jump_idx].iloc[-cfg.position_tob_baseline_days:]
-                    if len(post) >= 2 and len(pre) >= 10:
-                        post_vol, pre_vol = float(post.std(ddof=0)), float(pre.std(ddof=0))
-                        if pre_vol > 1e-9 and post_vol < pre_vol * cfg.tob_vol_collapse_ratio:
-                            tob_jump, tob_stage = True, "confirmed"
-                            notes.append(f"{days_since}営業日前の単日{jump_ret*100:+.0f}%急騰後、"
-                                        f"変動率が平常時の{post_vol/pre_vol*100:.0f}%に低下 → "
-                                        "TOB疑いアラート(要確認)に格上げ。シャンデリア・エグジットは"
-                                        "通常ボラティリティ前提のため機能しない可能性。"
-                                        "iSPEEDで適時開示を確認してください")
-                        # 崩れていなければ通常のブレイク加速とみなし、何も出さない(意図的な沈黙)
-
-        alerts.append({
-            "code": code, "name": name, "state_c": is_c, "score_drop": score_drop,
-            "tob_jump": tob_jump, "tob_stage": tob_stage,
-            "close": feat["close"], "sma50": feat["sma50"], "chandelier": feat["chandelier"],
-            "note": " / ".join(notes) if notes else "状態C非該当・スコア劣化なし・急騰なし(平常)",
-        })
+                           "tob_jump": False, "note": "処理中に例外が発生(コード表記等を要確認・詳細はActionsログ参照)"})
     return alerts
