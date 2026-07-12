@@ -184,10 +184,18 @@ def check_held_positions(pos_df: pd.DataFrame, universe: pd.DataFrame, cfg: Conf
             feat = compute_momentum_features(df, None, cfg)
             if feat is None:
                 need = max(cfg.regime_mom_days, 260) + 5
+                required_cols = {"Open", "High", "Low", "Close", "Volume"}
+                if len(df) < need:
+                    reason = f"取得行数不足(取得{len(df)}行/必要{need}行以上)"
+                elif not required_cols.issubset(set(df.columns)):
+                    missing = required_cols - set(df.columns)
+                    reason = f"列欠損(不足列: {sorted(missing)}・データ形状異常の疑い)"
+                else:
+                    close_valid = int(df["Close"].notna().sum()) if "Close" in df.columns else 0
+                    reason = (f"終値の欠損が多い(有効値{close_valid}行/取得{len(df)}行・必要260行以上。"
+                              f"NaNが散在している=この銘柄のデータ品質そのものを疑う)")
                 alerts.append({"code": code, "name": name, "state_c": None, "score_drop": False,
-                               "tob_jump": False,
-                               "note": f"データ不足(算出不可・取得{len(df)}行/必要{need}行以上。"
-                                       f"翌日も続く場合はこの銘柄のデータ品質を疑う)"})
+                               "tob_jump": False, "note": f"データ不足(算出不可・{reason})"})
                 continue
 
             notes = []
