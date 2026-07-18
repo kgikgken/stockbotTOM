@@ -21,8 +21,8 @@ from topdown.report_text import build_text, load_week_events
 from topdown.report_png import render_png
 from topdown import ledger
 
-from mispricing.universe import load_universe
-from mispricing.line_send import send_line
+from topdown.universe import load_universe
+from topdown.line_send import send_line
 
 JST = timezone(timedelta(hours=9))
 
