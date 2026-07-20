@@ -1,11 +1,13 @@
-"""topdown スクリーニング本体 — 地合い・セクター整合 → トリガー判定 → 本命最大5+次点.
+"""topdown スクリーニング本体 v2.0 — ゾーン入口・構造ストップ・トリガー別出口.
 
-トリガー優先順位(カタリスト第一の設計思想):
-  GAP(カタリスト痕跡: 単日+4%ギャップ+出来高2倍・3営業日以内) > BREAK(20日高値ブレイク+出来高+トレンド)
-  > PULL(momentum凍結5ゲートの押し目)
-S高・急騰済み(+15%/1日 or +25%/3日)は本命に入れず監視(次点)へ格下げ+寄り天警告。
-確信度はカタリスト出典と出来高の裏付けのみに基づく(チャット版の規律)。一次情報を確認できない
-botでは上限「中」: GAP/BREAK(出来高裏付けあり)=中 / PULL(裏付けなし)=低 / 逆風セクター・高ボラで-1。
+v1.0からの変更(2026-07-19・仕様書v2.0):
+- トリガーを日本語名に改称し、日本市場の実証地形に沿って序列を付けた
+    材料反応(主力) > 押し目(準主力) > 高値ブレイク(補助・セクター順風時のみ)
+- エントリーを「前日終値」から「浅いゾーンへの指値」に変更(浅く買って構造が壊れたら切る)
+- ストップをATR固定距離から構造(直近安値)ベースへ変更
+- 固定2R利確を撤廃(2Rは参照点)。出口はトリガー別の時間ストップ+トレーリング
+- 価格上限20,000円、相関集中の抑制、決算またぎ推定(警告のみ)を追加
+※本ファイルの全パラメータは未検証。実証との整合であって有効性の証明ではない。
 """
 
 from __future__ import annotations
@@ -13,14 +15,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-import numpy as np
 import pandas as pd
 
 from .config import Config
 from .indicators import compute_topdown_features, compute_sector_rank, tob_suspect
 
-TAG_SHORT = "短期スイング"   # 数日〜1週間(黄系)
-TAG_SWING = "スイング"       # 1〜2週間(青系)
+TRIG_GAP, TRIG_PULL, TRIG_BREAK = "材料反応", "押し目", "高値ブレイク"
+TAG_MONTH, TAG_2WEEK = "1ヶ月", "2週間"
 
 _CONF_ORDER = {"低": 0, "中": 1, "高": 2}
 
@@ -31,24 +32,33 @@ class Candidate:
     code: str
     name: str
     sector: str
-    trigger: str            # GAP / BREAK / PULL / SPIKE(監視のみ)
+    trigger: str
     trigger_text: str
-    tag: str                # 保有期間タグ
+    tag: str
     score: float
     feat: dict
-    tailwind: bool = False  # セクター順風(上位3)
-    headwind: bool = False  # セクター逆風(下位2)
+    tailwind: bool = False
+    headwind: bool = False
     hivol: bool = False
-    entry: float = 0.0
+    # --- 入口ゾーンと構造ストップ ---
+    zone_hi: float = 0.0
+    zone_lo: float = 0.0
     stop: float = 0.0
-    target: float = 0.0
-    risk_w: float = 0.0
-    risk_pct: float = 0.0
-    shares: int = 0
+    risk_shallow: float = 0.0      # ゾーン上端で入った場合の1R幅(円)
+    risk_deep: float = 0.0         # ゾーン下端で入った場合の1R幅(円)
+    risk_pct_shallow: float = 0.0
+    risk_pct_deep: float = 0.0
+    zone_capped: bool = False      # リスク上限で上端を切ったか
+    unit_cost: float = 0.0         # 1単元(100株)の金額
+    # --- 出口 ---
     time_stop: int = 0
+    expire_date: str = ""
+    # --- 付帯情報 ---
     confidence: str = "低"
     conf_reason: str = ""
-    risks: List[str] = field(default_factory=list)   # リスク要因・弱気シナリオ(2つ以上)
+    gap_date: str | None = None
+    earnings_est_days: int | None = None
+    risks: List[str] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
 
 
@@ -61,9 +71,17 @@ def _round_tick(p: float) -> float:
     return round(p / t) * t
 
 
+def _bday_str(today: str, n: int) -> str:
+    try:
+        return (pd.Timestamp(today) + pd.tseries.offsets.BDay(n)).strftime("%m/%d")
+    except Exception:
+        return ""
+
+
 def build_pool(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame], cfg: Config):
+    """流動性・価格上限・TOB疑いを通過した母集団を作る。"""
     eligible: List[dict] = []
-    tob_rejects: List[dict] = []
+    rejects: List[dict] = []
     for _, row in universe.iterrows():
         tkr = str(row["ticker"]).strip()
         df = ohlcv.get(tkr)
@@ -74,36 +92,97 @@ def build_pool(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame], cfg: Conf
             continue
         if feat["close"] < cfg.min_price or feat["adv20_jpy"] < cfg.min_adv_jpy:
             continue
+        if feat["close"] > cfg.max_price:
+            rejects.append({"code": tkr.replace(".T", ""), "name": row.get("name", ""),
+                            "stage": "価格上限",
+                            "reason": f"株価{feat['close']:,.0f}円が上限{cfg.max_price:,.0f}円超"
+                                      f"(1単元{feat['close']*100/1e4:,.0f}万円)"})
+            continue
         is_tob, tob_reason = tob_suspect(df, cfg)
         if is_tob:
-            tob_rejects.append({"code": tkr.replace(".T", ""), "name": row.get("name", ""),
-                                "stage": "TOB疑い", "reason": tob_reason})
+            rejects.append({"code": tkr.replace(".T", ""), "name": row.get("name", ""),
+                            "stage": "TOB疑い", "reason": tob_reason})
             continue
         eligible.append({"row": row.to_dict(), "feat": feat})
-    return eligible, tob_rejects
+    return eligible, rejects
 
 
-def _decide_trigger(feat: dict) -> tuple[str, str, str] | None:
-    """(trigger, trigger_text, tag) — 優先順位: GAP > BREAK > PULL"""
+def build_zone(trigger: str, feat: dict, cfg: Config):
+    """入口ゾーンと構造ストップを組む。
+
+    - ゾーン上端は STOP + max_risk_atr_mult×ATR で切り落とす(合否判定には使わない)
+    - 切った結果ゾーンが成立しない、または現値がゾーン下端未満なら見送り
+    戻り値: ((zone_hi, zone_lo, stop, capped), None) または (None, 見送り理由)
+    """
+    atr = feat.get("atr")
+    if not atr or atr <= 0:
+        return None, "ATR算出不可"
+    buf = cfg.stop_buffer_atr_mult * atr
+    close_now = feat["close"]
+
+    if trigger == TRIG_GAP:
+        gh, gl = feat.get("gap_high"), feat.get("gap_low")
+        if gh is None or gl is None or gh <= gl:
+            return None, "ギャップ足の構造を取得できない"
+        stop = gl - buf
+        zone_hi = gh
+        zone_lo = gh - (gh - gl) * cfg.zone_fib_retrace
+    elif trigger == TRIG_BREAK:
+        lvl, plow = feat.get("breakout_level"), feat.get("pre_breakout_low")
+        if lvl is None or plow is None or lvl <= plow:
+            return None, "ブレイク構造を取得できない"
+        stop = plow - buf
+        zone_hi = lvl
+        zone_lo = lvl - cfg.zone_break_atr_mult * atr
+    else:  # 押し目
+        ph, dl = feat.get("prev_day_high"), feat.get("dip_low")
+        if ph is None or dl is None or ph <= dl:
+            return None, "押し目構造を取得できない"
+        stop = dl - buf
+        zone_hi = ph
+        zone_lo = dl
+
+    if stop <= 0:
+        return None, "ストップ価格が0以下"
+    cap = stop + cfg.max_risk_atr_mult * atr
+    capped = zone_hi > cap
+    zone_hi = min(zone_hi, cap)
+    # ★下端の引き上げ: 構造ちょうどを拾うとリスク幅が緩衝分(0.2ATR)しか無くなるため、
+    # 最低でも min_risk_atr_mult×ATR の損切り余地を残す位置まで下端を上げる。
+    floor = stop + cfg.min_risk_atr_mult * atr
+    floored = zone_lo < floor
+    zone_lo = max(zone_lo, floor)
+    if zone_hi <= zone_lo:
+        return None, f"リスク上限{cfg.max_risk_atr_mult:.1f}ATRでゾーンが成立しない"
+    if close_now < zone_lo:
+        return None, "現値がすでにゾーン下端を下回る(構造が否定されつつある)"
+    return (zone_hi, zone_lo, stop, capped, floored), None
+
+
+def _decide_trigger(feat: dict, tailwind: bool):
+    """(trigger, 説明, 保有タグ, 序列) — 序列: 材料反応3 > 押し目2 > 高値ブレイク1"""
     if feat.get("gap_found"):
-        return ("GAP",
+        return (TRIG_GAP,
                 f"単日ギャップ+{feat['gap_ret']*100:.0f}%(出来高{feat['gap_vol_ratio']:.1f}倍・"
-                f"{feat['gap_days_since']}営業日前)— カタリスト痕跡(真因は価格データでは判別不可)",
-                TAG_SHORT)
-    if feat.get("breakout_found"):
-        return ("BREAK",
-                f"20日高値ブレイク(出来高{feat['vol_ratio_today']:.1f}倍・上昇トレンド中)",
-                TAG_SHORT)
+                f"{feat['gap_days_since']}営業日前)— カタリスト痕跡(中身は要確認)",
+                TAG_MONTH, 3)
     if feat.get("pullback_state_a"):
-        return ("PULL", "上昇トレンド中の押し目+反発確認(凍結5ゲート通過)", TAG_SWING)
+        return (TRIG_PULL, "上昇トレンド中の押し目+反発確認", TAG_2WEEK, 2)
+    if feat.get("breakout_found"):
+        # 高値ブレイクはセクター順風時のみ採用(日本のモメンタムは弱く単独では根拠が薄い)
+        if not tailwind:
+            return None
+        return (TRIG_BREAK,
+                f"20日高値ブレイク(出来高{feat['vol_ratio_today']:.1f}倍・セクター順風)",
+                TAG_2WEEK, 1)
     return None
 
 
-def _confidence(trigger: str, feat: dict, headwind: bool, hivol: bool) -> tuple[str, str]:
+def _confidence(trigger: str, feat: dict, headwind: bool, hivol: bool):
     bits = []
-    if trigger == "GAP":
+    if trigger == TRIG_GAP:
         level = 1; bits.append(f"出来高{feat['gap_vol_ratio']:.1f}倍の裏付けあり")
-    elif trigger == "BREAK":
+    elif trigger == TRIG_BREAK:
         level = 1; bits.append(f"出来高{feat['vol_ratio_today']:.1f}倍の裏付けあり")
     else:
         level = 0; bits.append("カタリスト・出来高の裏付けなし(テクニカルのみ)")
@@ -111,35 +190,33 @@ def _confidence(trigger: str, feat: dict, headwind: bool, hivol: bool) -> tuple[
         level -= 1; bits.append("逆風セクター(-1)")
     if hivol:
         level -= 1; bits.append("高ボラ(-1)")
-    level = max(0, min(1, level))  # ★上限は常に「中」(一次情報を機械確認できないため)
-    label = "中" if level == 1 else "低"
-    bits.append("一次情報未確認のため上限は中")
-    return label, " / ".join(bits)
+    level = max(0, min(1, level))  # 上限は常に「中」(一次情報を機械確認できないため)
+    return ("中" if level == 1 else "低"), " / ".join(bits) + " / 一次情報未確認のため上限は中"
 
 
 def _risks_for(c: Candidate, sentiment: dict) -> List[str]:
     r = []
-    if c.trigger == "GAP":
-        r.append("ギャップの真因が不明(悪材料の可能性もある)— TDnet/iSPEEDで一次情報を確認するまで発注不可")
-        r.append("ギャップ埋め(窓埋め)方向への反落が起きた場合、想定より早く損切りに到達する")
-    elif c.trigger == "BREAK":
-        r.append("ブレイクがダマシに終わり20日レンジ内へ回帰する場合(寄り付き直後の値動きで再確認)")
-        r.append("出来高が続かない場合、ブレイク水準がそのまま天井になり得る")
+    if c.trigger == TRIG_GAP:
+        r.append("ギャップの真因が不明(悪材料の可能性もある)— TDnet/iSPEEDで確認するまで発注不可")
+        r.append("ギャップ埋め方向へ反落した場合、ゾーン下端割れで即失効となる")
+    elif c.trigger == TRIG_BREAK:
+        r.append("ブレイクがダマシに終わり20日レンジ内へ回帰する場合")
+        r.append("日本株のモメンタムは弱く、ブレイク追随の優位は米国より小さいとされる")
     else:
         r.append("押し目がさらに深くなりトレンド自体が転換する場合(反発確認は前日時点のもの)")
         r.append("カタリスト不在のため、地合い悪化時に真っ先に売られやすい")
     if c.headwind:
-        r.append(f"所属業種({c.sector})が直近5日で下位 — セクター逆風が続けば個別の形は無効化されやすい")
+        r.append(f"所属業種({c.sector})が直近5日で下位 — セクター逆風")
     if c.hivol:
-        r.append("高ボラ銘柄: 通常より広い損切り幅(2.5ATR)を採用。ロットは通常より小さく")
+        r.append("高ボラ銘柄: ロットは通常より小さく")
     if sentiment.get("score", 3) <= 2:
-        r.append("地合いスコア≤2(様子見・守り)— 候補が出ても必ず取引する必要はない")
+        r.append("地合いスコア≤2 — 候補が出ても必ず取引する必要はない")
     return r
 
 
 def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
-               sentiment: dict, cfg: Config) -> dict:
-    eligible, tob_rejects = build_pool(universe, ohlcv, cfg)
+               sentiment: dict, cfg: Config, today: str) -> dict:
+    eligible, rejects = build_pool(universe, ohlcv, cfg)
     sector_rank = compute_sector_rank(eligible, cfg)
     top_set = {s for s, _ in sector_rank["top"]}
     bottom_set = {s for s, _ in sector_rank["bottom"]}
@@ -147,104 +224,125 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
 
     fired: List[Candidate] = []
     watch: List[Candidate] = []
-    rejects: List[dict] = list(tob_rejects)
 
     for item in eligible:
         row, feat = item["row"], item["feat"]
         tkr = row["ticker"]
         sector = row.get("sector") or "不明"
+        tailwind = sector in top_set
+        headwind = sector in bottom_set
 
-        # 高ボラ環境での半導体・値がさ大型の扱い(改訂版ルール)
         is_semis = tkr in semis
         hivol = bool(sentiment.get("hivol_env")) and is_semis
         if is_semis and sentiment.get("semis_mode") == "exclude":
             rejects.append({"code": tkr.replace(".T", ""), "name": row.get("name", ""),
                             "stage": "高ボラ除外",
-                            "reason": "VI代理>30かつ前夜SOX非反発のため値がさ大型を新規候補から除外"})
+                            "reason": "VI代理>30かつ前夜SOX非反発のため値がさ大型を除外"})
             continue
 
-        # S高・急騰済み → 監視(次点)へ格下げ
         if feat.get("spiked"):
-            trig = _decide_trigger(feat)
             c = Candidate(ticker=tkr, code=tkr.replace(".T", ""), name=row.get("name", ""),
-                         sector=sector, trigger="SPIKE",
-                         trigger_text=f"急騰済み(前日比+{feat['chg1d_pct']:.0f}%等)— 寄り天リスク",
-                         tag=TAG_SHORT, score=0.0, feat=feat)
-            c.flags.append("⚠寄り天(高値掴み)リスク: 原則監視。入るならギャップ後の値固め確認後")
+                         sector=sector, trigger="急騰済み",
+                         trigger_text=f"前日比+{feat['chg1d_pct']:.0f}%等の急騰済み",
+                         tag=TAG_2WEEK, score=0.0, feat=feat)
+            c.flags.append("⚠寄り天リスク: 原則監視。入るなら値固め確認後")
             watch.append(c)
             continue
 
-        trig = _decide_trigger(feat)
-        if trig is None:
+        hit = _decide_trigger(feat, tailwind)
+        if hit is None:
             continue
-        trigger, ttext, tag = trig
+        trigger, ttext, tag, rank = hit
 
-        tailwind = sector in top_set
-        headwind = sector in bottom_set
-
-        base = {"GAP": 3.0, "BREAK": 2.0, "PULL": 1.0}[trigger]
-        vol_backing = feat.get("gap_vol_ratio") if trigger == "GAP" else feat.get("vol_ratio_today")
-        score = base + (2.0 if tailwind else 0.0) + min(float(vol_backing or 0), 5.0) * 0.2
+        zone, why = build_zone(trigger, feat, cfg)
+        if zone is None:
+            rejects.append({"code": tkr.replace(".T", ""), "name": row.get("name", ""),
+                            "stage": "ゾーン不成立", "reason": why})
+            continue
+        zone_hi, zone_lo, stop, capped, floored = zone
 
         c = Candidate(ticker=tkr, code=tkr.replace(".T", ""), name=row.get("name", ""),
                      sector=sector, trigger=trigger, trigger_text=ttext, tag=tag,
-                     score=score, feat=feat, tailwind=tailwind, headwind=headwind, hivol=hivol)
-
-        # 価格計画(IN=前日終値基準・確定済み価格ベースの相対設計)
-        entry = feat["close"]
-        stop_mult = 2.5 if hivol else cfg.initial_stop_atr_mult
-        stop_raw = entry - stop_mult * feat["atr"]
-        if stop_raw <= 0:
-            continue
-        risk_w = entry - stop_raw
-        if risk_w / entry * 100 > cfg.max_risk_width_pct:
-            rejects.append({"code": c.code, "name": c.name, "stage": "リスク幅",
-                            "reason": f"リスク幅{risk_w/entry*100:.1f}%が上限{cfg.max_risk_width_pct:.0f}%超"})
-            continue
-        c.entry = _round_tick(entry)
-        c.stop = _round_tick(stop_raw)
-        c.target = _round_tick(entry + risk_w * cfg.profit_target_r)
-        c.risk_w = risk_w
-        c.risk_pct = cfg.risk_pct_fixed
-        c.time_stop = cfg.time_stop_short_swing if tag == TAG_SHORT else cfg.time_stop_swing
+                     score=rank * 10 + (2.0 if tailwind else 0.0), feat=feat,
+                     tailwind=tailwind, headwind=headwind, hivol=hivol)
+        c.zone_hi = _round_tick(zone_hi)
+        c.zone_lo = _round_tick(zone_lo)
+        c.stop = _round_tick(stop)
+        c.zone_capped = capped
+        c.risk_shallow = c.zone_hi - c.stop
+        c.risk_deep = c.zone_lo - c.stop
+        c.risk_pct_shallow = c.risk_shallow / c.zone_hi * 100 if c.zone_hi else 0
+        c.risk_pct_deep = c.risk_deep / c.zone_lo * 100 if c.zone_lo else 0
+        c.unit_cost = feat["close"] * 100
+        c.time_stop = {TRIG_GAP: cfg.time_stop_gap, TRIG_BREAK: cfg.time_stop_break,
+                       TRIG_PULL: cfg.time_stop_pull}[trigger]
+        c.expire_date = _bday_str(today, cfg.zone_expire_days)
+        c.gap_date = feat.get("gap_date")
+        c.earnings_est_days = feat.get("earnings_est_days")
         c.confidence, c.conf_reason = _confidence(trigger, feat, headwind, hivol)
-        if hivol:
-            c.flags.append("⚠高ボラ銘柄: 広め損切り(2.5ATR)・小ロット推奨・確信度-1適用済み")
-        if tailwind:
-            c.flags.append(f"セクター順風({sector}=直近5日上位)")
         c.risks = _risks_for(c, sentiment)
+
+        if capped:
+            c.flags.append(f"ゾーン上端をリスク上限{cfg.max_risk_atr_mult:.1f}ATRで切り落とし済み")
+        if floored:
+            c.flags.append(f"ゾーン下端をリスク下限{cfg.min_risk_atr_mult:.1f}ATRまで引き上げ済み"
+                          "(底値ちょうどは狙わない)")
+        if c.earnings_est_days is not None and c.earnings_est_days <= c.time_stop:
+            c.flags.append(f"⚠推定: 約{c.earnings_est_days}営業日後に決算の可能性"
+                          f"(保有{c.time_stop}日に重なる・要iSPEED確認)")
+        if c.unit_cost > 1.5e6:
+            c.flags.append(f"⚠1単元{c.unit_cost/1e4:,.0f}万円 — 1単元のみなら半分利確は使えず"
+                          "トレーリング+時間ストップ一本")
         fired.append(c)
 
-    # 地合い・セクター整合順に並べ、本命最大5(1業種2まで)
+    # --- 絞り込み: 序列 → セクター分散 → 相関集中の抑制 ---
     fired.sort(key=lambda x: (-x.score, -_CONF_ORDER[x.confidence]))
     picked: List[Candidate] = []
     overflow: List[Candidate] = []
     sector_used: Dict[str, int] = {}
+    gap_count = 0
+    gapday_used: Dict[str, int] = {}
+
     for c in fired:
         if len(picked) >= cfg.max_candidates:
             overflow.append(c); continue
         if sector_used.get(c.sector, 0) >= cfg.max_per_sector:
             rejects.append({"code": c.code, "name": c.name, "stage": "セクター分散",
-                            "reason": f"同一業種({c.sector})は{cfg.max_per_sector}銘柄まで → 次点"})
+                            "reason": f"同一業種({c.sector})は{cfg.max_per_sector}件まで"})
             overflow.append(c); continue
-        if cfg.account_equity > 0:
-            risk_amount = cfg.account_equity * c.risk_pct / 100
-            c.shares = int(risk_amount / c.risk_w // 100 * 100)
-            if c.shares * c.entry < cfg.min_exec_jpy:
-                rejects.append({"code": c.code, "name": c.name, "stage": "サイジング",
-                                "reason": f"サイズ過小(≈{c.shares*c.entry/1e4:.0f}万円)につき見送り"})
-                continue
+        if c.trigger == TRIG_GAP:
+            if gap_count >= cfg.max_gap_candidates:
+                rejects.append({"code": c.code, "name": c.name, "stage": "相関集中",
+                                "reason": f"材料反応は{cfg.max_gap_candidates}件まで"})
+                overflow.append(c); continue
+            if c.gap_date and gapday_used.get(c.gap_date, 0) >= cfg.max_same_gapday:
+                rejects.append({"code": c.code, "name": c.name, "stage": "相関集中",
+                                "reason": f"同一ギャップ日({c.gap_date})は{cfg.max_same_gapday}件まで"})
+                overflow.append(c); continue
         picked.append(c)
         sector_used[c.sector] = sector_used.get(c.sector, 0) + 1
+        if c.trigger == TRIG_GAP:
+            gap_count += 1
+            if c.gap_date:
+                gapday_used[c.gap_date] = gapday_used.get(c.gap_date, 0) + 1
+
+    concentration = ""
+    picked_gapdays: Dict[str, int] = {}
+    for c in picked:
+        if c.trigger == TRIG_GAP and c.gap_date:
+            picked_gapdays[c.gap_date] = picked_gapdays.get(c.gap_date, 0) + 1
+    if picked_gapdays:
+        top_day, top_n = max(picked_gapdays.items(), key=lambda kv: kv[1])
+        if top_n >= 2:
+            concentration = f"本日{len(picked)}件中{top_n}件が同一カタリスト日({top_day})— 相関に注意"
 
     runner_up = (overflow + watch)[: cfg.max_watch]
-
     stats = {
-        "eligible": len(eligible), "tob_excluded": len(tob_rejects),
-        "fired": len(fired), "spiked_watch": len(watch),
+        "eligible": len(eligible), "fired": len(fired), "spiked_watch": len(watch),
         "picked": len(picked), "rejected": len(rejects),
-        "total_risk": sum(c.risk_pct for c in picked),
-        "trigger_count": {t: sum(1 for c in fired if c.trigger == t) for t in ("GAP", "BREAK", "PULL")},
+        "trigger_count": {t: sum(1 for c in fired if c.trigger == t)
+                          for t in (TRIG_GAP, TRIG_PULL, TRIG_BREAK)},
+        "concentration": concentration,
     }
     return {"picked": picked, "watch": runner_up, "rejects": rejects,
             "sector_rank": sector_rank, "stats": stats}
