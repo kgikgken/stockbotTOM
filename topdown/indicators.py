@@ -42,6 +42,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
     window = min(cfg.gap_max_days_since + 1, len(lr))
     recent_lr = lr.iloc[-window:]
     gap_found, gap_days_since, gap_ret, gap_vol_ratio = False, None, None, None
+    gap_high = gap_low = None; gap_date = None
     if len(recent_lr):
         idx_max = recent_lr.idxmax()
         cand = float(recent_lr.loc[idx_max])
@@ -50,15 +51,21 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         vr_at = float(v.iloc[pos]) / vmean_at if (vmean_at and vmean_at > 0) else np.nan
         if cand >= cfg.gap_threshold and vr_at and vr_at >= cfg.gap_vol_mult:
             gap_found, gap_days_since, gap_ret, gap_vol_ratio = True, int((lr.index >= idx_max).sum()) - 1, cand, vr_at
+            gap_high = float(h.loc[idx_max]); gap_low = float(l.loc[idx_max])
+            gap_date = str(idx_max.date()) if hasattr(idx_max, "date") else str(idx_max)
 
     # --- 節目ブレイク: 前日までの20日高値を終値で上抜け+出来高+上昇トレンド ---
     breakout_found = False
+    breakout_level = None; pre_breakout_low = None
     trend_up_simple = (not pd.isna(sma50.iloc[-1]) and not pd.isna(sma200.iloc[-1])
                        and close_now > float(sma50.iloc[-1]) > float(sma200.iloc[-1]))
     if len(h) > cfg.breakout_lookback + 1:
         prev_high = float(h.iloc[-cfg.breakout_lookback - 1:-1].max())
         if close_now > prev_high and vol_ratio_today and vol_ratio_today >= cfg.breakout_vol_mult and trend_up_simple:
             breakout_found = True
+            breakout_level = prev_high
+            # ブレイク直前の押し安値: 直近10営業日(当日除く)の安値
+            pre_breakout_low = float(l.iloc[-11:-1].min())
 
     # --- S高・急騰済み検知(寄り天リスク→監視格下げ) ---
     chg1d = float(lr.iloc[-1]) if len(lr) else 0.0
@@ -67,6 +74,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
 
     # --- 押し目型: 凍結5ゲート(topdown内直接実装・自立版) ---
     pullback_state_a = False
+    dip_low = None; prev_day_high = None
     if not any(pd.isna(x.iloc[-1]) for x in (sma20, sma50, sma150, sma200)):
         trend_align = close_now > float(sma50.iloc[-1]) > float(sma150.iloc[-1]) > float(sma200.iloc[-1])
         ratio20 = close_now / float(sma20.iloc[-1]) - 1
@@ -76,6 +84,11 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         duration_ok = days_since_high <= cfg.pullback_max_duration_days
         bounce = bounce_confirmed(df, cfg.bounce_lookback_days, cfg.bounce_min_close_position)
         pullback_state_a = bool(trend_align and in_zone and depth_ok and duration_ok and bounce)
+        if pullback_state_a:
+            # 押し安値 = スイング高値以降の最安値(最低でも直近5営業日から取る)
+            look = max(int(days_since_high) + 1, 5)
+            dip_low = float(l.iloc[-look:].min())
+            prev_day_high = float(h.iloc[-2]) if len(h) >= 2 else None
 
     adv20_jpy = float((c * v).iloc[-21:-1].mean())
     ret5d = float(np.log(close_now / float(c.iloc[-6]))) if len(c) > 6 else np.nan
@@ -88,6 +101,10 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         "breakout_found": breakout_found, "spiked": spiked,
         "chg1d_pct": (np.exp(chg1d) - 1) * 100, "ret5d": ret5d,
         "pullback_state_a": pullback_state_a,
+        "gap_high": gap_high, "gap_low": gap_low, "gap_date": gap_date,
+        "breakout_level": breakout_level, "pre_breakout_low": pre_breakout_low,
+        "dip_low": dip_low, "prev_day_high": prev_day_high,
+        "earnings_est_days": estimate_days_to_earnings(df, cfg),
         "last_date": str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1]),
     }
 
@@ -105,3 +122,42 @@ def compute_sector_rank(items: list, cfg) -> dict:
     ranked = sorted(med.items(), key=lambda x: -x[1])
     return {"top": ranked[: cfg.sector_top_n], "bottom": ranked[-cfg.sector_bottom_n:] if len(ranked) >= cfg.sector_bottom_n else [],
             "by_sector": med}
+
+
+def estimate_days_to_earnings(df: pd.DataFrame, cfg) -> int | None:
+    """出来高スパイクの周期から次回決算までの営業日数を推定する(警告用・精度は中程度)。
+
+    日本企業の決算は四半期ごと(約60営業日間隔)でほぼ同じ時期に来る。過去2年の
+    「出来高が20日平均の2.5倍以上に跳ねた日」を決算候補日とみなし、直近の候補日+60営業日を
+    次回発表の推定日とする。指数リバランス・突発ニュース等の出来高も混入するため、
+    あくまで「可能性がある」という警告に留め、除外判定には使わない(最終確認はiSPEED)。
+    戻り値: 次回までの推定営業日数。推定できない場合はNone。
+    """
+    if not getattr(cfg, "earnings_est_enabled", True):
+        return None
+    try:
+        v = df["Volume"].dropna()
+        if len(v) < 260:
+            return None
+        vm = v.rolling(20).mean().shift(1)
+        ratio = (v / vm).dropna()
+        spikes = ratio[ratio >= cfg.earnings_spike_vol_mult]
+        if len(spikes) < 2:
+            return None
+        pos = [v.index.get_loc(i) for i in spikes.index]
+        # 直近2年(約500営業日)以内のスパイクのみ使う
+        last = len(v) - 1
+        pos = [p for p in pos if last - p <= 500]
+        if not pos:
+            return None
+        # 四半期周期に合致するスパイクだけを決算候補として残す
+        cycle = cfg.earnings_cycle_days
+        latest = max(pos)
+        est = latest + cycle
+        # 推定日が既に過ぎている場合は次の周期へ送る
+        while est <= last:
+            est += cycle
+        days = int(est - last)
+        return days if 0 < days <= cycle else None
+    except Exception:
+        return None
