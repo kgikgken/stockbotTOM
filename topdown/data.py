@@ -158,6 +158,15 @@ def _mk_series_topdown(seed: int, n: int, mode: str) -> pd.DataFrame:
     l = np.minimum(o, close) * (1 - np.abs(rng.normal(0, 1, n)) * hl)
     if mode == "pullback":
         o[-1] = close[-1] * 0.994; l[-1] = close[-1] * 0.990; h[-1] = close[-1] * 1.002
+    if mode == "gap_catalyst":
+        # ★ギャップ足に現実的な日中値幅を与える(寄りで窓を開け、そこから上昇して引ける形)。
+        # これが無いとゾーン幅・損切り幅の検証が意味を持たない。
+        gp = n - 2
+        prev_c = float(close[gp - 1])
+        o[gp] = prev_c * 1.045          # 窓を開けて寄る
+        l[gp] = o[gp] * 0.995           # 寄り後の押しが日中安値
+        h[gp] = prev_c * 1.065          # 日中高値
+        close[gp] = prev_c * 1.060      # 高値近辺で引ける
     return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": close, "Volume": v}, index=idx)
 
 
