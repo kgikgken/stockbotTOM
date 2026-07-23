@@ -106,8 +106,16 @@ class Config:
     zone_break_atr_mult: float = field(default_factory=lambda: _f("ZONE_BREAK_ATR_MULT", 1.0))
     # 構造ストップの緩衝(ヒゲ刈られ回避・仮置き)
     stop_buffer_atr_mult: float = field(default_factory=lambda: _f("STOP_BUFFER_ATR_MULT", 0.2))
-    # リスク幅の上限。★合否判定ではなくゾーン上端の切り落としに使う(STOP + これ)
-    max_risk_atr_mult: float = field(default_factory=lambda: _f("MAX_RISK_ATR_MULT", 1.5))
+    # リスク幅の上限。★2026-07-23改訂: 本番データを根拠に「上端の切り落とし」→「深い端での合否判定」へ。
+    # 旧設計(上端をSTOP+1.5ATRで切る)は、ギャップ足の値幅が2.1ATRを超えると上端と38.2%下端が
+    # 一致してゾーンが消滅した。2026-07-23の本番出力で材料反応2件ともゾーン幅3円・4円まで潰れ、
+    # 「浅い帯で待つ」という設計が主力トリガーで機能していなかった(本来は89円・63円)。
+    # 新設計: ゾーンは常に構造どおり(38.2%等)の幅を保ち、深い端で入ってもなおリスクが
+    # この上限を超える銘柄だけを見送る。38.2%は実証あり(Alajbeg 2017/Bulkowski)のため不変とし、
+    # 仮置きだったこちらを実データに合わせて再較正した。
+    max_risk_atr_mult: float = field(default_factory=lambda: _f("MAX_RISK_ATR_MULT", 2.0))
+    # ゾーンの最低幅。これを下回るなら「帯」として意味を成さないため見送る(退化ゾーンの検出)。
+    min_zone_width_atr: float = field(default_factory=lambda: _f("MIN_ZONE_WIDTH_ATR", 0.3))
     # ★リスク幅の下限(2026-07-19追加): ゾーン下端が構造ストップに近すぎると、
     # 損切り幅が0.2ATR程度になりノイズで即刻刈られる非現実的な設計になる。
     # 下端を STOP + これ まで引き上げ、「底値ちょうどを拾いにいかない」ことを構造化する。
