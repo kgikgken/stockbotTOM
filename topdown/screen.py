@@ -48,7 +48,6 @@ class Candidate:
     risk_deep: float = 0.0         # ゾーン下端で入った場合の1R幅(円)
     risk_pct_shallow: float = 0.0
     risk_pct_deep: float = 0.0
-    zone_capped: bool = False      # リスク上限で上端を切ったか
     unit_cost: float = 0.0         # 1単元(100株)の金額
     # --- 出口 ---
     time_stop: int = 0
@@ -140,23 +139,41 @@ def build_zone(trigger: str, feat: dict, cfg: Config):
             return None, "押し目構造を取得できない"
         stop = dl - buf
         zone_hi = ph
-        zone_lo = dl
+        # ★2026-07-23: 下端を押し安値そのものから38.2%押しへ変更。
+        # 上端の切り落としを廃止した結果、押し目のゾーンだけ「前日高値〜押し安値」の
+        # 全幅となり青天井に広がった(押し3ATRで幅2.7ATR)。材料反応と同じく
+        # 実証のある38.2%(Alajbeg 2017/Bulkowski「浅い押し>深い押し」)で浅い側に
+        # 揃え、3トリガーすべてが有界かつ浅い帯になるようにした。
+        # 押し安値そのものは STOP の根拠として引き続き使う(構造は不変)。
+        zone_lo = ph - (ph - dl) * cfg.zone_fib_retrace
 
     if stop <= 0:
         return None, "ストップ価格が0以下"
-    cap = stop + cfg.max_risk_atr_mult * atr
-    capped = zone_hi > cap
-    zone_hi = min(zone_hi, cap)
+
     # ★下端の引き上げ: 構造ちょうどを拾うとリスク幅が緩衝分(0.2ATR)しか無くなるため、
     # 最低でも min_risk_atr_mult×ATR の損切り余地を残す位置まで下端を上げる。
     floor = stop + cfg.min_risk_atr_mult * atr
     floored = zone_lo < floor
     zone_lo = max(zone_lo, floor)
     if zone_hi <= zone_lo:
-        return None, f"リスク上限{cfg.max_risk_atr_mult:.1f}ATRでゾーンが成立しない"
+        return None, "構造が反転している(下端が上端を上回る)"
+
+    # ★リスク上限は「深い端で入ってもなお広すぎるか」で判定する(2026-07-23改訂)。
+    # 上端を切り落とす旧設計はゾーンそのものを潰したため、帯の形は構造どおり保ち、
+    # 最良のケース(深い端)でも上限を超える銘柄だけを見送る。
+    risk_deep_atr = (zone_lo - stop) / atr
+    if risk_deep_atr > cfg.max_risk_atr_mult:
+        return None, (f"深い端で入ってもリスク{risk_deep_atr:.1f}ATRと広すぎる"
+                      f"(上限{cfg.max_risk_atr_mult:.1f}ATR)")
+
+    # ★退化ゾーンの検出: 帯が細すぎると「ゾーンで待つ」ではなくピンポイント指値になる。
+    if (zone_hi - zone_lo) / atr < cfg.min_zone_width_atr:
+        return None, (f"ゾーン幅{(zone_hi - zone_lo)/atr:.2f}ATRが最低幅"
+                      f"{cfg.min_zone_width_atr:.1f}ATR未満(帯として成立しない)")
+
     if close_now < zone_lo:
         return None, "現値がすでにゾーン下端を下回る(構造が否定されつつある)"
-    return (zone_hi, zone_lo, stop, capped, floored), None
+    return (zone_hi, zone_lo, stop, floored), None
 
 
 def _decide_trigger(feat: dict, tailwind: bool):
@@ -259,7 +276,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
             rejects.append({"code": tkr.replace(".T", ""), "name": row.get("name", ""),
                             "stage": "ゾーン不成立", "reason": why})
             continue
-        zone_hi, zone_lo, stop, capped, floored = zone
+        zone_hi, zone_lo, stop, floored = zone
 
         c = Candidate(ticker=tkr, code=tkr.replace(".T", ""), name=row.get("name", ""),
                      sector=sector, trigger=trigger, trigger_text=ttext, tag=tag,
@@ -268,7 +285,6 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         c.zone_hi = _round_tick(zone_hi)
         c.zone_lo = _round_tick(zone_lo)
         c.stop = _round_tick(stop)
-        c.zone_capped = capped
         c.risk_shallow = c.zone_hi - c.stop
         c.risk_deep = c.zone_lo - c.stop
         c.risk_pct_shallow = c.risk_shallow / c.zone_hi * 100 if c.zone_hi else 0
@@ -282,8 +298,6 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         c.confidence, c.conf_reason = _confidence(trigger, feat, headwind, hivol)
         c.risks = _risks_for(c, sentiment)
 
-        if capped:
-            c.flags.append(f"ゾーン上端をリスク上限{cfg.max_risk_atr_mult:.1f}ATRで切り落とし済み")
         if floored:
             c.flags.append(f"ゾーン下端をリスク下限{cfg.min_risk_atr_mult:.1f}ATRまで引き上げ済み"
                           "(底値ちょうどは狙わない)")
