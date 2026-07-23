@@ -17,7 +17,7 @@ PLAN_COLS = [
     "zone_hi", "zone_lo", "stop", "risk_shallow", "risk_deep",
     "risk_pct_shallow", "risk_pct_deep", "atr", "unit_cost",
     "close_at_listing",      # 即時方式の約定価格(反実仮想)
-    "expire_date", "time_stop", "zone_capped", "zone_floored",
+    "expire_date", "time_stop", "zone_width_atr", "zone_floored",
     "tailwind", "headwind", "hivol", "gap_date", "earnings_est_days",
     "adv20_jpy",             # 売買代金(流動性フィルター判断の材料)
 ]
@@ -63,7 +63,8 @@ def write_plan_log(outdir: str, today: str, picked: list) -> str:
                 _num(c.risk_pct_shallow, 2), _num(c.risk_pct_deep, 2),
                 _num(feat.get("atr"), 2), _num(c.unit_cost, 0),
                 _num(feat.get("close")),
-                c.expire_date, c.time_stop, int(bool(c.zone_capped)),
+                c.expire_date, c.time_stop,
+                _num((c.zone_hi - c.zone_lo) / feat["atr"], 2) if feat.get("atr") else "",
                 int(any("下限" in f for f in c.flags)),
                 int(c.tailwind), int(c.headwind), int(c.hivol),
                 c.gap_date or "", c.earnings_est_days if c.earnings_est_days is not None else "",
