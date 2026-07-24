@@ -29,12 +29,19 @@ def compute_sentiment(cfg, dryrun: bool = False) -> dict:
 
     sox = m.get("SOX")
     sox_rebound = False
+    sox_available = bool(sox)
     if sox:
         sox_rebound = sox["chg1d_pct"] >= cfg.sox_rebound_th
         if sox["chg1d_pct"] >= cfg.sentiment_sox_th:
             score += 1; reasons.append(f"SOX +{sox['chg1d_pct']:.1f}%(+1)")
         elif sox["chg1d_pct"] <= -cfg.sentiment_sox_th:
             score -= 1; reasons.append(f"SOX {sox['chg1d_pct']:.1f}%(-1)")
+        else:
+            # ★2026-07-24: ±0の分岐が無く、横ばいだとSOX行そのものが消えていた。
+            # 「取得できなかった」のか「動かなかった」のか区別できないため必ず出す。
+            reasons.append(f"SOX {sox['chg1d_pct']:+.1f}%(±0)")
+    else:
+        reasons.append("SOX 未取得")
 
     vix = m.get("VIX")
     if vix and vix["last"] >= cfg.sentiment_vix_high:
@@ -67,14 +74,53 @@ def compute_sentiment(cfg, dryrun: bool = False) -> dict:
     hivol_env = vi_proxy is not None and vi_proxy > cfg.vi_high_threshold
     # 高ボラ・半導体大型株ルール(改訂版): VI高でも前夜SOX明確反発なら高ボラタグ付きで採用可。
     # 反発が無い場合のみ半導体・値がさ大型を新規候補から除外する。
-    semis_mode = "normal"
+    semis_mode = "normal"; semis_reason = ""
     if hivol_env:
-        semis_mode = "hivol_tag" if sox_rebound else "exclude"
+        if sox_rebound:
+            semis_mode = "hivol_tag"
+        else:
+            semis_mode = "exclude"
+            # SOXが取れていない場合、「反発しなかった」ではなく「判定できなかった」。
+            # 保守的に除外するのは維持しつつ、理由を取り違えないよう明示する。
+            semis_reason = ("SOX未取得のため判定不能 — 保守的に除外"
+                            if not sox_available else "前夜SOX反発なしのため除外")
 
     return {
         "score": score, "provisional": provisional, "stance": stance,
         "reasons": reasons, "missing": missing,
         "indices": {k: v for k, v in m.items() if k in ("SPX", "DOW", "NASDAQ", "SOX", "VIX", "USDJPY", "N225")},
         "vi_proxy": vi_proxy, "hivol_env": hivol_env, "sox_rebound": sox_rebound,
+        "sox_available": sox_available, "semis_reason": semis_reason,
         "semis_mode": semis_mode, "synthetic": m.get("synthetic", False),
     }
+
+
+def closing_note(sentiment: dict) -> dict:
+    """レポート末尾に置く「今日の地合い」念押しの中身を組む。
+
+    候補の件数は地合いで絞らない方針(2026-07-24)にしたため、最後に地合いを
+    もう一度示して、見送る/ロットを落とすという判断材料を残す役割を持たせている。
+    """
+    sc = int(sentiment.get("score", 3))
+    stance = sentiment.get("stance", "")
+    lines = []
+    detail = " / ".join(sentiment.get("reasons", []))
+    if sentiment.get("vi_proxy") is not None:
+        detail += f" / VI代理{sentiment['vi_proxy']:.0f}"
+    if detail:
+        lines.append(detail)
+    if sentiment.get("missing"):
+        lines.append("欠落: " + ", ".join(sentiment["missing"]) + " — 判断材料が揃っていない")
+    if sentiment.get("hivol_env"):
+        lines.append("高ボラ環境(VI代理30超) — " + (
+            "前夜SOX反発あり" if sentiment.get("sox_rebound")
+            else sentiment.get("semis_reason", "値がさ大型は除外")))
+    if sc >= 4:
+        tail = "買い優勢寄りの日。"
+    elif sc == 3:
+        tail = "中立。方向感は乏しい。"
+    else:
+        tail = "リスクオフ寄りの日。候補が出ても、見送る・ロットを落とすのは自由。"
+    lines.append(tail)
+    return {"score": sc, "stance": stance, "lines": lines,
+            "provisional": bool(sentiment.get("provisional"))}
