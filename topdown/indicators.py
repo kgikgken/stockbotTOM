@@ -76,11 +76,13 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
     pullback_state_a = False
     dip_low = None; prev_day_high = None
     trend_align = False
+    depth_atr = None
     if not any(pd.isna(x.iloc[-1]) for x in (sma20, sma50, sma150, sma200)):
         trend_align = bool(close_now > float(sma50.iloc[-1]) > float(sma150.iloc[-1]) > float(sma200.iloc[-1]))
         ratio20 = close_now / float(sma20.iloc[-1]) - 1
         in_zone = (-cfg.pullback_lower_pct / 100) <= ratio20 <= (cfg.pullback_upper_pct / 100)
         _, days_since_high, depth_atr22 = swing_high_depth(df, atr22, cfg.swing_high_lookback_days)
+        depth_atr = float(depth_atr22) if depth_atr22 is not None else None
         depth_ok = depth_atr22 <= cfg.pullback_depth_atr_mult
         duration_ok = days_since_high <= cfg.pullback_max_duration_days
         bounce = bounce_confirmed(df, cfg.bounce_lookback_days, cfg.bounce_min_close_position)
@@ -103,6 +105,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         "chg1d_pct": (np.exp(chg1d) - 1) * 100, "ret5d": ret5d,
         "pullback_state_a": pullback_state_a,
         "trend_align": trend_align, "close_pos": _close_position(df),
+        "depth_atr": depth_atr,
         "gap_high": gap_high, "gap_low": gap_low, "gap_date": gap_date,
         "breakout_level": breakout_level, "pre_breakout_low": pre_breakout_low,
         "dip_low": dip_low, "prev_day_high": prev_day_high,
