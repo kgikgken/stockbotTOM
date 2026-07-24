@@ -1,177 +1,307 @@
-"""topdown用の特徴量 — 日次OHLCVのみから計算(自立版・旧パッケージ非依存)。
+"""topdown — PNGレポート v2.0(モックアップ検証済みレイアウト).
 
-カタリスト代理(ギャップ+出来高)・節目ブレイク・S高急騰検知・セクター騰落を実装。
-押し目判定は旧momentum凍結版の5ゲートをtopdown内に直接実装した(2026-07-17自立化):
-  ①トレンド整列(終値>50日>150日>200日) ②非対称押し目ゾーン(20日線の上+2.5%〜下-5%)
-  ③深さ上限(スイング高値からATR22×3以内・momentum凍結値に忠実にATR22を使用)
-  ④継続期間上限(スイング高値から35営業日以内) ⑤反発確認(CLV≥0.5相当+直近2日プラス転換)
-※旧実装との差分1点のみ: 旧経路はVCPブレイク(状態B)判定が押し目より優先されたが、topdownでは
-  BREAKトリガーが先に評価されるため実質同等。それ以外のゲート値・計算は同一。
+3ボックスの構成を変更:
+  ①INゾーン(上端〜下端の指値レンジ) ②STOP(構造・どこで入っても同じ) ③1Rの幅(浅い/深い)
+固定利確を撤廃したため「利確価格」は出さない。ゾーン内のどこで約定するかで目標値が変わり、
+固定の目標価格を出すと誤りになるため、代わりに1Rの幅(円と%)を出して各自で計算できる形にした。
 """
 
 from __future__ import annotations
 
-import numpy as np
-import pandas as pd
+from PIL import Image, ImageDraw, ImageFont
 
-from .ta import sma, atr_wilder, tob_suspect, bounce_confirmed, swing_high_depth  # noqa: F401
+from .data import coverage_note
+from .market import closing_note
 
+INK = (28, 32, 38)
+SUB = (95, 103, 115)
+LINE = (225, 228, 233)
+RED = (200, 38, 60)
+GREEN = (63, 106, 82)
+GOLD = (169, 126, 31)
+BLUE = (23, 92, 211)
+BG_CARD = (248, 249, 251)
+BLUE_TAG = (41, 98, 165)
+GOLD_TAG = (191, 144, 0)
 
-def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
-    if df is None or len(df) < 270:
-        return None
-    required = {"Open", "High", "Low", "Close", "Volume"}
-    if not required.issubset(set(df.columns)):
-        return None
-    df = df.dropna(subset=["Close"]).copy()
-    if len(df) < 260:
-        return None
-
-    c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
-    close_now = float(c.iloc[-1])
-    atr_n = atr_wilder(h, l, c, cfg.atr_period)          # 損切り・利確設計用(ATR14)
-    atr22 = atr_wilder(h, l, c, 22)                       # 押し目深さゲート用(momentum凍結値に忠実)
-    sma20, sma50 = sma(c, 20), sma(c, 50)
-    sma150, sma200 = sma(c, 150), sma(c, 200)
-    lr = np.log(c / c.shift(1)).dropna()
-
-    vmean20 = float(v.iloc[-21:-1].mean())
-    vol_ratio_today = float(v.iloc[-1]) / vmean20 if vmean20 > 0 else np.nan
-
-    # --- カタリスト代理: 直近N営業日以内の単日ギャップ+当該日の出来高急増 ---
-    window = min(cfg.gap_max_days_since + 1, len(lr))
-    recent_lr = lr.iloc[-window:]
-    gap_found, gap_days_since, gap_ret, gap_vol_ratio = False, None, None, None
-    gap_high = gap_low = None; gap_date = None
-    if len(recent_lr):
-        idx_max = recent_lr.idxmax()
-        cand = float(recent_lr.loc[idx_max])
-        pos = v.index.get_loc(idx_max)
-        vmean_at = float(v.iloc[max(0, pos - 21):pos - 1].mean()) if pos >= 22 else np.nan
-        vr_at = float(v.iloc[pos]) / vmean_at if (vmean_at and vmean_at > 0) else np.nan
-        if cand >= cfg.gap_threshold and vr_at and vr_at >= cfg.gap_vol_mult:
-            gap_found, gap_days_since, gap_ret, gap_vol_ratio = True, int((lr.index >= idx_max).sum()) - 1, cand, vr_at
-            gap_high = float(h.loc[idx_max]); gap_low = float(l.loc[idx_max])
-            gap_date = str(idx_max.date()) if hasattr(idx_max, "date") else str(idx_max)
-
-    # --- 節目ブレイク: 前日までの20日高値を終値で上抜け+出来高+上昇トレンド ---
-    breakout_found = False
-    breakout_level = None; pre_breakout_low = None
-    trend_up_simple = (not pd.isna(sma50.iloc[-1]) and not pd.isna(sma200.iloc[-1])
-                       and close_now > float(sma50.iloc[-1]) > float(sma200.iloc[-1]))
-    if len(h) > cfg.breakout_lookback + 1:
-        prev_high = float(h.iloc[-cfg.breakout_lookback - 1:-1].max())
-        if close_now > prev_high and vol_ratio_today and vol_ratio_today >= cfg.breakout_vol_mult and trend_up_simple:
-            breakout_found = True
-            breakout_level = prev_high
-            # ブレイク直前の押し安値: 直近10営業日(当日除く)の安値
-            pre_breakout_low = float(l.iloc[-11:-1].min())
-
-    # --- S高・急騰済み検知(寄り天リスク→監視格下げ) ---
-    chg1d = float(lr.iloc[-1]) if len(lr) else 0.0
-    chg3d = float(lr.iloc[-3:].sum()) if len(lr) >= 3 else 0.0
-    spiked = chg1d >= np.log(1 + cfg.spike_1d_threshold) or chg3d >= np.log(1 + cfg.spike_3d_threshold)
-
-    # --- 押し目型: 凍結5ゲート(topdown内直接実装・自立版) ---
-    pullback_state_a = False
-    dip_low = None; prev_day_high = None
-    trend_align = False
-    depth_atr = None
-    if not any(pd.isna(x.iloc[-1]) for x in (sma20, sma50, sma150, sma200)):
-        trend_align = bool(close_now > float(sma50.iloc[-1]) > float(sma150.iloc[-1]) > float(sma200.iloc[-1]))
-        ratio20 = close_now / float(sma20.iloc[-1]) - 1
-        in_zone = (-cfg.pullback_lower_pct / 100) <= ratio20 <= (cfg.pullback_upper_pct / 100)
-        _, days_since_high, depth_atr22 = swing_high_depth(df, atr22, cfg.swing_high_lookback_days)
-        depth_atr = float(depth_atr22) if depth_atr22 is not None else None
-        depth_ok = depth_atr22 <= cfg.pullback_depth_atr_mult
-        duration_ok = days_since_high <= cfg.pullback_max_duration_days
-        bounce = bounce_confirmed(df, cfg.bounce_lookback_days, cfg.bounce_min_close_position)
-        pullback_state_a = bool(trend_align and in_zone and depth_ok and duration_ok and bounce)
-        if pullback_state_a:
-            # 押し安値 = スイング高値以降の最安値(最低でも直近5営業日から取る)
-            look = max(int(days_since_high) + 1, 5)
-            dip_low = float(l.iloc[-look:].min())
-            prev_day_high = float(h.iloc[-2]) if len(h) >= 2 else None
-
-    adv20_jpy = float((c * v).iloc[-21:-1].mean())
-    ret5d = float(np.log(close_now / float(c.iloc[-6]))) if len(c) > 6 else np.nan
-
-    return {
-        "close": close_now, "atr": float(atr_n.iloc[-1]),
-        "vol_ratio_today": vol_ratio_today, "adv20_jpy": adv20_jpy,
-        "gap_found": gap_found, "gap_days_since": gap_days_since, "gap_ret": gap_ret,
-        "gap_vol_ratio": gap_vol_ratio,
-        "breakout_found": breakout_found, "spiked": spiked,
-        "chg1d_pct": (np.exp(chg1d) - 1) * 100, "ret5d": ret5d,
-        "pullback_state_a": pullback_state_a,
-        "trend_align": trend_align, "close_pos": _close_position(df),
-        "depth_atr": depth_atr,
-        "gap_high": gap_high, "gap_low": gap_low, "gap_date": gap_date,
-        "breakout_level": breakout_level, "pre_breakout_low": pre_breakout_low,
-        "dip_low": dip_low, "prev_day_high": prev_day_high,
-        "earnings_est_days": estimate_days_to_earnings(df, cfg),
-        "last_date": str(df.index[-1].date()) if hasattr(df.index[-1], "date") else str(df.index[-1]),
-    }
+W, MARGIN = 1080, 36
 
 
-def compute_sector_rank(items: list, cfg) -> dict:
-    """STEP2: 東証33業種の直近N日騰落(構成銘柄等ウェイト代理)。
-    戻り値: {"top": [(sector, ret%), ...], "bottom": [...], "by_sector": {sector: ret%}}"""
-    by_sector: dict = {}
-    for it in items:
-        sec = it["row"].get("sector") or "不明"
-        r = it["feat"].get("ret5d")
-        if r is not None and not (isinstance(r, float) and np.isnan(r)):
-            by_sector.setdefault(sec, []).append(r)
-    med = {s: float(np.median(v)) * 100 for s, v in by_sector.items() if len(v) >= cfg.sector_min_members}
-    ranked = sorted(med.items(), key=lambda x: -x[1])
-    return {"top": ranked[: cfg.sector_top_n], "bottom": ranked[-cfg.sector_bottom_n:] if len(ranked) >= cfg.sector_bottom_n else [],
-            "by_sector": med}
+class F:
+    def __init__(self, cfg):
+        self._cache = {}
+        self.reg = cfg.font_path
+        self.bold = cfg.font_path_bold
+
+    def __call__(self, size: int, bold: bool = False):
+        key = (size, bold)
+        if key not in self._cache:
+            path = self.bold if bold else self.reg
+            try:
+                self._cache[key] = ImageFont.truetype(path, size, index=0)
+            except Exception:
+                self._cache[key] = ImageFont.load_default()
+        return self._cache[key]
 
 
-def estimate_days_to_earnings(df: pd.DataFrame, cfg) -> int | None:
-    """出来高スパイクの周期から次回決算までの営業日数を推定する(警告用・精度は中程度)。
-
-    日本企業の決算は四半期ごと(約60営業日間隔)でほぼ同じ時期に来る。過去2年の
-    「出来高が20日平均の2.5倍以上に跳ねた日」を決算候補日とみなし、直近の候補日+60営業日を
-    次回発表の推定日とする。指数リバランス・突発ニュース等の出来高も混入するため、
-    あくまで「可能性がある」という警告に留め、除外判定には使わない(最終確認はiSPEED)。
-    戻り値: 次回までの推定営業日数。推定できない場合はNone。
-    """
-    if not getattr(cfg, "earnings_est_enabled", True):
-        return None
-    try:
-        v = df["Volume"].dropna()
-        if len(v) < 260:
-            return None
-        vm = v.rolling(20).mean().shift(1)
-        ratio = (v / vm).dropna()
-        spikes = ratio[ratio >= cfg.earnings_spike_vol_mult]
-        if len(spikes) < 2:
-            return None
-        pos = [v.index.get_loc(i) for i in spikes.index]
-        # 直近2年(約500営業日)以内のスパイクのみ使う
-        last = len(v) - 1
-        pos = [p for p in pos if last - p <= 500]
-        if not pos:
-            return None
-        # 四半期周期に合致するスパイクだけを決算候補として残す
-        cycle = cfg.earnings_cycle_days
-        latest = max(pos)
-        est = latest + cycle
-        # 推定日が既に過ぎている場合は次の周期へ送る
-        while est <= last:
-            est += cycle
-        days = int(est - last)
-        return days if 0 < days <= cycle else None
-    except Exception:
-        return None
+def _wrap(d, text, font, maxw):
+    out, cur = [], ""
+    for ch in text:
+        b = d.textbbox((0, 0), cur + ch, font=font)
+        if (b[2] - b[0]) > maxw:
+            out.append(cur); cur = ch
+        else:
+            cur += ch
+    if cur:
+        out.append(cur)
+    return out
 
 
-def _close_position(df: pd.DataFrame) -> float | None:
-    """当日の終値が日中レンジのどこで引けたか(0=安値・1=高値)。反発の質の代理指標。"""
-    try:
-        h = float(df["High"].iloc[-1]); l = float(df["Low"].iloc[-1]); c = float(df["Close"].iloc[-1])
-        return (c - l) / (h - l) if h > l else None
-    except Exception:
-        return None
+def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
+               position_alerts: list, pending_summary: dict, pending_events: list,
+               events: list, cfg) -> str:
+    f = F(cfg)
+    st = res["stats"]
+    sr = res["sector_rank"]
+    tc = st["trigger_count"]
+    notable = [a for a in (position_alerts or []) if a.get("hit") or a.get("hit") is None]
+
+    est_h = (1020 + len(pending_events) * 60 + len(notable) * 90
+             + len(res["picked"]) * 430 + len(res.get("watch", [])) * 100
+             + len(events) * 40 + 460)
+    img = Image.new("RGB", (W, est_h), "white")
+    d = ImageDraw.Draw(img)
+
+    def text(x, y, s, size=22, color=INK, bold=False):
+        d.text((x, y), s, font=f(size, bold), fill=color)
+        return y + int(size * 1.5)
+
+    def hline(y):
+        d.line([(MARGIN, y), (W - MARGIN, y)], fill=LINE, width=2)
+        return y + 14
+
+    y = MARGIN
+    y = text(MARGIN, y, "新スクリーニング", 30, GREEN, True)
+    y = text(MARGIN, y, today, 20, SUB)
+
+    # --- 結論バナー ---
+    prov = "(暫定)" if sentiment.get("provisional") else ""
+    col = GREEN if sentiment["score"] >= 4 else (GOLD if sentiment["score"] == 3 else RED)
+    bg = ((240, 248, 242) if sentiment["score"] >= 4
+          else ((253, 249, 235) if sentiment["score"] == 3 else (255, 242, 240)))
+    d.rounded_rectangle([MARGIN, y, W - MARGIN, y + 108], 14, fill=bg, outline=col, width=3)
+    text(MARGIN + 20, y + 12, f"地合い {sentiment['score']}/5{prov} — {sentiment['stance']}"
+                              f" / 本日の候補 {st['picked']}件", 26, col, True)
+    sub = " / ".join(sentiment.get("reasons", [])[:3])
+    if sentiment.get("vi_proxy") is not None:
+        sub += f" / VI代理{sentiment['vi_proxy']:.0f}"
+    for ln in _wrap(d, sub, f(17), W - 2 * MARGIN - 40)[:1]:
+        text(MARGIN + 20, y + 50, ln, 17, SUB)
+    text(MARGIN + 20, y + 76, f"保有中 {len(notable)}件 / ゾーン待ち {pending_summary.get('pending', 0)}件",
+         17, BLUE, True)
+    y += 122
+
+    y = text(MARGIN, y, f"データ {meta.get('data_ok','?')}/{meta.get('data_total','?')}"
+             f"({meta.get('data_coverage',0)*100:.0f}%) {meta.get('source','')}", 18, SUB)
+    _cn = coverage_note(meta)
+    if _cn:
+        for ln in _wrap(d, "内訳: " + _cn, f(17), W - 2 * MARGIN):
+            y = text(MARGIN, y, ln, 17, SUB)
+    y = text(MARGIN, y, "カタリスト中身・需給は取得不可 — 発注前にiSPEED/TDnetで要確認", 18, RED, True)
+    if sentiment.get("missing"):
+        for ln in _wrap(d, "欠落データ: " + ", ".join(sentiment["missing"]), f(17, True), W - 2 * MARGIN):
+            y = text(MARGIN, y, ln, 17, GOLD, True)
+    if sentiment.get("hivol_env"):
+        msg = ("高ボラ環境: 前夜SOX反発あり → 値がさ大型は高ボラタグ付きで対象"
+               if sentiment.get("sox_rebound")
+               else "高ボラ環境: " + sentiment.get("semis_reason", "値がさ大型は除外"))
+        for ln in _wrap(d, msg, f(17, True), W - 2 * MARGIN):
+            y = text(MARGIN, y, ln, 17, GOLD, True)
+
+    # --- ゾーン待ちの動き ---
+    if pending_events:
+        y = hline(y + 6)
+        y = text(MARGIN, y, "ゾーン待ち候補の動き", 20, INK, True)
+        for e in pending_events:
+            mark, mc = {"reached": ("到達", GREEN), "expired": ("失効", SUB),
+                        "broken": ("下端割れ", RED)}.get(e["event"], ("", SUB))
+            lines = _wrap(d, f"[{mark}] {e['code']} {e['name']}: {e['note']}",
+                          f(17, True), W - 2 * MARGIN - 32)
+            bh = 12 + len(lines) * 22 + 8
+            d.rounded_rectangle([MARGIN, y, W - MARGIN, y + bh], 10,
+                                fill=(250, 251, 252), outline=LINE, width=2)
+            yy = y + 8
+            for ln in lines:
+                text(MARGIN + 14, yy, ln, 17, mc, True); yy += 22
+            y += bh + 6
+
+    # --- 保有銘柄 ---
+    if notable:
+        y = hline(y + 6)
+        y = text(MARGIN, y, "保有中の銘柄", 20, INK, True)
+        for a in notable:
+            tag, tc2 = {"stop": ("ストップ割れ", RED), "partial": ("+1R到達", GREEN),
+                        "time": ("時間ストップ", GOLD)}.get(a.get("hit"), ("要確認", GOLD))
+            prog = ""
+            if a.get("days_held") is not None and a.get("time_stop"):
+                prog = f"{a['days_held']}/{a['time_stop']}営業日"
+            lines = _wrap(d, a["note"], f(16), W - 2 * MARGIN - 200)
+            bh = 14 + 24 + len(lines) * 21 + 10
+            d.rounded_rectangle([MARGIN, y, W - MARGIN, y + bh], 12,
+                                fill=(250, 251, 252), outline=LINE, width=2)
+            d.text((MARGIN + 16, y + 10), f"[{tag}] {a['code']} {a['name']}",
+                   font=f(18, True), fill=tc2)
+            if prog:
+                d.text((W - MARGIN - 150, y + 12), prog, font=f(17, True), fill=SUB)
+            yy = y + 36
+            for ln in lines:
+                d.text((MARGIN + 16, yy), ln, font=f(16), fill=SUB); yy += 21
+            y += bh + 8
+
+    # --- セクター ---
+    y = hline(y + 6)
+    y = text(MARGIN, y, "セクター(等ウェイト代理・直近5日)", 22, INK, True)
+    if sr["top"]:
+        y = text(MARGIN, y, "↑上位: " + " / ".join(f"{s}({r:+.1f}%)" for s, r in sr["top"]), 19, GREEN, True)
+    if sr["bottom"]:
+        y = text(MARGIN, y, "↓回避: " + " / ".join(f"{s}({r:+.1f}%)" for s, r in sr["bottom"]), 19, RED, True)
+    y += 4
+
+    # --- 候補 ---
+    y = hline(y)
+    y = text(MARGIN, y, f"本日の候補 — 点灯 材料反応{tc.get('材料反応',0)}"
+                        f"・押し目{tc.get('押し目',0)}・高値ブレイク{tc.get('高値ブレイク',0)}",
+             22, INK, True)
+    if st.get("slot_note"):
+        y = text(MARGIN, y, "▼" + st["slot_note"], 18, BLUE, True)
+    if st.get("concentration"):
+        y = text(MARGIN, y, "⚠" + st["concentration"], 18, GOLD, True)
+    if res["picked"]:
+        d.rounded_rectangle([MARGIN, y, W - MARGIN, y + 52], 10, fill=(255, 240, 240),
+                            outline=RED, width=2)
+        text(MARGIN + 16, y + 13, "[要確認] iSPEED/TDnetでカタリストを確認するまで発注不可", 19, RED, True)
+        y += 64
+    else:
+        d.rounded_rectangle([MARGIN, y, W - MARGIN, y + 60], 14, fill=BG_CARD, outline=LINE, width=2)
+        text(MARGIN + 20, y + 16, "該当なし — ゼロ件はゼロ件。無理に格下げ採用しない。", 20, SUB, True)
+        y += 76
+
+    CW = W - 2 * MARGIN - 44
+    for i, c in enumerate(res["picked"], 1):
+        trig_lines = _wrap(d, c.trigger_text, f(17), CW)
+        conf_lines = _wrap(d, f"期待度 {c.score:.0f}/10 — {c.score_reason}", f(17, True), CW)
+        risk_lines = []
+        for r in c.risks[:2]:
+            risk_lines.extend(_wrap(d, "⚠ " + r, f(16), CW))
+        flag_lines = []
+        for fl in c.flags:
+            flag_lines.extend(_wrap(d, fl, f(16, True), CW))
+        ch = (16 + 52 + 26 + len(trig_lines) * 24 + 96 + 30 + 26
+              + len(conf_lines) * 23 + len(risk_lines) * 21 + len(flag_lines) * 21 + 16)
+
+        d.rounded_rectangle([MARGIN, y, W - MARGIN, y + ch], 16, fill=BG_CARD, outline=LINE, width=2)
+        cx, cy = MARGIN + 22, y + 16
+        tagcol = BLUE_TAG if c.tag == "1ヶ月" else GOLD_TAG
+        d.rounded_rectangle([cx, cy, cx + 150, cy + 42], 10, fill=tagcol)
+        d.text((cx + 14, cy + 7), c.trigger, font=f(19, True), fill="white")
+        d.rounded_rectangle([cx + 160, cy, cx + 272, cy + 42], 10, fill=(238, 240, 244))
+        d.text((cx + 172, cy + 8), "めやす" + c.tag, font=f(17, True), fill=SUB)
+        d.text((cx + 286, cy - 2), f"{i}. {c.code} {c.name}", font=f(26, True), fill=INK)
+        cy += 52
+        d.text((cx, cy), f"{c.sector}" + ("(順風)" if c.tailwind else "(逆風)" if c.headwind else ""),
+               font=f(17), fill=GREEN if c.tailwind else (RED if c.headwind else SUB))
+        cy += 26
+        for ln in trig_lines:
+            d.text((cx, cy), ln, font=f(17), fill=SUB); cy += 24
+
+        bw = (CW - 24) // 3
+        # ①INゾーン
+        d.rounded_rectangle([cx, cy, cx + bw, cy + 80], 10, fill="white", outline=GREEN, width=2)
+        d.text((cx + 12, cy + 8), "INゾーン(指値)", font=f(15), fill=SUB)
+        d.text((cx + 12, cy + 28), f"{c.zone_hi:,.0f} 円", font=f(20, True), fill=INK)
+        d.text((cx + 12, cy + 52), f"〜 {c.zone_lo:,.0f} 円", font=f(20, True), fill=INK)
+        # ②STOP
+        x1 = cx + bw + 12
+        d.rounded_rectangle([x1, cy, x1 + bw, cy + 80], 10, fill="white", outline=RED, width=2)
+        d.text((x1 + 12, cy + 8), "STOP(構造)", font=f(15), fill=SUB)
+        d.text((x1 + 12, cy + 32), f"{c.stop:,.0f} 円", font=f(23, True), fill=RED)
+        d.text((x1 + 12, cy + 60), "どこで入っても同じ", font=f(14), fill=SUB)
+        # ③1Rの幅
+        x2 = cx + 2 * (bw + 12)
+        d.rounded_rectangle([x2, cy, x2 + bw, cy + 80], 10, fill="white", outline=LINE, width=2)
+        d.text((x2 + 12, cy + 8), "1Rの幅(リスク幅)", font=f(15), fill=SUB)
+        d.text((x2 + 12, cy + 30), f"浅く {c.risk_shallow:,.0f}円 ({c.risk_pct_shallow:.1f}%)",
+               font=f(16, True), fill=INK)
+        d.text((x2 + 12, cy + 54), f"深く {c.risk_deep:,.0f}円 ({c.risk_pct_deep:.1f}%)",
+               font=f(16, True), fill=GREEN)
+        cy += 96
+
+        d.text((cx, cy), f"失効 {c.expire_date}({cfg.zone_expire_days}営業日) / "
+                         f"時間ストップ {c.time_stop}営業日 / 1単元{c.unit_cost/1e4:,.0f}万円",
+               font=f(18, True), fill=INK)
+        cy += 30
+        for ln in conf_lines:
+            d.text((cx, cy), ln, font=f(17, True), fill=INK); cy += 23
+        d.text((cx, cy), "出口: +1Rで半分利確(2単元以上) → 残玉は構造まで引上げ+トレーリング",
+               font=f(16), fill=BLUE)
+        cy += 26
+        for ln in risk_lines:
+            d.text((cx, cy), ln, font=f(16), fill=GOLD); cy += 21
+        for ln in flag_lines:
+            d.text((cx, cy), ln, font=f(16, True), fill=GOLD); cy += 21
+        y += ch + 14
+
+    # --- 次点 ---
+    if res.get("watch"):
+        y = text(MARGIN, y + 4, "次点(監視)", 20, INK, True)
+        for c in res["watch"]:
+            lines = _wrap(d, f"{c.code} {c.name} [{c.trigger}] {c.trigger_text}", f(17, True), CW)
+            warn = c.flags[0] if c.flags else ""
+            wlines = _wrap(d, warn, f(15, True), CW) if warn else []
+            bh = 14 + len(lines) * 22 + len(wlines) * 19 + 10
+            d.rounded_rectangle([MARGIN, y, W - MARGIN, y + bh], 12,
+                                fill=(245, 247, 250), outline=LINE, width=2)
+            yy = y + 10
+            for ln in lines:
+                d.text((MARGIN + 16, yy), ln, font=f(17, True), fill=INK); yy += 22
+            for ln in wlines:
+                d.text((MARGIN + 16, yy), ln, font=f(15, True), fill=GOLD); yy += 19
+            y += bh + 8
+
+    # --- イベント ---
+    y = hline(y + 4)
+    y = text(MARGIN, y, "今週の重要イベント(events.csv・手動管理)", 20, INK, True)
+    if events:
+        for e in events:
+            y = text(MARGIN + 10, y, f"・{e['date']} {e['label']}", 18, INK)
+    else:
+        y = text(MARGIN + 10, y, "登録なし — 経済指標カレンダーは自動取得不可(手動確認)", 18, SUB)
+
+    # --- 最後に: 今日の地合いの念押し ---
+    cn = closing_note(sentiment)
+    ccol = GREEN if cn["score"] >= 4 else (GOLD if cn["score"] == 3 else RED)
+    cbg = ((240, 248, 242) if cn["score"] >= 4
+           else ((253, 249, 235) if cn["score"] == 3 else (255, 242, 240)))
+    body = []
+    for ln in cn["lines"]:
+        body.extend(_wrap(d, ln, f(17), W - 2 * MARGIN - 40))
+    bh = 16 + 34 + len(body) * 24 + 12
+    y += 10
+    d.rounded_rectangle([MARGIN, y, W - MARGIN, y + bh], 14, fill=cbg, outline=ccol, width=3)
+    d.text((MARGIN + 20, y + 14),
+           f"最後に: 今日の地合い {cn['score']}/5{'(暫定)' if cn['provisional'] else ''}"
+           f" — {cn['stance']}", font=f(22, True), fill=ccol)
+    yy = y + 50
+    for ln in body:
+        d.text((MARGIN + 20, yy), ln, font=f(17), fill=INK); yy += 24
+    y += bh + 14
+
+    y = hline(y + 4)
+    for s in ["共通リスク: カタリストの中身は未確認(価格痕跡のみ)。悪材料の可能性を常に残す。",
+              "免責: AI候補提示で投資助言ではない。最終判断と結果責任はユーザーにある。"]:
+        for ln in _wrap(d, s, f(16), W - 2 * MARGIN):
+            y = text(MARGIN, y, ln, 16, SUB)
+
+    img = img.crop((0, 0, W, min(est_h, y + MARGIN)))
+    img.save(outpath)
+    return outpath
