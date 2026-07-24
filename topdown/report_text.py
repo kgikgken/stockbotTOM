@@ -100,7 +100,7 @@ def build_text(today: str, meta: dict, sentiment: dict, res: dict,
            f"深く{c.risk_deep:,.0f}円({c.risk_pct_deep:.1f}%)")
         ap(f"   失効{c.expire_date}({cfg.zone_expire_days}営業日) / 時間ストップ{c.time_stop}営業日 / "
            f"1単元{c.unit_cost/1e4:,.0f}万円")
-        ap(f"   確信度: {c.confidence} — {c.conf_reason}")
+        ap(f"   期待度 {c.score:.0f}/10 — {c.score_reason}")
         ap("   出口: +1Rで半分利確(2単元以上) → 残玉は構造まで引上げ+トレーリング / 固定利確なし")
         for r in c.risks[:2]:
             ap(f"   ⚠{r}")
