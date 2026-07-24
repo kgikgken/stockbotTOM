@@ -30,7 +30,7 @@ COLS = [
     "status",            # pending / reached / expired / broken
     "reached_date", "reached_low",   # ゾーン到達時の日付とその日の安値
     "days_waited",
-    "confidence", "gap_date", "unit_cost",
+    "score", "gap_date", "unit_cost",
 ]
 
 
@@ -163,7 +163,7 @@ def add_new_candidates(pending: pd.DataFrame, picked: list, today: str,
             "stop": f"{c.stop:.1f}", "time_stop": c.time_stop, "expire_date": c.expire_date,
             "close_at_listing": f"{c.feat['close']:.1f}",
             "status": "pending", "reached_date": "", "reached_low": "", "days_waited": 0,
-            "confidence": c.confidence, "gap_date": c.gap_date or "",
+            "score": f"{c.score:.0f}", "gap_date": c.gap_date or "",
             "unit_cost": f"{c.unit_cost:.0f}",
         })
     if not new_rows:
