@@ -116,6 +116,21 @@ class Config:
     max_risk_atr_mult: float = field(default_factory=lambda: _f("MAX_RISK_ATR_MULT", 2.0))
     # ゾーンの最低幅。これを下回るなら「帯」として意味を成さないため見送る(退化ゾーンの検出)。
     min_zone_width_atr: float = field(default_factory=lambda: _f("MIN_ZONE_WIDTH_ATR", 0.3))
+    # ★リスク幅の絶対上限%(2026-07-24復活)。v1.0に8%上限があったがv2.0の書き換えで脱落し、
+    # ATR相対の上限だけになっていた。その結果ATRが株価の7%超あるような高ボラ銘柄が
+    # 損切り幅21.6%で候補に出た(2354 YE DIGITAL)。ATR相対と同じく「深い端」で測る。
+    # 8%のままだと構造ストップ化で広がった材料反応がほぼ全滅するため12%に置き直した(仮置き)。
+    max_risk_width_pct: float = field(default_factory=lambda: _f("MAX_RISK_WIDTH_PCT", 12.0))
+
+    # --- 採用枠の絞り込み(2026-07-24: 既定オフ) ---
+    # 地合いが悪い日に枠を減らす案を実装したが、「上がりそうな候補をわざわざ切る必要はない。
+    # 地合いは最後に念押しすればよい」との判断で既定オフにした。候補は常に最大数まで出し、
+    # 見送るかロットを落とすかは人が決める。1に変えれば地合い連動の絞り込みが復活する。
+    slots_by_sentiment: bool = field(default_factory=lambda: _b("SLOTS_BY_SENTIMENT", False))
+    # 材料反応の予約枠も同じ理由で既定オフ。スコアの高い押し目を押し出して
+    # 低い材料反応を入れる動きになり、「期待の高い順」という並びの原則と衝突するため。
+    # (PEAD検証のサンプルを優先したい場合のみ1にする)
+    reserve_gap_slot: bool = field(default_factory=lambda: _b("RESERVE_GAP_SLOT", False))
     # ★リスク幅の下限(2026-07-19追加): ゾーン下端が構造ストップに近すぎると、
     # 損切り幅が0.2ATR程度になりノイズで即刻刈られる非現実的な設計になる。
     # 下端を STOP + これ まで引き上げ、「底値ちょうどを拾いにいかない」ことを構造化する。
