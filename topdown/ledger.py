@@ -13,7 +13,7 @@ import csv
 from pathlib import Path
 
 PLAN_COLS = [
-    "date", "code", "name", "sector", "trigger", "tag", "confidence",
+    "date", "code", "name", "sector", "trigger", "tag", "score", "score_reason",
     "zone_hi", "zone_lo", "stop", "risk_shallow", "risk_deep",
     "risk_pct_shallow", "risk_pct_deep", "atr", "unit_cost",
     "close_at_listing",      # 即時方式の約定価格(反実仮想)
@@ -24,7 +24,7 @@ PLAN_COLS = [
 
 # 手仕舞い後に手入力する結果ログ。MFE/MAEはテール取り逃しの定量化に必須。
 RESULT_COLS = [
-    "date_listed", "date_entry", "code", "name", "trigger", "tag", "confidence",
+    "date_listed", "date_entry", "code", "name", "trigger", "tag", "score",
     "entry_exec",            # 実際の約定価格
     "zone_hi", "zone_lo", "stop_initial", "risk_width",
     "close_at_listing",      # 即時方式ならいくらで入っていたか
@@ -57,7 +57,8 @@ def write_plan_log(outdir: str, today: str, picked: list) -> str:
         for c in picked:
             feat = c.feat or {}
             w.writerow([
-                today, c.code, c.name, c.sector, c.trigger, c.tag, c.confidence,
+                today, c.code, c.name, c.sector, c.trigger, c.tag,
+                f"{c.score:.0f}", c.score_reason,
                 _num(c.zone_hi), _num(c.zone_lo), _num(c.stop),
                 _num(c.risk_shallow), _num(c.risk_deep),
                 _num(c.risk_pct_shallow, 2), _num(c.risk_pct_deep, 2),
