@@ -162,6 +162,12 @@ def build_zone(trigger: str, feat: dict, cfg: Config):
         return None, (f"深い端で入ってもリスク{risk_deep_atr:.1f}ATRと広すぎる"
                       f"(上限{cfg.max_risk_atr_mult:.1f}ATR)")
 
+    # ★リスク幅の絶対上限%(ATR相対だけだと高ボラ銘柄が損切り幅20%超で通ってしまうため)
+    risk_deep_pct = (zone_lo - stop) / zone_lo * 100
+    if risk_deep_pct > cfg.max_risk_width_pct:
+        return None, (f"深い端でもリスク幅{risk_deep_pct:.1f}%と大きい"
+                      f"(上限{cfg.max_risk_width_pct:.0f}%)")
+
     # ★退化ゾーンの検出: 帯が細すぎると「ゾーンで待つ」ではなくピンポイント指値になる。
     if (zone_hi - zone_lo) / atr < cfg.min_zone_width_atr:
         return None, (f"ゾーン幅{(zone_hi - zone_lo)/atr:.2f}ATRが最低幅"
@@ -333,6 +339,27 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
 
     # --- 絞り込み: 序列 → セクター分散 → 相関集中の抑制 ---
     fired.sort(key=lambda x: -x.score)
+
+    # 地合いに応じて採用枠を絞る(元プロンプトの「基本姿勢」を出力に反映させる)
+    max_slots = cfg.max_candidates
+    slot_note = ""
+    if cfg.slots_by_sentiment:
+        sc = int(sentiment.get("score", 3))
+        max_slots = {5: cfg.max_candidates, 4: cfg.max_candidates,
+                     3: max(1, cfg.max_candidates - 1),
+                     2: max(1, cfg.max_candidates - 2),
+                     1: max(1, cfg.max_candidates - 3)}.get(sc, cfg.max_candidates)
+        if max_slots < cfg.max_candidates:
+            slot_note = (f"地合い{sc}/5のため採用枠を{cfg.max_candidates}→{max_slots}件に縮小"
+                         f"({sentiment.get('stance','')})")
+
+    # 材料反応が点灯していれば最低1枠を確保する(PEAD検証のサンプルを絶やさないため)
+    reserved: Candidate | None = None
+    if cfg.reserve_gap_slot and max_slots > 0:
+        gaps = [c for c in fired if c.trigger == TRIG_GAP]
+        if gaps and not any(c.trigger == TRIG_GAP for c in fired[:max_slots]):
+            reserved = gaps[0]
+
     picked: List[Candidate] = []
     overflow: List[Candidate] = []
     sector_used: Dict[str, int] = {}
@@ -340,7 +367,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
     gapday_used: Dict[str, int] = {}
 
     for c in fired:
-        if len(picked) >= cfg.max_candidates:
+        if len(picked) >= max_slots:
             overflow.append(c); continue
         if sector_used.get(c.sector, 0) >= cfg.max_per_sector:
             rejects.append({"code": c.code, "name": c.name, "stage": "セクター分散",
@@ -362,6 +389,13 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
             if c.gap_date:
                 gapday_used[c.gap_date] = gapday_used.get(c.gap_date, 0) + 1
 
+    if reserved is not None and reserved not in picked:
+        if len(picked) >= max_slots and picked:
+            dropped = picked.pop()
+            overflow.append(dropped)
+        picked.append(reserved)
+        reserved.flags.append("材料反応の予約枠で採用(PEAD検証のサンプル確保)")
+
     concentration = ""
     picked_gapdays: Dict[str, int] = {}
     for c in picked:
@@ -378,7 +412,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         "picked": len(picked), "rejected": len(rejects),
         "trigger_count": {t: sum(1 for c in fired if c.trigger == t)
                           for t in (TRIG_GAP, TRIG_PULL, TRIG_BREAK)},
-        "concentration": concentration,
+        "concentration": concentration, "slot_note": slot_note, "max_slots": max_slots,
     }
     return {"picked": picked, "watch": runner_up, "rejects": rejects,
             "sector_rank": sector_rank, "stats": stats}
