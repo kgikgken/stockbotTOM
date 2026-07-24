@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .market import closing_note
+
 INK = (28, 32, 38)
 SUB = (95, 103, 115)
 LINE = (225, 228, 233)
@@ -63,7 +65,7 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     tc = st["trigger_count"]
     notable = [a for a in (position_alerts or []) if a.get("hit") or a.get("hit") is None]
 
-    est_h = (760 + len(pending_events) * 60 + len(notable) * 90
+    est_h = (1020 + len(pending_events) * 60 + len(notable) * 90
              + len(res["picked"]) * 430 + len(res.get("watch", [])) * 100
              + len(events) * 40 + 460)
     img = Image.new("RGB", (W, est_h), "white")
@@ -101,6 +103,15 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     y = text(MARGIN, y, f"データ {meta.get('data_ok','?')}/{meta.get('data_total','?')}"
              f"({meta.get('data_coverage',0)*100:.0f}%) {meta.get('source','')}", 18, SUB)
     y = text(MARGIN, y, "カタリスト中身・需給は取得不可 — 発注前にiSPEED/TDnetで要確認", 18, RED, True)
+    if sentiment.get("missing"):
+        for ln in _wrap(d, "欠落データ: " + ", ".join(sentiment["missing"]), f(17, True), W - 2 * MARGIN):
+            y = text(MARGIN, y, ln, 17, GOLD, True)
+    if sentiment.get("hivol_env"):
+        msg = ("高ボラ環境: 前夜SOX反発あり → 値がさ大型は高ボラタグ付きで対象"
+               if sentiment.get("sox_rebound")
+               else "高ボラ環境: " + sentiment.get("semis_reason", "値がさ大型は除外"))
+        for ln in _wrap(d, msg, f(17, True), W - 2 * MARGIN):
+            y = text(MARGIN, y, ln, 17, GOLD, True)
 
     # --- ゾーン待ちの動き ---
     if pending_events:
@@ -156,6 +167,8 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     y = text(MARGIN, y, f"本日の候補 — 点灯 材料反応{tc.get('材料反応',0)}"
                         f"・押し目{tc.get('押し目',0)}・高値ブレイク{tc.get('高値ブレイク',0)}",
              22, INK, True)
+    if st.get("slot_note"):
+        y = text(MARGIN, y, "▼" + st["slot_note"], 18, BLUE, True)
     if st.get("concentration"):
         y = text(MARGIN, y, "⚠" + st["concentration"], 18, GOLD, True)
     if res["picked"]:
@@ -258,6 +271,25 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
             y = text(MARGIN + 10, y, f"・{e['date']} {e['label']}", 18, INK)
     else:
         y = text(MARGIN + 10, y, "登録なし — 経済指標カレンダーは自動取得不可(手動確認)", 18, SUB)
+
+    # --- 最後に: 今日の地合いの念押し ---
+    cn = closing_note(sentiment)
+    ccol = GREEN if cn["score"] >= 4 else (GOLD if cn["score"] == 3 else RED)
+    cbg = ((240, 248, 242) if cn["score"] >= 4
+           else ((253, 249, 235) if cn["score"] == 3 else (255, 242, 240)))
+    body = []
+    for ln in cn["lines"]:
+        body.extend(_wrap(d, ln, f(17), W - 2 * MARGIN - 40))
+    bh = 16 + 34 + len(body) * 24 + 12
+    y += 10
+    d.rounded_rectangle([MARGIN, y, W - MARGIN, y + bh], 14, fill=cbg, outline=ccol, width=3)
+    d.text((MARGIN + 20, y + 14),
+           f"最後に: 今日の地合い {cn['score']}/5{'(暫定)' if cn['provisional'] else ''}"
+           f" — {cn['stance']}", font=f(22, True), fill=ccol)
+    yy = y + 50
+    for ln in body:
+        d.text((MARGIN + 20, yy), ln, font=f(17), fill=INK); yy += 24
+    y += bh + 14
 
     y = hline(y + 4)
     for s in ["共通リスク: カタリストの中身は未確認(価格痕跡のみ)。悪材料の可能性を常に残す。",
