@@ -144,7 +144,10 @@ def _asset(name: str, cfg):
     写真素材(実写のマスコット・ヒーロー画像)はコードでは描けないため、
     リポジトリ直下の assets/ に置く方式にした。無い場合は図形描画で代替する。
     """
-    for p in (Path("assets") / name, Path(getattr(cfg, "outdir", ".")) / name):
+    # assets/ に置くのが本来だが、GitHubアプリはフォルダ作成・画像アップロードができない。
+    # リポジトリ直下に置いただけでも拾えるよう、探索先を広げてある。
+    for p in (Path("assets") / name, Path(name),
+              Path(getattr(cfg, "outdir", ".")) / name):
         try:
             if p.exists():
                 return Image.open(p).convert("RGBA")
@@ -154,11 +157,17 @@ def _asset(name: str, cfg):
 
 
 def _mascot(cfg):
+    # 透過が必要なのでPNGのみ
     return _asset("mascot.png", cfg)
 
 
 def _hero(cfg):
-    return _asset("hero.png", cfg)
+    # 背景写真は透過不要。容量が小さいJPEGも受け付ける
+    for name in ("hero.jpg", "hero.jpeg", "hero.png"):
+        im = _asset(name, cfg)
+        if im is not None:
+            return im
+    return None
 
 
 def _paste_bg(img, photo, H: int, photo_h: int = 620, wash: float = 0.16,
