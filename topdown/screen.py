@@ -23,9 +23,6 @@ from .indicators import compute_topdown_features, compute_sector_rank, tob_suspe
 TRIG_GAP, TRIG_PULL, TRIG_BREAK = "材料反応", "押し目", "高値ブレイク"
 TAG_MONTH, TAG_2WEEK = "1ヶ月", "2週間"
 
-_CONF_ORDER = {"低": 0, "中": 1, "高": 2}
-
-
 @dataclass
 class Candidate:
     ticker: str
@@ -53,8 +50,7 @@ class Candidate:
     time_stop: int = 0
     expire_date: str = ""
     # --- 付帯情報 ---
-    confidence: str = "低"
-    conf_reason: str = ""
+    score_reason: str = ""
     gap_date: str | None = None
     earnings_est_days: int | None = None
     risks: List[str] = field(default_factory=list)
@@ -195,20 +191,46 @@ def _decide_trigger(feat: dict, tailwind: bool):
     return None
 
 
-def _confidence(trigger: str, feat: dict, headwind: bool, hivol: bool):
-    bits = []
+def _expectation_score(trigger: str, feat: dict, tailwind: bool, headwind: bool, hivol: bool):
+    """期待度スコア(0〜10)。大きいほど上位に並べる。
+
+    配点の軸は「日本市場でその現象にリターンの実証がどれだけあるか」に統一した。
+    値動きの願望ではなく、調査(2026-07-19)で確認した実証の強さを点にしている。
+    ★配点そのものは全て仮置き。各項目を台帳に個別記録し、数十件たまった時点で
+      「どの項目が実現Rと相関したか」を検証して調整する前提。
+    """
+    parts = []
     if trigger == TRIG_GAP:
-        level = 1; bits.append(f"出来高{feat['gap_vol_ratio']:.1f}倍の裏付けあり")
-    elif trigger == TRIG_BREAK:
-        level = 1; bits.append(f"出来高{feat['vol_ratio_today']:.1f}倍の裏付けあり")
+        pts = 4; parts.append("材料反応+4(日本でもPEAD確認)")
+    elif trigger == TRIG_PULL:
+        pts = 3; parts.append("押し目+3(日本は短期反転が強い)")
     else:
-        level = 0; bits.append("カタリスト・出来高の裏付けなし(テクニカルのみ)")
-    if headwind:
-        level -= 1; bits.append("逆風セクター(-1)")
-    if hivol:
-        level -= 1; bits.append("高ボラ(-1)")
-    level = max(0, min(1, level))  # 上限は常に「中」(一次情報を機械確認できないため)
-    return ("中" if level == 1 else "低"), " / ".join(bits) + " / 一次情報未確認のため上限は中"
+        pts = 1; parts.append("高値ブレイク+1(日本のモメンタムは弱い)")
+
+    # 反応の強さ。出来高が仕掛けの定義に入っているトリガーのみ加点する
+    # (押し目は下げ日の出来高が逆符号になりうるため加点せず、質は下の2項目で見る)
+    if trigger in (TRIG_GAP, TRIG_BREAK):
+        vr = feat.get("gap_vol_ratio") if trigger == TRIG_GAP else feat.get("vol_ratio_today")
+        if vr:
+            if vr >= 3.0: pts += 2; parts.append(f"出来高{vr:.1f}倍+2")
+            elif vr >= 2.0: pts += 1; parts.append(f"出来高{vr:.1f}倍+1")
+
+    # 鮮度: PEADは発表直後が最も強い
+    if trigger == TRIG_GAP and feat.get("gap_days_since") == 0:
+        pts += 1; parts.append("当日ギャップ+1")
+
+    if feat.get("trend_align"):
+        pts += 1; parts.append("トレンド整合+1")
+
+    cp = feat.get("close_pos")
+    if cp is not None and cp >= 0.7:
+        pts += 1; parts.append(f"高値引け({cp*100:.0f}%)+1")
+
+    if tailwind: pts += 1; parts.append("順風セクター+1")
+    if headwind: pts -= 1; parts.append("逆風セクター-1")
+    if hivol: pts -= 1; parts.append("高ボラ-1")
+
+    return max(0, min(10, pts)), " / ".join(parts)
 
 
 def _risks_for(c: Candidate, sentiment: dict) -> List[str]:
@@ -280,7 +302,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
 
         c = Candidate(ticker=tkr, code=tkr.replace(".T", ""), name=row.get("name", ""),
                      sector=sector, trigger=trigger, trigger_text=ttext, tag=tag,
-                     score=rank * 10 + (2.0 if tailwind else 0.0), feat=feat,
+                     score=0.0, feat=feat,
                      tailwind=tailwind, headwind=headwind, hivol=hivol)
         c.zone_hi = _round_tick(zone_hi)
         c.zone_lo = _round_tick(zone_lo)
@@ -295,7 +317,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         c.expire_date = _bday_str(today, cfg.zone_expire_days)
         c.gap_date = feat.get("gap_date")
         c.earnings_est_days = feat.get("earnings_est_days")
-        c.confidence, c.conf_reason = _confidence(trigger, feat, headwind, hivol)
+        c.score, c.score_reason = _expectation_score(trigger, feat, tailwind, headwind, hivol)
         c.risks = _risks_for(c, sentiment)
 
         if floored:
@@ -310,7 +332,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         fired.append(c)
 
     # --- 絞り込み: 序列 → セクター分散 → 相関集中の抑制 ---
-    fired.sort(key=lambda x: (-x.score, -_CONF_ORDER[x.confidence]))
+    fired.sort(key=lambda x: -x.score)
     picked: List[Candidate] = []
     overflow: List[Candidate] = []
     sector_used: Dict[str, int] = {}
