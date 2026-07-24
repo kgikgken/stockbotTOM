@@ -138,36 +138,35 @@ def _bear(d, cx, cy, r, band: bool = True):
         d.arc([x0, my1, x1, my2], start=15, end=165, fill=NOSE, width=lw)
 
 
-def _asset(name: str, cfg):
-    """assets/<name> があれば読み込む(無ければ None)。
+def _asset(stem: str, cfg):
+    """写真素材を探して読み込む(無ければ None)。
 
-    写真素材(実写のマスコット・ヒーロー画像)はコードでは描けないため、
-    リポジトリ直下の assets/ に置く方式にした。無い場合は図形描画で代替する。
+    スマホからのアップロードを楽にするため、置き場所と拡張子を広めに探す:
+      - リポジトリ直下(assets/ フォルダを作らなくてよい)
+      - assets/ の中
+      - 出力ディレクトリ
+      - 拡張子は png / jpg / jpeg(大文字も。iOSが変換しても拾えるように)
+    見つからない場合は図形描画で代替するので、素材が無くてもレイアウトは崩れない。
     """
-    # assets/ に置くのが本来だが、GitHubアプリはフォルダ作成・画像アップロードができない。
-    # リポジトリ直下に置いただけでも拾えるよう、探索先を広げてある。
-    for p in (Path("assets") / name, Path(name),
-              Path(getattr(cfg, "outdir", ".")) / name):
-        try:
-            if p.exists():
-                return Image.open(p).convert("RGBA")
-        except Exception:
-            pass
+    for dpath in (Path("."), Path("assets"), Path(getattr(cfg, "outdir", "."))):
+        for ext in (".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"):
+            p = dpath / (stem + ext)
+            try:
+                if p.exists():
+                    return Image.open(p).convert("RGBA")
+            except Exception:
+                pass
     return None
 
 
 def _mascot(cfg):
     # 透過が必要なのでPNGのみ
-    return _asset("mascot.png", cfg)
+    return _asset("mascot", cfg)
 
 
 def _hero(cfg):
-    # 背景写真は透過不要。容量が小さいJPEGも受け付ける
-    for name in ("hero.jpg", "hero.jpeg", "hero.png"):
-        im = _asset(name, cfg)
-        if im is not None:
-            return im
-    return None
+    # 拡張子の候補は _asset 側でまとめて見るのでファイル名の幹だけ渡す
+    return _asset("hero", cfg)
 
 
 def _paste_bg(img, photo, H: int, photo_h: int = 620, wash: float = 0.16,
