@@ -18,7 +18,7 @@ from topdown.market import compute_sentiment
 from topdown.screen import run_screen
 from topdown.position_check import load_positions_topdown, check_held_positions, POSITIONS_PATH
 from topdown.report_text import build_text, load_week_events
-from topdown.report_png import render_png
+from topdown.report_png import render_png, render_summary_png
 from topdown import ledger, carryover
 from topdown.universe import load_universe
 from topdown.line_send import send_line
@@ -87,6 +87,7 @@ def main() -> dict:
     (outdir / f"topdown_report_{today}.txt").write_text(text, encoding="utf-8")
 
     png_path = str(outdir / f"topdown_report_table_{today}.png")
+    sum_path = str(outdir / f"topdown_report_summary_{today}.png")
     images = []
     try:
         render_png(png_path, today, meta, sentiment, res, position_alerts,
@@ -94,6 +95,14 @@ def main() -> dict:
         images = [png_path]
     except Exception:
         print("[warn] PNG生成失敗(テキストのみ配信)")
+        traceback.print_exc()
+    # まとめ(2枚目)。1枚目が失敗してもこちらは独立して試す
+    try:
+        render_summary_png(sum_path, today, meta, sentiment, res, position_alerts,
+                           pending_summary, cfg)
+        images.append(sum_path)
+    except Exception:
+        print("[warn] まとめPNGの生成失敗(1枚目のみ配信)")
         traceback.print_exc()
 
     result = send_line(text, image_paths=images,
