@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .data import coverage_note
 from .market import closing_note
 
 INK = (28, 32, 38)
@@ -102,6 +103,10 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
 
     y = text(MARGIN, y, f"データ {meta.get('data_ok','?')}/{meta.get('data_total','?')}"
              f"({meta.get('data_coverage',0)*100:.0f}%) {meta.get('source','')}", 18, SUB)
+    _cn = coverage_note(meta)
+    if _cn:
+        for ln in _wrap(d, "内訳: " + _cn, f(17), W - 2 * MARGIN):
+            y = text(MARGIN, y, ln, 17, SUB)
     y = text(MARGIN, y, "カタリスト中身・需給は取得不可 — 発注前にiSPEED/TDnetで要確認", 18, RED, True)
     if sentiment.get("missing"):
         for ln in _wrap(d, "欠落データ: " + ", ".join(sentiment["missing"]), f(17, True), W - 2 * MARGIN):
