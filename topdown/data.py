@@ -21,7 +21,8 @@ def fetch_ohlcv(tickers: List[str], history_days: int, dryrun: bool = False) -> 
 
 
 # ---- 実フェッチ(自立版: 旧mispricing/data.pyから逐語移植・2巡目リトライ込み) ----
-def _fetch_ohlcv_real(tickers: List[str], history_days: int) -> Tuple[Dict[str, pd.DataFrame], dict]:
+def _fetch_ohlcv_real(tickers: List[str], history_days: int,
+                      cap_singles: int = 400) -> Tuple[Dict[str, pd.DataFrame], dict]:
     import yfinance as yf
 
     period = f"{max(history_days, 400)}d"
@@ -40,13 +41,21 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int) -> Tuple[Dict[str, 
                 time.sleep(base_backoff * (attempt + 1))
         return None
 
+    # 欠落の内訳を分けて記録する(2026-07-24)。
+    #   short  : 応答はあったが履歴が60日未満(新規上場等) → 何度再取得しても回収できない
+    #   failed : 応答自体が無い/壊れている        → 再取得で回収できる可能性がある
+    # 従来はこの2つが同じ「欠落」に混ざり、被覆率が低い原因を判別できなかった。
+    short: set = set()
+
     def _extract(raw, chunk: List[str], out: Dict[str, pd.DataFrame]):
         if raw is None or len(raw) == 0:
             return
         if len(chunk) == 1:
             df = raw.dropna(how="all")
-            if len(df):
+            if len(df) >= 60:
                 out[chunk[0]] = df
+            elif len(df):
+                short.add(chunk[0])
             return
         for t in chunk:
             try:
@@ -55,27 +64,43 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int) -> Tuple[Dict[str, 
                 continue
             if len(df) >= 60:
                 out[t] = df
+                short.discard(t)
+            elif len(df):
+                short.add(t)
 
     out: Dict[str, pd.DataFrame] = {}
-    chunks = [tickers[i:i + 200] for i in range(0, len(tickers), 200)]
+    # チャンクを200→100に縮小。1銘柄の不調がチャンク全体を巻き込む範囲を半分にする。
+    chunks = [tickers[i:i + 100] for i in range(0, len(tickers), 100)]
     for chunk in chunks:
         raw = _download_chunk(chunk, attempts=3, base_backoff=3)
         _extract(raw, chunk, out)
         time.sleep(1.0)
+    pass1 = len(out)
 
-    # ★2巡目(新規): 1巡目で欠落した銘柄だけ、小さいチャンクで再取得を試みる。
-    # チャンク単位の一時的な失敗(該当チャンク内の1銘柄の問題が全体に波及する等)による
-    # 取りこぼしを回収する狙い。1巡目の成功分の挙動は変えない(追加のみ・既存動作は不変)。
-    first_pass_missing = [t for t in tickers if t not in out]
-    if first_pass_missing:
-        retry_chunks = [first_pass_missing[i:i + 50] for i in range(0, len(first_pass_missing), 50)]
-        for chunk in retry_chunks:
-            raw = _download_chunk(chunk, attempts=2, base_backoff=4)
-            _extract(raw, chunk, out)
+    # 2巡目: 未取得のうち「履歴不足と分かっているもの」は除いて小チャンクで再取得
+    missing2 = [t for t in tickers if t not in out and t not in short]
+    if missing2:
+        for i in range(0, len(missing2), 50):
+            raw = _download_chunk(missing2[i:i + 50], attempts=2, base_backoff=4)
+            _extract(raw, missing2[i:i + 50], out)
             time.sleep(1.5)
+    pass2 = len(out)
+
+    # 3巡目: なお残るものを1銘柄ずつ取る。単独取得はまとめ取りと経路が違うため回収できる
+    # ことがある。実行時間が伸びすぎないよう上限を設ける。
+    missing3 = [t for t in tickers if t not in out and t not in short][:cap_singles]
+    for t in missing3:
+        raw = _download_chunk([t], attempts=2, base_backoff=2)
+        _extract(raw, [t], out)
+        time.sleep(0.3)
+    pass3 = len(out)
 
     meta = _coverage(tickers, out, source="yfinance(Yahoo Finance) 単一ソース")
-    meta["recovered_2nd_pass"] = len(first_pass_missing) - len([t for t in first_pass_missing if t not in out])
+    meta.update({
+        "pass1": pass1, "recovered_2nd": pass2 - pass1, "recovered_3rd": pass3 - pass2,
+        "short_history": len(short),
+        "failed": len([t for t in tickers if t not in out and t not in short]),
+    })
     return out, meta
 
 
@@ -222,3 +247,16 @@ def fetch_market_indices(dryrun: bool = False) -> dict:
         except Exception:
             out["missing"].append(name)
     return out
+
+
+def coverage_note(meta: dict) -> str:
+    """被覆率の内訳を1行にする。低い被覆率の原因が回収可能な失敗か履歴不足かを見分ける用。"""
+    bits = []
+    if meta.get("short_history"):
+        bits.append(f"履歴60日未満 {meta['short_history']}件(回収不能)")
+    if meta.get("failed"):
+        bits.append(f"取得失敗 {meta['failed']}件")
+    rec = (meta.get("recovered_2nd", 0) or 0) + (meta.get("recovered_3rd", 0) or 0)
+    if rec:
+        bits.append(f"再取得で回収 {rec}件")
+    return " / ".join(bits)
