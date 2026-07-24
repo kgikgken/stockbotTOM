@@ -171,7 +171,7 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     CW = W - 2 * MARGIN - 44
     for i, c in enumerate(res["picked"], 1):
         trig_lines = _wrap(d, c.trigger_text, f(17), CW)
-        conf_lines = _wrap(d, f"確信度: {c.confidence} — {c.conf_reason}", f(17, True), CW)
+        conf_lines = _wrap(d, f"期待度 {c.score:.0f}/10 — {c.score_reason}", f(17, True), CW)
         risk_lines = []
         for r in c.risks[:2]:
             risk_lines.extend(_wrap(d, "⚠ " + r, f(16), CW))
