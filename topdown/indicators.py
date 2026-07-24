@@ -75,8 +75,9 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
     # --- 押し目型: 凍結5ゲート(topdown内直接実装・自立版) ---
     pullback_state_a = False
     dip_low = None; prev_day_high = None
+    trend_align = False
     if not any(pd.isna(x.iloc[-1]) for x in (sma20, sma50, sma150, sma200)):
-        trend_align = close_now > float(sma50.iloc[-1]) > float(sma150.iloc[-1]) > float(sma200.iloc[-1])
+        trend_align = bool(close_now > float(sma50.iloc[-1]) > float(sma150.iloc[-1]) > float(sma200.iloc[-1]))
         ratio20 = close_now / float(sma20.iloc[-1]) - 1
         in_zone = (-cfg.pullback_lower_pct / 100) <= ratio20 <= (cfg.pullback_upper_pct / 100)
         _, days_since_high, depth_atr22 = swing_high_depth(df, atr22, cfg.swing_high_lookback_days)
@@ -101,6 +102,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         "breakout_found": breakout_found, "spiked": spiked,
         "chg1d_pct": (np.exp(chg1d) - 1) * 100, "ret5d": ret5d,
         "pullback_state_a": pullback_state_a,
+        "trend_align": trend_align, "close_pos": _close_position(df),
         "gap_high": gap_high, "gap_low": gap_low, "gap_date": gap_date,
         "breakout_level": breakout_level, "pre_breakout_low": pre_breakout_low,
         "dip_low": dip_low, "prev_day_high": prev_day_high,
@@ -159,5 +161,14 @@ def estimate_days_to_earnings(df: pd.DataFrame, cfg) -> int | None:
             est += cycle
         days = int(est - last)
         return days if 0 < days <= cycle else None
+    except Exception:
+        return None
+
+
+def _close_position(df: pd.DataFrame) -> float | None:
+    """当日の終値が日中レンジのどこで引けたか(0=安値・1=高値)。反発の質の代理指標。"""
+    try:
+        h = float(df["High"].iloc[-1]); l = float(df["Low"].iloc[-1]); c = float(df["Close"].iloc[-1])
+        return (c - l) / (h - l) if h > l else None
     except Exception:
         return None
