@@ -222,6 +222,8 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     d = ImageDraw.Draw(img)
 
     m = _mascot(cfg)
+    # 写真が無い場合、上部カードを狭いままにすると右側が空白になるので全幅にする
+    HAS_PHOTO = hero is not None
 
     def mascot_at(x, y, size):
         """マスコット写真を貼る。無ければ図形のクマを描いて代替。"""
@@ -231,11 +233,17 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
         else:
             _bear(d, x + size / 2, y + size / 2, size / 2 * 0.86)
 
+    def fit(txt, maxw, size, bold=True, minsize=14):
+        """maxw に収まる最大のフォントサイズを返す(収まらなければ縮める)。"""
+        while size > minsize and d.textbbox((0, 0), txt, font=f(size, bold))[2] > maxw:
+            size -= 1
+        return size
+
     def text(x, y, s, size=20, color=INK, bold=False):
         d.text((x, y), s, font=f(size, bold), fill=color)
         return y + int(size * 1.5)
 
-    TOPW = int(CARD_W * 0.52)
+    TOPW = int(CARD_W * 0.52) if HAS_PHOTO else CARD_W
 
     def card(y, h, fill=CARD, outline=BORDER, width=2, r=16, w=None, x=MARGIN):
         d.rounded_rectangle([x, y, x + (w if w else CARD_W), y + h], r,
@@ -244,12 +252,19 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     # ================= ヘッダー(クマが左上に重なる) =================
     y = MARGIN + 14
     d.rounded_rectangle([MARGIN + 62, y, MARGIN + TOPW, y + 76], 20, fill=HEADER)
-    d.text((MARGIN + 118, y + 18), "AIトム", font=f(30, True), fill=(226, 186, 118))
-    tw = d.textbbox((0, 0), "AIトム", font=f(30, True))[2]
-    d.text((MARGIN + 118 + tw + 4, y + 22), "のスイングトレード・スクリーニング",
-           font=f(26, True), fill=CREAM)
-    tw2 = d.textbbox((0, 0), "のスイングトレード・スクリーニング", font=f(26, True))[2]
-    _paw(d, MARGIN + 118 + tw + tw2 + 30, y + 40, 0.78, (196, 172, 132))
+    # タイトルはバーの内側に必ず収める。入らなければフォントを1ptずつ縮める。
+    t1, t2 = "AIトム", "のスイングトレード・スクリーニング"
+    x_title, avail = MARGIN + 118, (MARGIN + TOPW) - (MARGIN + 118) - 46
+    s1, s2 = 30, 26
+    while s1 > 15:
+        tw = d.textbbox((0, 0), t1, font=f(s1, True))[2]
+        tw2 = d.textbbox((0, 0), t2, font=f(s2, True))[2]
+        if tw + 4 + tw2 <= avail:
+            break
+        s1 -= 1; s2 -= 1
+    d.text((x_title, y + 18 + (30 - s1) // 2), t1, font=f(s1, True), fill=(226, 186, 118))
+    d.text((x_title + tw + 4, y + 22 + (26 - s2) // 2), t2, font=f(s2, True), fill=CREAM)
+    _paw(d, x_title + tw + 4 + tw2 + 24, y + 40, 0.72, (196, 172, 132))
     mascot_at(MARGIN - 4, y - 14, 92)          # ヘッダーに重なるクマ
     y += 76 + 12
 
@@ -263,21 +278,25 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     prov = "(暫定)" if sentiment.get("provisional") else ""
     col = GREEN if sc >= 4 else (GOLD if sc == 3 else RED)
     bg = (234, 244, 236) if sc >= 4 else ((251, 244, 226) if sc == 3 else (250, 233, 229))
-    card(y, 108, fill=bg, outline=col, width=3, w=TOPW)
-    mascot_at(MARGIN + 14, y + 24, 60)
-    d.text((MARGIN + 88, y + 16),
-           f"地合い {sc}/5{prov} — {sentiment.get('stance','')} / 本日の候補 {st['picked']}件",
-           font=f(26, True), fill=col)
-    sub = " / ".join(sentiment.get("reasons", [])[:3])
+    sub = " / ".join(sentiment.get("reasons", [])[:4])
     if sentiment.get("vi_proxy") is not None:
         sub += f" / VI代理{sentiment['vi_proxy']:.0f}"
-    for ln in _wrap(d, sub, f(17), TOPW - 110)[:1]:
-        d.text((MARGIN + 88, y + 54), ln, font=f(17), fill=SUB)
-    _paw(d, MARGIN + 96, y + 88, 0.5, BLUE)
-    d.text((MARGIN + 112, y + 78),
+    sub_l = _wrap(d, sub, f(17), TOPW - 110)[:2]      # 途中で切らず2行まで
+    ban_h = 84 + len(sub_l) * 24
+    card(y, ban_h, fill=bg, outline=col, width=3, w=TOPW)
+    mascot_at(MARGIN + 14, y + 20, 60)
+    headline = (f"地合い {sc}/5{prov} — {sentiment.get('stance','')}"
+                f" / 本日の候補 {st['picked']}件")
+    d.text((MARGIN + 88, y + 14), headline,
+           font=f(fit(headline, TOPW - 104, 26), True), fill=col)
+    yy = y + 50
+    for ln in sub_l:
+        d.text((MARGIN + 88, yy), ln, font=f(17), fill=SUB); yy += 24
+    _paw(d, MARGIN + 96, yy + 10, 0.5, BLUE)
+    d.text((MARGIN + 112, yy),
            f"保有中 {len(notable)}件 / ゾーン待ち {pending_summary.get('pending', 0)}件",
            font=f(17, True), fill=BLUE)
-    y += 108 + 12
+    y += ban_h + 12
 
     # ================= データ =================
     lines = [(f"データ {meta.get('data_ok','?')}/{meta.get('data_total','?')}"
