@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .data import coverage_note
 from .market import closing_note
 
 import pandas as pd
@@ -38,6 +39,9 @@ def build_text(today: str, meta: dict, sentiment: dict, res: dict,
 
     ap(f"【データ】{meta.get('data_ok','?')}/{meta.get('data_total','?')}"
        f"({meta.get('data_coverage',0)*100:.0f}%) {meta.get('source','')}")
+    cnote = coverage_note(meta)
+    if cnote:
+        ap(f"　内訳: {cnote}")
     if sentiment.get("missing"):
         ap(f"　欠落: {', '.join(sentiment['missing'])}")
     ap("　※カタリストの中身・需給は取得不可 — 発注前にiSPEED/TDnetで要確認")
