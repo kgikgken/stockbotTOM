@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .market import closing_note
+
 import pandas as pd
 
 
@@ -47,8 +49,9 @@ def build_text(today: str, meta: dict, sentiment: dict, res: dict,
     if sentiment.get("vi_proxy") is not None:
         note = f"VI代理={sentiment['vi_proxy']:.1f}"
         if sentiment.get("hivol_env"):
-            note += " — 高ボラ環境。" + ("前夜SOX反発あり→値がさ大型は高ボラタグ付きで対象"
-                                        if sentiment.get("sox_rebound") else "前夜SOX反発なし→値がさ大型は除外")
+            note += " — 高ボラ環境。" + (
+                "前夜SOX反発あり→値がさ大型は高ボラタグ付きで対象"
+                if sentiment.get("sox_rebound") else sentiment.get("semis_reason", "値がさ大型は除外"))
         ap("　" + note)
     n_pos = len([a for a in (position_alerts or [])])
     ap(f"　保有中 {n_pos}件 / ゾーン待ち {pending_summary.get('pending',0)}件")
@@ -83,6 +86,8 @@ def build_text(today: str, meta: dict, sentiment: dict, res: dict,
 
     ap(f"【本日の候補】母集団{st['eligible']} / 点灯 "
        f"材料反応{tc.get('材料反応',0)}・押し目{tc.get('押し目',0)}・高値ブレイク{tc.get('高値ブレイク',0)}")
+    if st.get("slot_note"):
+        ap(f"　▼{st['slot_note']}")
     if st.get("concentration"):
         ap(f"　⚠{st['concentration']}")
     if res["picked"]:
@@ -122,6 +127,11 @@ def build_text(today: str, meta: dict, sentiment: dict, res: dict,
             ap(f"・{e['date']} {e['label']}")
     else:
         ap("・登録なし(経済指標カレンダーは自動取得不可 — 手動確認)")
+    ap("")
+    cn = closing_note(sentiment)
+    ap(f"【最後に: 今日の地合い】{cn['score']}/5{'(暫定)' if cn['provisional'] else ''} — {cn['stance']}")
+    for ln in cn["lines"]:
+        ap("　" + ln)
     ap("")
     ap("【免責】AIによる候補提示で投資助言ではない。数値は単一ソースにつき要再確認。"
        "候補が出た日に必ず取引する必要はない。最終判断と結果責任はユーザーにある。")
