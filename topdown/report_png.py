@@ -547,3 +547,146 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
     img = img.crop((0, 0, W, min(est_h, y + MARGIN)))
     img.save(outpath)
     return outpath
+
+
+def render_summary_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
+                       position_alerts: list, pending_summary: dict, cfg) -> str:
+    """まとめ(2枚目) — 地合い・セクター・ランキング1〜5位だけを1枚に。
+
+    1枚目と同じ配色・同じ背景写真・同じヘッダーで、詳細を落として一覧性を優先する。
+    ランキングは指示どおりコードと銘柄名のみ(価格や根拠は1枚目を参照)。
+    """
+    f = F(cfg)
+    st = res["stats"]
+    sr = res["sector_rank"]
+    tc = st["trigger_count"]
+    notable = [a for a in (position_alerts or []) if a.get("hit") or a.get("hit") is None]
+    picked = res["picked"]
+
+    est_h = 1000 + len(picked) * 86
+    img = Image.new("RGB", (W, est_h), BG)
+    hero = _hero(cfg)
+    if hero is not None:
+        _paste_bg(img, hero, est_h)
+    d = ImageDraw.Draw(img)
+    m = _mascot(cfg)
+    HAS_PHOTO = hero is not None
+
+    def mascot_at(x, y, size):
+        if m is not None:
+            mm = m.resize((size, size), Image.LANCZOS)
+            img.paste(mm, (int(x), int(y)), mm)
+        else:
+            _bear(d, x + size / 2, y + size / 2, size / 2 * 0.86)
+
+    def fit(txt, maxw, size, bold=True, minsize=14):
+        while size > minsize and d.textbbox((0, 0), txt, font=f(size, bold))[2] > maxw:
+            size -= 1
+        return size
+
+    TOPW = int(CARD_W * 0.52) if HAS_PHOTO else CARD_W
+
+    # ---- ヘッダー(1枚目と同じ) ----
+    y = MARGIN + 14
+    d.rounded_rectangle([MARGIN + 62, y, MARGIN + TOPW, y + 76], 20, fill=HEADER)
+    t1, t2 = "AIトム", "のまとめ"
+    x_title, avail = MARGIN + 118, (MARGIN + TOPW) - (MARGIN + 118) - 46
+    s1, s2 = 30, 26
+    while s1 > 15:
+        tw = d.textbbox((0, 0), t1, font=f(s1, True))[2]
+        tw2 = d.textbbox((0, 0), t2, font=f(s2, True))[2]
+        if tw + 4 + tw2 <= avail:
+            break
+        s1 -= 1; s2 -= 1
+    d.text((x_title, y + 18 + (30 - s1) // 2), t1, font=f(s1, True), fill=(226, 186, 118))
+    d.text((x_title + tw + 4, y + 22 + (26 - s2) // 2), t2, font=f(s2, True), fill=CREAM)
+    _paw(d, x_title + tw + 4 + tw2 + 24, y + 40, 0.72, (196, 172, 132))
+    mascot_at(MARGIN - 4, y - 14, 92)
+    y += 76 + 12
+
+    d.rounded_rectangle([MARGIN, y, MARGIN + 176, y + 36], 12,
+                        fill=CARD_ALT, outline=BORDER, width=2)
+    d.text((MARGIN + 18, y + 6), today, font=f(20, True), fill=SUB)
+    y += 36 + 12
+
+    # ---- 地合い ----
+    sc = int(sentiment.get("score", 3))
+    prov = "(暫定)" if sentiment.get("provisional") else ""
+    col = GREEN if sc >= 4 else (GOLD if sc == 3 else RED)
+    bgc = (234, 244, 236) if sc >= 4 else ((251, 244, 226) if sc == 3 else (250, 233, 229))
+    sub = " / ".join(sentiment.get("reasons", [])[:4])
+    if sentiment.get("vi_proxy") is not None:
+        sub += f" / VI代理{sentiment['vi_proxy']:.0f}"
+    sub_l = _wrap(d, sub, f(17), TOPW - 110)[:2]
+    tail = closing_note(sentiment)["lines"][-1]
+    tail_l = _wrap(d, tail, f(17, True), TOPW - 110)[:2]
+    ban_h = 60 + len(sub_l) * 24 + len(tail_l) * 24 + 14
+    d.rounded_rectangle([MARGIN, y, MARGIN + TOPW, y + ban_h], 16,
+                        fill=bgc, outline=col, width=3)
+    mascot_at(MARGIN + 14, y + 20, 60)
+    hl = f"地合い {sc}/5{prov} — {sentiment.get('stance','')}"
+    d.text((MARGIN + 88, y + 14), hl, font=f(fit(hl, TOPW - 104, 26), True), fill=col)
+    yy = y + 50
+    for ln in sub_l:
+        d.text((MARGIN + 88, yy), ln, font=f(17), fill=SUB); yy += 24
+    for ln in tail_l:
+        d.text((MARGIN + 88, yy), ln, font=f(17, True), fill=col); yy += 24
+    y += ban_h + 12
+
+    # ---- セクター ----
+    sec = [("セクター(等ウェイト代理・直近5日)", 20, INK, True)]
+    if sr["top"]:
+        sec.append(("↑上位: " + " / ".join(f"{s}({r:+.1f}%)" for s, r in sr["top"]), 18, GREEN, True))
+    if sr["bottom"]:
+        sec.append(("↓回避: " + " / ".join(f"{s}({r:+.1f}%)" for s, r in sr["bottom"]), 18, RED, True))
+    sh = 20 + sum(len(_wrap(d, s_, f(sz, b_), TOPW - 40)) * int(sz * 1.5)
+                  for s_, sz, _, b_ in sec)
+    d.rounded_rectangle([MARGIN, y, MARGIN + TOPW, y + sh], 16, fill=CARD,
+                        outline=BORDER, width=2)
+    yy = y + 12
+    for s_, sz, c_, b_ in sec:
+        for ln in _wrap(d, s_, f(sz, b_), TOPW - 40):
+            d.text((MARGIN + 20, yy), ln, font=f(sz, b_), fill=c_); yy += int(sz * 1.5)
+    y += sh + 14
+
+    # ---- ランキング(コードと銘柄名だけ) ----
+    head = f"本日の候補 {len(picked)}件 — 点灯 材料反応{tc.get('材料反応',0)}"
+    head += f"・押し目{tc.get('押し目',0)}・高値ブレイク{tc.get('高値ブレイク',0)}"
+    rows_h = max(1, len(picked)) * 86
+    rk_h = 58 + rows_h + 16
+    d.rounded_rectangle([MARGIN, y, W - MARGIN, y + rk_h], 16, fill=CARD,
+                        outline=BORDER, width=2)
+    d.text((MARGIN + 22, y + 16), head, font=f(fit(head, CARD_W - 60, 21), True), fill=INK)
+    _paw(d, W - MARGIN - 36, y + 30, 0.72)
+    ry = y + 58
+    if not picked:
+        d.text((MARGIN + 26, ry + 16), "該当なし — ゼロ件はゼロ件。無理に格下げ採用しない。",
+               font=f(20, True), fill=SUB)
+    for i, c in enumerate(picked, 1):
+        d.rounded_rectangle([MARGIN + 16, ry, W - MARGIN - 16, ry + 74], 12,
+                            fill=CARD_ALT, outline=BORDER, width=2)
+        d.ellipse([MARGIN + 30, ry + 17, MARGIN + 70, ry + 57], fill=CARD,
+                  outline=BORDER, width=2)
+        d.text((MARGIN + (43 if i < 10 else 37), ry + 24), str(i), font=f(22, True), fill=SUB)
+        mascot_at(MARGIN + 82, ry + 17, 40)
+        name = f"{c.code}  {c.name}"
+        d.text((MARGIN + 138, ry + 20),
+               name, font=f(fit(name, CARD_W - 200, 30), True), fill=INK)
+        ry += 86
+    y += rk_h + 14
+
+    # ---- フッター ----
+    for s_ in ["詳細(INゾーン・STOP・1R幅・期待度の内訳)は1枚目を参照。",
+               "免責: AI候補提示で投資助言ではない。最終判断と結果責任はユーザーにある。"]:
+        for ln in _wrap(d, s_, f(16), CARD_W):
+            d.text((MARGIN + 4, y), ln, font=f(16), fill=SUB); y += 24
+    y += 8
+    sig = "スイングトレーダー AIトム"
+    sw = d.textbbox((0, 0), sig, font=f(19, True))[2]
+    _paw(d, W / 2 - sw / 2 - 22, y + 12, 0.62, (150, 124, 90))
+    d.text((W / 2 - sw / 2, y), sig, font=f(19, True), fill=(110, 88, 62))
+    y += 34
+
+    img = img.crop((0, 0, W, min(est_h, y + MARGIN)))
+    img.save(outpath)
+    return outpath
