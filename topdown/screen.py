@@ -228,9 +228,20 @@ def _expectation_score(trigger: str, feat: dict, tailwind: bool, headwind: bool,
     if feat.get("trend_align"):
         pts += 1; parts.append("トレンド整合+1")
 
+    # 反発の質は段階を付ける。従来は0.7以上で一律+1だったため、80%も98%も同点になり
+    # 押し目どうしの順位がほぼ付いていなかった(2026-07-24の出力で下位3件が同点)。
     cp = feat.get("close_pos")
-    if cp is not None and cp >= 0.7:
-        pts += 1; parts.append(f"高値引け({cp*100:.0f}%)+1")
+    if cp is not None:
+        if cp >= 0.9: pts += 2; parts.append(f"高値引け({cp*100:.0f}%)+2")
+        elif cp >= 0.7: pts += 1; parts.append(f"高値引け({cp*100:.0f}%)+1")
+
+    # 押しの浅さ。38.2%を採用したのと同じ実証(Alajbeg 2017/Bulkowski「浅い押し>深い押し」)。
+    # 深さはATR換算で既に内部計算されているものを使う。
+    if trigger == TRIG_PULL:
+        dp = feat.get("depth_atr")
+        if dp is not None:
+            if dp <= 1.0: pts += 2; parts.append(f"浅い押し({dp:.2f}ATR)+2")
+            elif dp <= 2.0: pts += 1; parts.append(f"押し{dp:.2f}ATR+1")
 
     if tailwind: pts += 1; parts.append("順風セクター+1")
     if headwind: pts -= 1; parts.append("逆風セクター-1")
