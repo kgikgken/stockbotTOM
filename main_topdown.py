@@ -19,7 +19,7 @@ from topdown.screen import run_screen
 from topdown.position_check import load_positions_topdown, check_held_positions, POSITIONS_PATH
 from topdown.report_text import build_text, load_week_events
 from topdown.report_png import render_png, render_summary_png
-from topdown import ledger, carryover
+from topdown import ledger, carryover, tracker
 from topdown.universe import load_universe
 from topdown.line_send import send_line
 
@@ -79,7 +79,13 @@ def main() -> dict:
     plan_path = ledger.write_plan_log(cfg.outdir, today, res["picked"])
     ledger.ensure_result_template(cfg.outdir)
     ledger.append_reject_ledger(cfg.outdir, today, res["rejects"])
-    print(f"[7/8] ログ出力 {plan_path}")
+    # 過去に提示した候補を、取得済みOHLCVで前向きに自動追跡(手入力なしで実現Rを貯める)
+    try:
+        trk = tracker.track(cfg.outdir, ohlcv, today, cfg)
+        print(f"[7/8] ログ出力 {plan_path} / 自動追跡: {trk['note']}")
+    except Exception:
+        print(f"[7/8] ログ出力 {plan_path} / 自動追跡でエラー(スキップ)")
+        traceback.print_exc()
 
     events = load_week_events(cfg, today)
     text = build_text(today, meta, sentiment, res, position_alerts,
