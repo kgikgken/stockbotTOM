@@ -49,11 +49,33 @@ def _num(v, nd=1):
 
 
 def write_plan_log(outdir: str, today: str, picked: list) -> str:
+    """候補5件を記録する。日別ファイルではなく1本の追記型ログにする(2026-07-25)。
+
+    以前は日付入りファイル名(topdown_plan_log_YYYY-MM-DD.csv)だったが、
+    ワークフローのコミット対象に入れ忘れて保存されておらず、しかも日別だと
+    1年で250ファイルに増える。1本に追記する形にして、確実に永続化・分析しやすくする。
+    同じ日付の行が既にあれば重複追記しない(再実行の冪等性)。
+    """
     Path(outdir).mkdir(parents=True, exist_ok=True)
-    path = Path(outdir) / f"topdown_plan_log_{today}.csv"
-    with path.open("w", newline="", encoding="utf-8-sig") as f:
+    path = Path(outdir) / "topdown_plan_log.csv"
+
+    existing_dates = set()
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8-sig") as f:
+                for row in csv.reader(f):
+                    if row:
+                        existing_dates.add(row[0])
+        except Exception:
+            pass
+    if today in existing_dates:
+        return str(path)   # 同日分は記録済み
+
+    new_file = not path.exists()
+    with path.open("a", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(PLAN_COLS)
+        if new_file:
+            w.writerow(PLAN_COLS)
         for c in picked:
             feat = c.feat or {}
             w.writerow([
