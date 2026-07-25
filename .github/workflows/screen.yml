@@ -46,13 +46,14 @@ jobs:
           REQUIRE_LINE_DELIVERY: "0"
         run: python main_topdown.py
 
-      - name: Persist ledgers (topdown reject ledger, result template, positions)
+      - name: Persist ledgers (reject ledger, result template, positions, pending zone candidates)
         if: always()
         run: |
           git config user.name "stockbot"
           git config user.email "stockbot@users.noreply.github.com"
-          git add out_topdown/topdown_reject_ledger.csv out_topdown/topdown_result_log_template.csv \
-                  positions_topdown.csv || true
+          git add out_topdown/topdown_plan_log.csv out_topdown/topdown_track_log.csv out_topdown/topdown_reject_ledger.csv \
+                  out_topdown/topdown_result_log_template.csv \
+                  positions_topdown.csv pending_topdown.csv || true
           git diff --cached --quiet || git commit -m "topdown ledger: $(date -u +%F)"
           git push || echo "push skipped"
 
