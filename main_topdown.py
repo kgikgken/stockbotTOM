@@ -111,9 +111,12 @@ def main() -> dict:
         print("[warn] まとめPNGの生成失敗(1枚目のみ配信)")
         traceback.print_exc()
 
-    result = send_line(text, image_paths=images,
-                       image_caption=f"新スクリーニング {today} 本命{st['picked']}件 "
-                                     f"地合い{sentiment['score']}/5")
+    # 配信は画像だけ(テキスト本文は送らない)。ただし画像が1枚も作れなかった時は、
+    # 無言で失敗して気づけなくなるのを防ぐため、その時に限りテキストを送る。
+    if images:
+        result = send_line("", image_paths=images)
+    else:
+        result = send_line(text)
     print(f"[8/8] LINE result: {result}")
 
     require = str(os.getenv("REQUIRE_LINE_DELIVERY", "0")).strip().lower() in {"1", "true", "yes", "on"}
