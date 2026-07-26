@@ -1,137 +1,57 @@
-HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: 1712.T"}}}
-$1712.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: 165A.T"}}}
-$165A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$176A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-4 Failed downloads:
-['1712.T', '165A.T', '176A.T', '1743.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1841.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1949.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$202A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1890.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1821.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-5 Failed downloads:
-['1841.T', '1949.T', '202A.T', '1890.T', '1821.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2196.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2150.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['2196.T', '2150.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1821.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1949.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1712.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1841.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$176A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$202A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2150.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2196.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1890.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$165A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-11 Failed downloads:
-['1821.T', '1949.T', '1712.T', '1841.T', '176A.T', '202A.T', '1743.T', '2150.T', '2196.T', '1890.T', '165A.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$165A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['165A.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1712.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['1712.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['1743.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$176A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['176A.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1821.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['1821.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1841.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['1841.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1890.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['1890.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1949.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['1949.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$202A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['202A.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2150.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['2150.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2196.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['2196.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-[1/3] ユニバース 300銘柄 / 期間 2021-01-01〜2025-12-31
-[2/3] OHLCV取得 287/300 (助走含め 2019-11-28 以降)
-      ⚠ 開始日時点で履歴260行未満の銘柄 47/287件 — その銘柄は開始直後の期間が判定されない
-[3/3] トレード 2428件
+[1/3] ユニバース 3786銘柄 / 期間 2021-01-01〜2025-12-31
+[2/3] OHLCV取得 3663/3786 (助走含め 2019-11-28 以降)
+      ⚠ 開始日時点で履歴260行未満の銘柄 549/3663件 — その銘柄は開始直後の期間が判定されない
+[3/3] トレード 29336件
       → out_topdown/backtest_result.csv
 
-総トレード 2428件 / 銘柄 153 / 期間 2021-01-04 〜 2025-12-26
+総トレード 29336件 / 銘柄 1880 / 期間 2021-01-04 〜 2025-12-26
 
 【Q2】ゾーン指値 vs 即時エントリー
-              件数    平均R    中央R     勝率  平均MFE
-method                                      
-immediate  759.0  0.206 -0.013  0.493  1.164
-zone       455.0  0.621  0.421  0.596  1.880
+               件数    平均R    中央R     勝率  平均MFE
+method                                       
+immediate  9176.0  0.132 -0.172  0.448  1.187
+zone       5492.0  0.548  0.083  0.520  1.901
 
 【Q3】+1R半分利確 あり vs なし
-            件数    平均R    中央R     勝率  平均MFE
-partial                                   
-off      455.0  0.621  0.421  0.596  1.880
-on       455.0  0.535  0.500  0.723  1.803
+             件数    平均R    中央R     勝率  平均MFE
+partial                                    
+off      5492.0  0.548  0.083  0.520  1.901
+on       5492.0  0.463  0.500  0.686  1.823
 
 【Q1】売買代金の帯ごと(材料反応のみ・ゾーン・利確なし)
-              件数    平均R    中央R     勝率  平均MFE
-adv_bucket                                  
-B: 1-2億     47.0  0.196  0.064  0.511  1.743
-C: 2-5億     51.0  0.570  0.269  0.588  2.062
-D: 5-20億    43.0  0.868  0.697  0.605  2.333
-E: 20億以上    27.0  1.480  1.511  0.704  3.037
+               件数    平均R    中央R     勝率  平均MFE
+adv_bucket                                   
+B: 1-2億     775.0  0.561 -0.009  0.498  2.144
+C: 2-5億     812.0  0.459 -0.189  0.463  2.031
+D: 5-20億    712.0  0.576 -0.005  0.494  2.109
+E: 20億以上    514.0  0.641  0.114  0.518  2.182
 
 【参考】トリガー別(ゾーン・利確なし)
-            件数    平均R    中央R     勝率  平均MFE
-trigger                                   
-押し目      252.0  0.577  0.420  0.583  1.742
-材料反応     168.0  0.688  0.360  0.589  2.199
-高値ブレイク    35.0  0.617  0.696  0.714  1.339
+             件数    平均R    中央R     勝率  平均MFE
+trigger                                    
+押し目      2250.0  0.562  0.158  0.537  1.755
+材料反応     2813.0  0.550 -0.035  0.491  2.110
+高値ブレイク    429.0  0.462  0.271  0.625  1.296
 
 【期待度スコア別】(ゾーン・利確なし) — スコアが高いほどRも高いか
-          件数    平均R    中央R     勝率  平均MFE
-score                                   
-1        3.0  2.036  2.041  1.000  2.137
-2        7.0  0.697  0.645  0.571  1.273
-3       13.0  0.538  0.823  0.769  1.568
-4        9.0  0.392  0.100  0.667  0.919
-5       68.0  0.474  0.392  0.544  1.823
-6      121.0  0.388  0.116  0.504  1.678
-7      122.0  0.665  0.439  0.615  1.911
-8       70.0  0.876  0.462  0.657  2.164
-9       33.0  0.848  0.263  0.606  2.335
-10       9.0  1.280  1.177  1.000  2.505
-  スピアマン順位相関 score vs r = +0.065
+           件数    平均R    中央R     勝率  平均MFE
+score                                    
+1        28.0  0.632  0.562  0.786  1.285
+2       109.0  0.398  0.201  0.606  1.231
+3       148.0  0.547  0.338  0.615  1.395
+4       121.0  0.423  0.260  0.636  1.254
+5       767.0  0.408 -0.053  0.484  1.704
+6      1454.0  0.522  0.003  0.500  1.865
+7      1349.0  0.657  0.208  0.548  2.014
+8       950.0  0.559  0.020  0.502  2.067
+9       466.0  0.581  0.006  0.500  2.161
+10      100.0  0.567  0.124  0.540  2.032
+  スピアマン順位相関 score vs r = +0.009
 
 【参考】手仕舞い理由の内訳(ゾーン・利確なし)
 exit_reason
-time    250
-stop    205
+stop    2925
+time    2567
 
 ※カタリスト未確認・生存バイアスあり・手数料/スリッページ未考慮。
   絶対値ではなく『AとBのどちらが良いか』の比較にのみ使うこと。
