@@ -52,7 +52,14 @@ class Config:
     # 20,000円 = 1単元200万円。多くの銘柄が1単元のみとなり、その場合は半分利確を使わず
     # トレーリング+時間ストップ一本で運用する(screen/position_check側で自動判定)。
     max_price: float = field(default_factory=lambda: _f("MAX_PRICE", 20000.0))
-    min_adv_jpy: float = field(default_factory=lambda: _f("MIN_ADV_JPY", 5.0e8))
+    # ★流動性フィルター(2026-07-26に5億→2億へ引下げ)
+    # 引下げの根拠: 2021-2025・全銘柄・29,336トレードのバックテストで、売買代金の帯ごとの
+    # 実現Rに有意差が無かった(1-2億 +0.574R / 2-5億 +0.458R / 5-20億 +0.583R / 20億超 +0.648R。
+    # 20億超と1-2億の差は+0.074R、t=0.89で有意でない)。当初300銘柄で「大型ほど良い」と出たのは
+    # コード順に絞った結果の業種偏りによる artifact だった。
+    # 期待Rが変わらないなら、下げた分だけ候補が増える。ただしバックテストはスリッページと
+    # 約定率を再現していないため、1億ではなく2億に留める(板の薄さは実運用でしか分からない)。
+    min_adv_jpy: float = field(default_factory=lambda: _f("MIN_ADV_JPY", 2.0e8))
     history_days: int = field(default_factory=lambda: _i("HISTORY_DAYS", 420))
     data_coverage_min: float = field(default_factory=lambda: _f("DATA_COVERAGE_MIN", 0.70))
 
