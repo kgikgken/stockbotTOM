@@ -10,7 +10,7 @@ on:
       start:
         description: '検証開始日 (YYYY-MM-DD)'
         required: true
-        default: '2023-01-01'
+        default: '2021-01-01'
       end:
         description: '検証終了日 (YYYY-MM-DD)'
         required: true
@@ -20,7 +20,7 @@ on:
         required: true
         default: '100000000'
       limit:
-        description: '銘柄数の上限(0=全件)。まず300で試すのを推奨'
+        description: '銘柄数の上限(0=全件)。初回は300で動作確認してから0にする'
         required: true
         default: '300'
       step:
