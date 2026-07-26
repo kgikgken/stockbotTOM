@@ -59,7 +59,7 @@ jobs:
             --limit "${{ github.event.inputs.limit }}" \
             --step "${{ github.event.inputs.step }}" \
             --out out_topdown/backtest_result.csv \
-            2>&1 | tee out_topdown/backtest_report.txt
+            2>/dev/null | tee out_topdown/backtest_report.txt
 
       - name: Persist result
         if: always()
