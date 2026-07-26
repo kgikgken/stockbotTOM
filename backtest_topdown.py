@@ -285,9 +285,22 @@ def main():
     tickers = uni["ticker"].tolist()
     print(f"[1/3] ユニバース {len(tickers)}銘柄 / 期間 {args.start}〜{args.end}")
 
-    days = (pd.Timestamp(args.end) - pd.Timestamp(args.start)).days + 400
+    # 取得範囲は「今日から遡る日数」で指定する仕様なので、開始日を判定するのに必要な
+    # 助走期間(200日移動平均のため約260営業日≒380暦日)を start より前に確保する。
+    # これを忘れると開始年の前半が「履歴不足」で静かにスキップされる(2026-07-25に発見)。
+    warmup_days = 400
+    lead = pd.Timestamp(args.start) - pd.Timedelta(days=warmup_days)
+    days = (pd.Timestamp.today().normalize() - lead).days
     ohlcv, meta = fetch_ohlcv(tickers, days, dryrun=cfg.dryrun)
-    print(f"[2/3] OHLCV取得 {meta.get('data_ok','?')}/{meta.get('data_total','?')}")
+    print(f"[2/3] OHLCV取得 {meta.get('data_ok','?')}/{meta.get('data_total','?')} "
+          f"(助走含め {lead.date()} 以降)")
+
+    # 助走が実際に足りているかを点検し、足りない銘柄が多ければ警告する
+    short = sum(1 for df in ohlcv.values()
+                if len(df.loc[:args.start]) < 260)
+    if short:
+        print(f"      ⚠ 開始日時点で履歴260行未満の銘柄 {short}/{len(ohlcv)}件"
+              f" — その銘柄は開始直後の期間が判定されない")
 
     trades = run(ohlcv, cfg, args.start, args.end, args.min_adv, args.step)
     print(f"[3/3] トレード {len(trades)}件")
