@@ -1,289 +1,39 @@
 HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: 1712.T"}}}
 $1712.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: 176A.T"}}}
+HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: 165A.T"}}}
+$165A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $176A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $1743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$165A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 
 4 Failed downloads:
-['1712.T', '176A.T', '1743.T', '165A.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$202A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1949.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1890.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+['1712.T', '165A.T', '176A.T', '1743.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $1841.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$1949.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$202A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$1890.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $1821.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 
 5 Failed downloads:
-['202A.T', '1949.T', '1890.T', '1841.T', '1821.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2150.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+['1841.T', '1949.T', '202A.T', '1890.T', '1821.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $2196.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$2150.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 
 2 Failed downloads:
-['2150.T', '2196.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2374.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2344.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2389.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-3 Failed downloads:
-['2374.T', '2344.T', '2389.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2692.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['2743.T', '2692.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3073.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3141.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3094.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-3 Failed downloads:
-['3073.T', '3141.T', '3094.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3341.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3341.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3593.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3540.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3541.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3526.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-4 Failed downloads:
-['3593.T', '3540.T', '3541.T', '3526.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3688.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3655.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['3688.T', '3655.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3961.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3847.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3924.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3902.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-4 Failed downloads:
-['3961.T', '3847.T', '3924.T', '3902.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4080.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4080.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4319.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4333.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['4319.T', '4333.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4530.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4530.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4690.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4745.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['4690.T', '4745.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4917.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4957.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5070.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5017.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-4 Failed downloads:
-['4917.T', '4957.T', '5070.T', '5017.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5476.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5352.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5386.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5259.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5191.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-5 Failed downloads:
-['5476.T', '5352.T', '5386.T', '5259.T', '5191.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5596.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5577.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5595.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-3 Failed downloads:
-['5596.T', '5577.T', '5595.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6028.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6060.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['6028.T', '6060.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6210.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6210.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6373.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6312.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6297.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6293.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6406.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-5 Failed downloads:
-['6373.T', '6312.T', '6297.T', '6293.T', '6406.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6565.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6542.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6416.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-3 Failed downloads:
-['6565.T', '6542.T', '6416.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6734.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6734.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6930.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6957.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6937.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6901.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-4 Failed downloads:
-['6930.T', '6957.T', '6937.T', '6901.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7116.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7092.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7088.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7105.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-4 Failed downloads:
-['7116.T', '7092.T', '7088.T', '7105.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7205.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7250.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['7205.T', '7250.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7455.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7450.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7420.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7467.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7445.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-5 Failed downloads:
-['7455.T', '7450.T', '7420.T', '7467.T', '7445.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7635.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7718.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-2 Failed downloads:
-['7635.T', '7718.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7739.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7732.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7817.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-3 Failed downloads:
-['7739.T', '7732.T', '7817.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7923.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7923.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8209.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['8209.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8515.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['8515.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8940.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['8940.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9386.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['9386.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9719.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9776.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9600.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-3 Failed downloads:
-['9719.T', '9776.T', '9600.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4690.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$176A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3341.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+['2196.T', '2150.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$1821.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$1949.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $1712.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4917.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$202A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4319.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5259.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5017.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5476.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3141.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3655.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4957.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3541.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3593.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3073.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4530.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3526.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4333.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6028.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5596.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3961.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1821.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2692.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3540.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1949.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4745.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2344.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5191.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3924.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5070.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2374.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1890.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3902.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2150.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5577.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4080.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2196.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$1743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3094.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5595.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5386.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6060.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5352.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3688.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $1841.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3847.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2389.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$176A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$202A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$1743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$2150.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$2196.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+$1890.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $165A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 
-50 Failed downloads:
-['4690.T', '176A.T', '3341.T', '1712.T', '4917.T', '202A.T', '4319.T', '5259.T', '5017.T', '5476.T', '3141.T', '3655.T', '4957.T', '3541.T', '3593.T', '3073.T', '4530.T', '3526.T', '4333.T', '6028.T', '5596.T', '3961.T', '1821.T', '2692.T', '3540.T', '1949.T', '4745.T', '2344.T', '5191.T', '3924.T', '5070.T', '2374.T', '1890.T', '3902.T', '2150.T', '5577.T', '4080.T', '2196.T', '1743.T', '3094.T', '2743.T', '5595.T', '5386.T', '6060.T', '5352.T', '3688.T', '1841.T', '3847.T', '2389.T', '165A.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6406.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7455.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6210.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6734.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9600.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9719.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6373.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7092.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7250.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6565.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7732.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7718.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7116.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7088.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7635.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6293.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7105.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7450.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7817.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9776.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7445.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6930.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6297.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7923.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6957.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6416.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7739.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8515.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8209.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7205.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7467.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6901.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6312.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6937.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7420.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6542.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8940.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9386.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-38 Failed downloads:
-['6406.T', '7455.T', '6210.T', '6734.T', '9600.T', '9719.T', '6373.T', '7092.T', '7250.T', '6565.T', '7732.T', '7718.T', '7116.T', '7088.T', '7635.T', '6293.T', '7105.T', '7450.T', '7817.T', '9776.T', '7445.T', '6930.T', '6297.T', '7923.T', '6957.T', '6416.T', '7739.T', '8515.T', '8209.T', '7205.T', '7467.T', '6901.T', '6312.T', '6937.T', '7420.T', '6542.T', '8940.T', '9386.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
+11 Failed downloads:
+['1821.T', '1949.T', '1712.T', '1841.T', '176A.T', '202A.T', '1743.T', '2150.T', '2196.T', '1890.T', '165A.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 $165A.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
 
 1 Failed download:
@@ -328,353 +78,60 @@ $2196.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "
 
 1 Failed download:
 ['2196.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2344.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['2344.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2374.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['2374.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2389.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['2389.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2692.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['2692.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$2743.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['2743.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3073.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3073.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3094.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3094.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3141.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3141.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3341.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3341.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3526.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3526.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3540.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3540.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3541.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3541.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3593.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3593.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3655.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3655.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3688.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3688.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3847.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3847.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3902.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3902.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3924.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3924.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$3961.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['3961.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4080.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4080.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4319.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4319.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4333.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4333.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4530.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4530.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4690.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4690.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4745.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4745.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4917.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4917.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$4957.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['4957.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5017.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5017.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5070.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5070.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5191.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5191.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5259.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5259.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5352.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5352.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5386.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5386.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5476.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5476.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5577.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5577.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5595.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5595.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$5596.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['5596.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6028.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6028.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6060.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6060.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6210.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6210.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6293.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6293.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6297.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6297.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6312.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6312.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6373.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6373.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6406.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6406.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6416.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6416.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6542.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6542.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6565.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6565.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6734.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6734.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6901.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6901.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6930.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6930.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6937.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6937.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$6957.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['6957.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7088.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7088.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7092.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7092.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7105.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7105.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7116.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7116.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7205.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7205.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7250.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7250.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7420.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7420.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7445.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7445.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7450.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7450.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7455.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7455.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7467.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7467.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7635.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7635.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7718.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7718.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7732.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7732.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7739.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7739.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7817.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7817.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$7923.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['7923.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8209.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['8209.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8515.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['8515.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$8940.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['8940.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9386.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['9386.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9600.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['9600.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9719.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['9719.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-$9776.T: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-
-1 Failed download:
-['9776.T']: possibly delisted; no price data found  (period=2432d) (Yahoo error = "No data found, symbol may be delisted")
-[1/3] ユニバース 3786銘柄 / 期間 2021-01-01〜2025-12-31
-[2/3] OHLCV取得 3663/3786 (助走含め 2019-11-28 以降)
-      ⚠ 開始日時点で履歴260行未満の銘柄 549/3663件 — その銘柄は開始直後の期間が判定されない
-[3/3] トレード 31196件
+[1/3] ユニバース 300銘柄 / 期間 2021-01-01〜2025-12-31
+[2/3] OHLCV取得 287/300 (助走含め 2019-11-28 以降)
+      ⚠ 開始日時点で履歴260行未満の銘柄 47/287件 — その銘柄は開始直後の期間が判定されない
+[3/3] トレード 2428件
       → out_topdown/backtest_result.csv
 
-総トレード 31196件 / 銘柄 1989 / 期間 2021-01-04 〜 2025-12-26
+総トレード 2428件 / 銘柄 153 / 期間 2021-01-04 〜 2025-12-26
 
 【Q2】ゾーン指値 vs 即時エントリー
-               件数    平均R    中央R     勝率  平均MFE
-method                                       
-immediate  9768.0  0.133 -0.169  0.449  1.184
-zone       5830.0  0.552  0.093  0.522  1.899
+              件数    平均R    中央R     勝率  平均MFE
+method                                      
+immediate  759.0  0.206 -0.013  0.493  1.164
+zone       455.0  0.621  0.421  0.596  1.880
 
 【Q3】+1R半分利確 あり vs なし
-             件数    平均R    中央R     勝率  平均MFE
-partial                                    
-off      5830.0  0.552  0.093  0.522  1.899
-on       5830.0  0.467  0.500  0.688  1.821
+            件数    平均R    中央R     勝率  平均MFE
+partial                                   
+off      455.0  0.621  0.421  0.596  1.880
+on       455.0  0.535  0.500  0.723  1.803
 
 【Q1】売買代金の帯ごと(材料反応のみ・ゾーン・利確なし)
-               件数    平均R    中央R     勝率  平均MFE
-adv_bucket                                   
-B: 1-2億     802.0  0.574  0.016  0.505  2.153
-C: 2-5億     844.0  0.458 -0.183  0.466  2.029
-D: 5-20億    745.0  0.583  0.005  0.501  2.107
-E: 20億以上    544.0  0.648  0.109  0.517  2.173
+              件数    平均R    中央R     勝率  平均MFE
+adv_bucket                                  
+B: 1-2億     47.0  0.196  0.064  0.511  1.743
+C: 2-5億     51.0  0.570  0.269  0.588  2.062
+D: 5-20億    43.0  0.868  0.697  0.605  2.333
+E: 20億以上    27.0  1.480  1.511  0.704  3.037
 
 【参考】トリガー別(ゾーン・利確なし)
-             件数    平均R    中央R     勝率  平均MFE
-trigger                                    
-押し目      2429.0  0.562  0.156  0.535  1.762
-材料反応     2935.0  0.557 -0.020  0.495  2.109
-高値ブレイク    466.0  0.470  0.292  0.627  1.290
+            件数    平均R    中央R     勝率  平均MFE
+trigger                                   
+押し目      252.0  0.577  0.420  0.583  1.742
+材料反応     168.0  0.688  0.360  0.589  2.199
+高値ブレイク    35.0  0.617  0.696  0.714  1.339
+
+【期待度スコア別】(ゾーン・利確なし) — スコアが高いほどRも高いか
+          件数    平均R    中央R     勝率  平均MFE
+score                                   
+1        3.0  2.036  2.041  1.000  2.137
+2        7.0  0.697  0.645  0.571  1.273
+3       13.0  0.538  0.823  0.769  1.568
+4        9.0  0.392  0.100  0.667  0.919
+5       68.0  0.474  0.392  0.544  1.823
+6      121.0  0.388  0.116  0.504  1.678
+7      122.0  0.665  0.439  0.615  1.911
+8       70.0  0.876  0.462  0.657  2.164
+9       33.0  0.848  0.263  0.606  2.335
+10       9.0  1.280  1.177  1.000  2.505
+  スピアマン順位相関 score vs r = +0.065
 
 【参考】手仕舞い理由の内訳(ゾーン・利確なし)
 exit_reason
-stop    3088
-time    2742
+time    250
+stop    205
 
 ※カタリスト未確認・生存バイアスあり・手数料/スリッページ未考慮。
   絶対値ではなく『AとBのどちらが良いか』の比較にのみ使うこと。
