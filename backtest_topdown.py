@@ -39,7 +39,8 @@ import pandas as pd
 
 from topdown.config import load_config
 from topdown.indicators import compute_topdown_features
-from topdown.screen import build_zone, TRIG_GAP, TRIG_PULL, TRIG_BREAK
+from topdown.screen import (build_zone, _expectation_score,
+                            TRIG_GAP, TRIG_PULL, TRIG_BREAK)
 from topdown.ta import sma
 
 
@@ -51,6 +52,7 @@ class Trade:
     method: str          # zone / immediate
     partial: str         # on / off
     adv_bucket: str      # 売買代金の帯
+    score: float         # 期待度スコア(0-10)。実現Rとの相関を後で検証するため
     entry: float
     stop: float
     exit_price: float
@@ -185,6 +187,9 @@ def run(ohlcv: Dict[str, pd.DataFrame], cfg, start: str, end: str,
             atr = feat["atr"]
             code = ticker.replace(".T", "")
             bucket = _bucket(feat["adv20_jpy"])
+            # 期待度スコア。バックテストではセクター情報を再現できないため
+            # 順風/逆風/高ボラは False 固定(その分だけ本番よりスコアは低めに出る)
+            score, _ = _expectation_score(trigger, feat, False, False, False)
             after = df.loc[df.index > t]
             if len(after) < 5:
                 continue
@@ -206,7 +211,7 @@ def run(ohlcv: Dict[str, pd.DataFrame], cfg, start: str, end: str,
                 if fill_i is not None:
                     s = simulate(after.iloc[fill_i + 1:], entry_z, stop, trigger, cfg, atr, partial_on)
                     if s:
-                        trades.append(Trade(str(t.date()), code, trigger, "zone", ptag, bucket,
+                        trades.append(Trade(str(t.date()), code, trigger, "zone", ptag, bucket, score,
                                             entry_z, stop, s["exit"], s["reason"],
                                             s["bars"], s["r"], s["mfe"], s["mae"]))
 
@@ -215,7 +220,7 @@ def run(ohlcv: Dict[str, pd.DataFrame], cfg, start: str, end: str,
                 if entry_i > stop:
                     s = simulate(after, entry_i, stop, trigger, cfg, atr, partial_on)
                     if s:
-                        trades.append(Trade(str(t.date()), code, trigger, "immediate", ptag, bucket,
+                        trades.append(Trade(str(t.date()), code, trigger, "immediate", ptag, bucket, score,
                                             entry_i, stop, s["exit"], s["reason"],
                                             s["bars"], s["r"], s["mfe"], s["mae"]))
     return trades
@@ -256,6 +261,16 @@ def report(trades: List[Trade]) -> str:
     ap("【参考】トリガー別(ゾーン・利確なし)")
     ap(df[(df["method"] == "zone") & (df["partial"] == "off")]
        .groupby("trigger").apply(agg).to_string())
+    ap("")
+    ap("【期待度スコア別】(ゾーン・利確なし) — スコアが高いほどRも高いか")
+    sc = df[(df["method"] == "zone") & (df["partial"] == "off")]
+    if len(sc):
+        ap(sc.groupby("score").apply(agg).to_string())
+        try:
+            rho = sc[["score", "r"]].corr(method="spearman").iloc[0, 1]
+            ap(f"  スピアマン順位相関 score vs r = {rho:+.3f}")
+        except Exception:
+            pass
     ap("")
     ap("【参考】手仕舞い理由の内訳(ゾーン・利確なし)")
     ap(df[(df["method"] == "zone") & (df["partial"] == "off")]["exit_reason"]
