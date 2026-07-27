@@ -45,7 +45,10 @@ def main() -> dict:
           f"semis={sentiment['semis_mode']}")
 
     tickers = uni["ticker"].tolist()
-    ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun)
+    # ★Actionsのタイムアウト110分のうち90分(5400秒)を取得に割り当てる。
+    # 残り20分でスクリーニング判定・PNG生成・LINE送信・git commitまで行う想定。
+    ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, dryrun=cfg.dryrun,
+                              deadline_sec=5400)
     cov = meta.get("data_coverage", 0)
     print(f"[3/8] OHLCV {meta.get('data_ok','?')}/{meta.get('data_total','?')} ({cov*100:.0f}%)")
     meta = dict(meta)
