@@ -12,17 +12,20 @@ import pandas as pd
 import time  # 実フェッチのバックオフ用(自立版)
 
 
-def fetch_ohlcv(tickers: List[str], history_days: int, dryrun: bool = False) -> Tuple[Dict[str, pd.DataFrame], dict]:
+def fetch_ohlcv(tickers: List[str], history_days: int, dryrun: bool = False,
+                deadline_sec: float = 6000) -> Tuple[Dict[str, pd.DataFrame], dict]:
+    """deadline_sec: 取得に使ってよい上限秒数(既定100分)。呼び出し側の実行時間予算に合わせて渡す。"""
     if dryrun:
         return _synthetic(tickers)
-    out, meta = _fetch_ohlcv_real(tickers, history_days)
+    out, meta = _fetch_ohlcv_real(tickers, history_days, deadline_sec=deadline_sec)
     meta["fetch_failures"] = [t for t in tickers if t not in out]  # 取得失敗の記録(旧momentum仕様を継承)
     return out, meta
 
 
 # ---- 実フェッチ(自立版: 旧mispricing/data.pyから逐語移植・2巡目リトライ込み) ----
 def _fetch_ohlcv_real(tickers: List[str], history_days: int,
-                      cap_singles: int = 400) -> Tuple[Dict[str, pd.DataFrame], dict]:
+                      cap_singles: int = 400,
+                      deadline_sec: float = 6000) -> Tuple[Dict[str, pd.DataFrame], dict]:
     import yfinance as yf
 
     period = f"{max(history_days, 400)}d"
@@ -48,10 +51,27 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int,
     short: set = set()
 
     def _extract(raw, chunk: List[str], out: Dict[str, pd.DataFrame]):
+        """当日の日足は市場が開いている間ずっと動き続ける未確定値のため、
+        必ず切り捨てて前営業日までを使う(_clean内で実施)。切らないと
+        『同じ日に数分後リトライしただけでギャップ率・ATR・出来高比・
+        トレンド判定が全部変わる』事故になる(2026-07-27、手動実行時に発覚)。
+        自動実行(cron 7:30 JST)は前場開始前なので通常は影響しないが、
+        手動実行(workflow_dispatch)は市場が開いている時間にも走らせられるため必須。
+        """
         if raw is None or len(raw) == 0:
             return
+        today_jst = pd.Timestamp.now(tz="Asia/Tokyo").normalize().tz_localize(None)
+
+        def _clean(df):
+            df = df.dropna(how="all")
+            if len(df) == 0:
+                return df
+            idx = df.index.tz_localize(None) if getattr(df.index, "tz", None) is not None else df.index
+            # 当日分(未確定の可能性がある最終行)は落とす。前営業日までを使う。
+            return df[idx.normalize() < today_jst]
+
         if len(chunk) == 1:
-            df = raw.dropna(how="all")
+            df = _clean(raw)
             if len(df) >= 60:
                 out[chunk[0]] = df
             elif len(df):
@@ -59,7 +79,7 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int,
             return
         for t in chunk:
             try:
-                df = raw[t].dropna(how="all")
+                df = _clean(raw[t])
             except Exception:
                 continue
             if len(df) >= 60:
@@ -68,36 +88,76 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int,
             elif len(df):
                 short.add(t)
 
+    # ★2026-07-27: 「取れた銘柄だけで判定する」から「粘って全銘柄を取り切る」へ方針転換。
+    # 取得成否が実行のたびに変わり、同じ銘柄が"見えたり見えなかったり"して出力が
+    # 安定しない問題があった(78%〜97%でばらつき)。時間をかけてよいとの判断のもと、
+    # 失敗が尽きるまでチャンクを縮小し続けるループに変更する。
+    #   1巡目: 100件チャンク
+    #   2巡目: 50件チャンク(1巡目の失敗のみ)
+    #   3巡目: 10件チャンク(2巡目の失敗のみ)
+    #   4巡目以降: 1件ずつ、成功が止まるまで繰り返す(最大 max_rounds 回)
+    # yfinance側の恒久的な欠落(上場廃止・コード変更等)は何度やっても回収できないため、
+    # "直前の巡で1件も増えなかったら打ち切る"ことで無限ループを避ける。
+    # ★締切(既定100分)を過ぎたら粘るのをやめる。9:00の寄り付きに配信を間に合わせるため。
+    # 時間切れの場合は「そこまでに取れた分」で判定を進める(取れた分は全部使う。
+    # 全か無かではなく、常に最善の被覆率で動かす)。
+    t_start = time.time()
+
+    def _time_left() -> bool:
+        return (time.time() - t_start) < deadline_sec
+
     out: Dict[str, pd.DataFrame] = {}
-    # チャンクを200→100に縮小。1銘柄の不調がチャンク全体を巻き込む範囲を半分にする。
-    chunks = [tickers[i:i + 100] for i in range(0, len(tickers), 100)]
-    for chunk in chunks:
-        raw = _download_chunk(chunk, attempts=3, base_backoff=3)
-        _extract(raw, chunk, out)
-        time.sleep(1.0)
-    pass1 = len(out)
+    pass_log: List[tuple] = []
 
-    # 2巡目: 未取得のうち「履歴不足と分かっているもの」は除いて小チャンクで再取得
-    missing2 = [t for t in tickers if t not in out and t not in short]
-    if missing2:
-        for i in range(0, len(missing2), 50):
-            raw = _download_chunk(missing2[i:i + 50], attempts=2, base_backoff=4)
-            _extract(raw, missing2[i:i + 50], out)
-            time.sleep(1.5)
-    pass2 = len(out)
+    def _round(remaining: List[str], chunk_size: int, attempts: int, backoff: float, pause: float):
+        before = len(out)
+        for i in range(0, len(remaining), chunk_size):
+            chunk = remaining[i:i + chunk_size]
+            raw = _download_chunk(chunk, attempts=attempts, base_backoff=backoff)
+            _extract(raw, chunk, out)
+            time.sleep(pause)
+        return len(out) - before
 
-    # 3巡目: なお残るものを1銘柄ずつ取る。単独取得はまとめ取りと経路が違うため回収できる
-    # ことがある。実行時間が伸びすぎないよう上限を設ける。
-    missing3 = [t for t in tickers if t not in out and t not in short][:cap_singles]
-    for t in missing3:
-        raw = _download_chunk([t], attempts=2, base_backoff=2)
-        _extract(raw, [t], out)
-        time.sleep(0.3)
-    pass3 = len(out)
+    remaining = list(tickers)
+    gained = _round(remaining, 100, attempts=3, backoff=3, pause=1.0)
+    pass_log.append(("1巡目(100件)", gained, len(out)))
+
+    for label, chunk_size, attempts, backoff, pause in (
+        ("2巡目(50件)", 50, 2, 4, 1.5),
+        ("3巡目(10件)", 10, 2, 3, 1.0),
+    ):
+        if not _time_left():
+            pass_log.append((f"{label}: 締切のため未実施", 0, len(out)))
+            break
+        remaining = [t for t in tickers if t not in out and t not in short]
+        if not remaining:
+            break
+        gained = _round(remaining, chunk_size, attempts, backoff, pause)
+        pass_log.append((label, gained, len(out)))
+
+    # 4巡目以降: 1件ずつ。増分が0になったら(=もう回収できるものが無い)打ち切る。
+    max_rounds = 6
+    for r in range(max_rounds):
+        if not _time_left():
+            pass_log.append((f"単独{r + 1}巡目以降: 締切のため打ち切り", 0, len(out)))
+            break
+        remaining = [t for t in tickers if t not in out and t not in short]
+        if not remaining:
+            break
+        gained = 0
+        for t in remaining:
+            raw = _download_chunk([t], attempts=2, base_backoff=2)
+            before = len(out)
+            _extract(raw, [t], out)
+            gained += len(out) - before
+            time.sleep(0.3)
+        pass_log.append((f"単独{r + 1}巡目", gained, len(out)))
+        if gained == 0:
+            break   # これ以上粘っても回収できない(恒久的な欠落)
 
     meta = _coverage(tickers, out, source="yfinance(Yahoo Finance) 単一ソース")
     meta.update({
-        "pass1": pass1, "recovered_2nd": pass2 - pass1, "recovered_3rd": pass3 - pass2,
+        "pass_log": pass_log,
         "short_history": len(short),
         "failed": len([t for t in tickers if t not in out and t not in short]),
     })
@@ -255,8 +315,16 @@ def coverage_note(meta: dict) -> str:
     if meta.get("short_history"):
         bits.append(f"履歴60日未満 {meta['short_history']}件(回収不能)")
     if meta.get("failed"):
-        bits.append(f"取得失敗 {meta['failed']}件")
-    rec = (meta.get("recovered_2nd", 0) or 0) + (meta.get("recovered_3rd", 0) or 0)
+        bits.append(f"取得失敗 {meta['failed']}件(粘っても回収できなかった=恒久欠落の可能性)")
+    rec = sum(g for _, g, _ in (meta.get("pass_log") or [])[1:])   # 1巡目以降の増分合計
     if rec:
         bits.append(f"再取得で回収 {rec}件")
     return " / ".join(bits)
+
+
+def coverage_detail(meta: dict) -> str:
+    """各巡でどれだけ回収できたかの内訳(ログ確認用・レポートには出さない)。"""
+    lines = []
+    for label, gained, total in (meta.get("pass_log") or []):
+        lines.append(f"  {label}: +{gained}件 (累計{total}件)")
+    return "\n".join(lines)
