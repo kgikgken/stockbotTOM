@@ -5,7 +5,9 @@ name: topdown-screen
 
 on:
   schedule:
-    - cron: "30 22 * * 0-4"   # 7:30 JST 月〜金
+    # ★2026-07-27: 7:00 JSTに変更(旧7:30)。全銘柄取得の粘りループを追加したため
+    # 実行時間が延びる。寄り付き(9:00)まで2時間の余裕を確保する。
+    - cron: "0 22 * * 0-4"    # 7:00 JST 月〜金
   workflow_dispatch:
     inputs:
       dryrun:
@@ -22,7 +24,9 @@ concurrency:
 jobs:
   screen:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45分→110分に延長。全銘柄を粘って取り切るための時間を確保する
+    # (7:00開始+110分=8:50。9:00の寄り付きに間に合う)
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v4
 
