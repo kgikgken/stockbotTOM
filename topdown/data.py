@@ -52,22 +52,30 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int,
 
     def _extract(raw, chunk: List[str], out: Dict[str, pd.DataFrame]):
         """当日の日足は市場が開いている間ずっと動き続ける未確定値のため、
-        必ず切り捨てて前営業日までを使う(_clean内で実施)。切らないと
-        『同じ日に数分後リトライしただけでギャップ率・ATR・出来高比・
+        取引時間中(ザラ場)は必ず切り捨てて前営業日までを使う(_clean内で実施)。
+        切らないと『同じ日に数分後リトライしただけでギャップ率・ATR・出来高比・
         トレンド判定が全部変わる』事故になる(2026-07-27、手動実行時に発覚)。
-        自動実行(cron 7:30 JST)は前場開始前なので通常は影響しないが、
-        手動実行(workflow_dispatch)は市場が開いている時間にも走らせられるため必須。
+
+        ★2026-07-27 追加修正: 「今日の日付なら無条件で除外」だと、引け後(15:30 JST以降)に
+        実行しても今日の確定足が永遠に見えず、引け後実行が朝の実行と同じ結果になる事故が
+        起きた(同日に場前・場後で回して同一銘柄が出た)。引けの時刻で判定を分ける。
+          - 現在時刻が今日15:30より前 → 今日の足は未確定 → 除外(従来通り)
+          - 現在時刻が今日15:30以降   → 今日の足は確定済み → 含める
         """
         if raw is None or len(raw) == 0:
             return
-        today_jst = pd.Timestamp.now(tz="Asia/Tokyo").normalize().tz_localize(None)
+        now_jst = pd.Timestamp.now(tz="Asia/Tokyo")
+        today_jst = now_jst.normalize().tz_localize(None)
+        market_close = now_jst.normalize() + pd.Timedelta(hours=15, minutes=30)
+        include_today = now_jst >= market_close   # 引け後なら今日の足も確定済みとして使う
 
         def _clean(df):
             df = df.dropna(how="all")
             if len(df) == 0:
                 return df
             idx = df.index.tz_localize(None) if getattr(df.index, "tz", None) is not None else df.index
-            # 当日分(未確定の可能性がある最終行)は落とす。前営業日までを使う。
+            if include_today:
+                return df[idx.normalize() <= today_jst]
             return df[idx.normalize() < today_jst]
 
         if len(chunk) == 1:
@@ -156,10 +164,26 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int,
             break   # これ以上粘っても回収できない(恒久的な欠落)
 
     meta = _coverage(tickers, out, source="yfinance(Yahoo Finance) 単一ソース")
+
+    # ★引け後実行なのに、Yahoo側の反映が遅れて今日の足がまだ来ていないケースを検知する。
+    # これに気づかないと「引け後に実行したのに朝と同じ結果」という事故が再発する
+    # (今度は_cleanのバグではなく、データ提供元側の遅延が原因で)。
+    now_jst = pd.Timestamp.now(tz="Asia/Tokyo")
+    market_close = now_jst.normalize() + pd.Timedelta(hours=15, minutes=30)
+    today_bar_expected = now_jst >= market_close
+    today_bar_present = None
+    if today_bar_expected and out:
+        today_date = now_jst.normalize().tz_localize(None)
+        sample = list(out.values())[: min(50, len(out))]
+        have = sum(1 for df in sample if len(df) and df.index[-1].normalize() == today_date)
+        today_bar_present = have / len(sample) if sample else 0.0
+
     meta.update({
         "pass_log": pass_log,
         "short_history": len(short),
         "failed": len([t for t in tickers if t not in out and t not in short]),
+        "today_bar_expected": today_bar_expected,
+        "today_bar_present_ratio": today_bar_present,
     })
     return out, meta
 
@@ -319,6 +343,10 @@ def coverage_note(meta: dict) -> str:
     rec = sum(g for _, g, _ in (meta.get("pass_log") or [])[1:])   # 1巡目以降の増分合計
     if rec:
         bits.append(f"再取得で回収 {rec}件")
+    ratio = meta.get("today_bar_present_ratio")
+    if meta.get("today_bar_expected") and ratio is not None and ratio < 0.5:
+        bits.append(f"⚠引け後実行だが本日確定足が銘柄の{ratio:.0%}にしか反映されていない"
+                    "(Yahoo側の更新待ち。結果が前営業日と同一の可能性)")
     return " / ".join(bits)
 
 
