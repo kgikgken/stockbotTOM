@@ -673,7 +673,15 @@ def render_summary_png(outpath: str, today: str, meta: dict, sentiment: dict, re
                             fill=CARD_ALT, outline=BORDER, width=2)
         d.ellipse([MARGIN + 30, ry + 17, MARGIN + 70, ry + 57], fill=CARD,
                   outline=BORDER, width=2)
-        d.text((MARGIN + (43 if i < 10 else 37), ry + 24), str(i), font=f(22, True), fill=SUB)
+        # ★2026-07-31: 丸数字を「選出順(1〜5)」から「点灯した全銘柄の中での真の順位」へ変更。
+        # 1枚目のカードにはすでに「全体順位 X位/Y件中」が出ているので、まとめ側もそれに揃える。
+        rank_label = str(c.true_rank)
+        rank_size = 22
+        while rank_size > 14 and d.textbbox((0, 0), rank_label, font=f(rank_size, True))[2] > 34:
+            rank_size -= 1
+        rw = d.textbbox((0, 0), rank_label, font=f(rank_size, True))[2]
+        d.text((MARGIN + 50 - rw / 2, ry + 25 - rank_size / 6), rank_label,
+               font=f(rank_size, True), fill=SUB)
         mascot_at(MARGIN + 82, ry + 17, 40)
         name = f"{c.code}  {c.name}"
         d.text((MARGIN + 138, ry + 20),
