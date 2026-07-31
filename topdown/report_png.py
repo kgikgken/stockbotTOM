@@ -382,6 +382,11 @@ def render_png(outpath: str, today: str, meta: dict, sentiment: dict, res: dict,
         rlines = [(ln, True) for ln in _wrap(d, rlines[0][0], f(17, True), rw)]
         rlines += [(ln, False) for ln in
                    _wrap(d, f"期待度 {c.score:.0f}/10 = {c.score_reason}", f(16), rw)]
+        if c.price_excluded_above > 0:
+            rlines += [(ln, False) for ln in
+                       _wrap(d, f"※本来{c.true_rank}位/{c.true_rank_total}件中"
+                                f"(株価上限で上位{c.price_excluded_above}件が除外)",
+                             f(15), rw)]
         risk_lines = []
         for r in c.risks[:2]:
             risk_lines.extend(_wrap(d, "⚠ " + r, f(16), CARD_W - 60))
