@@ -111,8 +111,10 @@ def build_text(today: str, meta: dict, sentiment: dict, res: dict,
            f"1単元{c.unit_cost/1e4:,.0f}万円")
         ap(f"   期待度 {c.score:.0f}/10 — {c.score_reason}")
         if c.price_excluded_above > 0:
-            ap(f"   ※本来の順位 {c.true_rank}位/{c.true_rank_total}件中"
+            ap(f"   全体順位 {c.true_rank}位/{c.true_rank_total}件中"
                f"(株価上限で自分より高スコアの銘柄が{c.price_excluded_above}件、候補になれず除外)")
+        else:
+            ap(f"   全体順位 {c.true_rank}位/{c.true_rank_total}件中(株価上限による除外の影響なし)")
         ap("   出口: +1Rで半分利確(2単元以上) → 残玉は構造まで引上げ+トレーリング / 固定利確なし")
         for r in c.risks[:2]:
             ap(f"   ⚠{r}")
