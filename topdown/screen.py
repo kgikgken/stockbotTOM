@@ -51,6 +51,9 @@ class Candidate:
     expire_date: str = ""
     # --- 付帯情報 ---
     score_reason: str = ""
+    true_rank: int = 0          # 価格上限で除外された銘柄も含めた、期待度スコアの本来の順位
+    true_rank_total: int = 0    # その日に点灯した全銘柄数(価格超過分も含む)
+    price_excluded_above: int = 0  # 自分より高スコアで、価格上限のため候補になれなかった銘柄数
     gap_date: str | None = None
     earnings_est_days: int | None = None
     risks: List[str] = field(default_factory=list)
@@ -74,8 +77,14 @@ def _bday_str(today: str, n: int) -> str:
 
 
 def build_pool(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame], cfg: Config):
-    """流動性・価格上限・TOB疑いを通過した母集団を作る。"""
+    """流動性・価格上限・TOB疑いを通過した母集団を作る。
+
+    price_excluded には「価格上限以外は全部通ったのに、株価だけが理由で外れた銘柄」を
+    別途集めておく。これは候補選定には使わないが、「本来の全体順位」を出すために
+    run_screen 側でスコアだけ計算する(2026-07-28: Tomさんの要望)。
+    """
     eligible: List[dict] = []
+    price_excluded: List[dict] = []
     rejects: List[dict] = []
     for _, row in universe.iterrows():
         tkr = str(row["ticker"]).strip()
@@ -92,6 +101,7 @@ def build_pool(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame], cfg: Conf
                             "stage": "価格上限",
                             "reason": f"株価{feat['close']:,.0f}円が上限{cfg.max_price:,.0f}円超"
                                       f"(1単元{feat['close']*100/1e4:,.0f}万円)"})
+            price_excluded.append({"row": row.to_dict(), "feat": feat})
             continue
         is_tob, tob_reason = tob_suspect(df, cfg)
         if is_tob:
@@ -99,7 +109,7 @@ def build_pool(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame], cfg: Conf
                             "stage": "TOB疑い", "reason": tob_reason})
             continue
         eligible.append({"row": row.to_dict(), "feat": feat})
-    return eligible, rejects
+    return eligible, rejects, price_excluded
 
 
 def build_zone(trigger: str, feat: dict, cfg: Config):
@@ -272,7 +282,7 @@ def _risks_for(c: Candidate, sentiment: dict) -> List[str]:
 
 def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
                sentiment: dict, cfg: Config, today: str) -> dict:
-    eligible, rejects = build_pool(universe, ohlcv, cfg)
+    eligible, rejects, price_excluded = build_pool(universe, ohlcv, cfg)
     sector_rank = compute_sector_rank(eligible, cfg)
     top_set = {s for s, _ in sector_rank["top"]}
     bottom_set = {s for s, _ in sector_rank["bottom"]}
@@ -347,6 +357,39 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
             c.flags.append(f"⚠1単元{c.unit_cost/1e4:,.0f}万円 — 1単元のみなら半分利確は使えず"
                           "トレーリング+時間ストップ一本")
         fired.append(c)
+
+    # --- 「本来の順位」の計算(2026-07-28) ---
+    # 株価上限で弾かれた銘柄も、もし上限が無かったら点灯してスコアが付いていたかもしれない。
+    # 採用はしない(価格フィルターは維持)が、参考として「価格を問わなければ何位だったか」を
+    # 表示できるよう、ここでは軽くトリガー判定+スコアだけを計算する
+    # (ゾーン組成・出口設計などフルの処理はしない=無駄な計算をしない)。
+    price_excluded_scores: List[float] = []
+    for item in price_excluded:
+        row, feat = item["row"], item["feat"]
+        if feat.get("spiked"):
+            continue   # 急騰済みは通常も候補にしないので、順位計算にも含めない
+        sector = row.get("sector") or "不明"
+        tailwind = sector in top_set
+        headwind = sector in bottom_set
+        hit = _decide_trigger(feat, tailwind)
+        if hit is None:
+            continue
+        trigger, _, _, _ = hit
+        is_semis = row.get("ticker") in semis
+        hivol = bool(sentiment.get("hivol_env")) and is_semis
+        score, _ = _expectation_score(trigger, feat, tailwind, headwind, hivol)
+        price_excluded_scores.append(score)
+
+    all_scores = sorted([c.score for c in fired] + price_excluded_scores, reverse=True)
+
+    def _assign_true_rank(c: Candidate):
+        # 同点はまとめて同順位にする(例: 8点が2件なら両方「2位」、次は4位から)
+        c.true_rank = all_scores.index(c.score) + 1
+        c.true_rank_total = len(all_scores)
+        c.price_excluded_above = sum(1 for s in price_excluded_scores if s > c.score)
+
+    for c in fired:
+        _assign_true_rank(c)
 
     # --- 絞り込み: 序列 → セクター分散 → 相関集中の抑制 ---
     fired.sort(key=lambda x: -x.score)
