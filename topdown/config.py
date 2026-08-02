@@ -151,12 +151,29 @@ class Config:
     time_stop_gap: int = field(default_factory=lambda: _i("TIME_STOP_GAP", 20))      # 材料反応(日本PEAD: Okada&Saeki 2014)
     time_stop_gap_max: int = field(default_factory=lambda: _i("TIME_STOP_GAP_MAX", 60))
     time_stop_break: int = field(default_factory=lambda: _i("TIME_STOP_BREAK", 10))  # 高値ブレイク
-    time_stop_pull: int = field(default_factory=lambda: _i("TIME_STOP_PULL", 10))    # 押し目
+    # ★2026-08 変更: 押し目の時間ストップを 10 → 6 営業日へ短縮。
+    # 根拠: 日本株の短期リバーサル研究では反発の大半が最初の1週間で消費されるとされ
+    # (Iihara et al. 2004 の1ヶ月反転、Dai & Medhat の高流動株は約2週間で反転終了)、
+    # 10営業日は反発が尽きた後も保有し続けている可能性がある。
+    # ※これは「弱い実証あり」レベル。実データで再検証すること。
+    time_stop_pull: int = field(default_factory=lambda: _i("TIME_STOP_PULL", 6))     # 押し目
     # トレーリング(残玉用・日次OHLCVで実装可能な方式)
     trail_chandelier_days: int = field(default_factory=lambda: _i("TRAIL_CHANDELIER_DAYS", 22))
     trail_chandelier_atr: float = field(default_factory=lambda: _f("TRAIL_CHANDELIER_ATR", 3.0))
     trail_close_atr_mult: float = field(default_factory=lambda: _f("TRAIL_CLOSE_ATR_MULT", 2.0))
     trail_ma_days: int = field(default_factory=lambda: _i("TRAIL_MA_DAYS", 10))
+
+    # --- 押し目のRSI加点(2026-08 追加) ---
+    # 保有が数営業日と短いため、標準の14日ではなく短期(3日)のRSIを使う。
+    # 調査では短期スイングで2〜5日RSIの方が反発シグナルの実証が強いとされる。
+    # 閾値15はRSI(3)の振れ幅の大きさを踏まえた「売られすぎ」の目安(仮置き)。
+    # 配点を+1に留めるのは、既存の「浅い押し(ATR深さ)」と情報が部分的に重なるため。
+    # ※フィボナッチ%水準による追加加点とRSIダイバージェンスは、実証が無い/反証ありのため採用しない。
+    rsi_period: int = field(default_factory=lambda: _i("RSI_PERIOD", 3))
+    rsi_oversold_th: float = field(default_factory=lambda: _f("RSI_OVERSOLD_TH", 15.0))
+    # 押しの底を探す遡り日数。反発確認ゲート(直近2日)より広く取り、
+    # 反発直前の売られすぎを捉える。
+    rsi_lookback_days: int = field(default_factory=lambda: _i("RSI_LOOKBACK_DAYS", 5))
 
     # --- 相関集中の抑制(2026-07-19) ---
     max_gap_candidates: int = field(default_factory=lambda: _i("MAX_GAP_CANDIDATES", 3))
