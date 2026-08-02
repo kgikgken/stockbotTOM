@@ -33,6 +33,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
     atr_n = atr_wilder(h, l, c, cfg.atr_period)          # 損切り・利確設計用(ATR14)
     atr22 = atr_wilder(h, l, c, 22)                       # 押し目深さゲート用(momentum凍結値に忠実)
     sma20, sma50 = sma(c, 20), sma(c, 50)
+    sma_pull = sma(c, cfg.zone_pull_ma_days)  # ★2026-08追加: 押し目ゾーンのアンカー候補
     sma150, sma200 = sma(c, 150), sma(c, 200)
     lr = np.log(c / c.shift(1)).dropna()
 
@@ -43,7 +44,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
     window = min(cfg.gap_max_days_since + 1, len(lr))
     recent_lr = lr.iloc[-window:]
     gap_found, gap_days_since, gap_ret, gap_vol_ratio = False, None, None, None
-    gap_high = gap_low = None; gap_date = None
+    gap_high = gap_low = gap_close = None; gap_date = None
     if len(recent_lr):
         idx_max = recent_lr.idxmax()
         cand = float(recent_lr.loc[idx_max])
@@ -53,6 +54,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         if cand >= cfg.gap_threshold and vr_at and vr_at >= cfg.gap_vol_mult:
             gap_found, gap_days_since, gap_ret, gap_vol_ratio = True, int((lr.index >= idx_max).sum()) - 1, cand, vr_at
             gap_high = float(h.loc[idx_max]); gap_low = float(l.loc[idx_max])
+            gap_close = float(c.loc[idx_max])  # ★2026-08追加: ATR基準ゾーンのアンカーに使う
             gap_date = str(idx_max.date()) if hasattr(idx_max, "date") else str(idx_max)
 
     # --- 節目ブレイク: 前日までの20日高値を終値で上抜け+出来高+上昇トレンド ---
@@ -107,7 +109,8 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         "pullback_state_a": pullback_state_a,
         "trend_align": trend_align, "close_pos": _close_position(df),
         "depth_atr": depth_atr, "rsi": _rsi_min_recent(c, cfg),
-        "gap_high": gap_high, "gap_low": gap_low, "gap_date": gap_date,
+        "gap_high": gap_high, "gap_low": gap_low, "gap_close": gap_close, "gap_date": gap_date,
+        "sma_pull": (float(sma_pull.iloc[-1]) if not pd.isna(sma_pull.iloc[-1]) else None),
         "breakout_level": breakout_level, "pre_breakout_low": pre_breakout_low,
         "dip_low": dip_low, "prev_day_high": prev_day_high,
         "earnings_est_days": estimate_days_to_earnings(df, cfg),
