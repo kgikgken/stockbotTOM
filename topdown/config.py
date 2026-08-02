@@ -107,9 +107,24 @@ class Config:
 
     # --- 入口ゾーン(v2.0・2026-07-19) ---
     atr_period: int = field(default_factory=lambda: _i("ATR_PERIOD", 14))
-    # 材料反応: ギャップ足の高値〜値幅の38.2%押しまで(Alajbeg et al.2017/Bulkowski「浅い押し>深い押し」)
+    # ★2026-08改訂: フィボナッチ38.2%からATR/移動平均線基準へ変更。
+    # 根拠: Tsinaslanidis, Guijarro & Voukelatos(2022, Expert Systems with Applications
+    # 187:115893、米独3市場・160銘柄・1968-2019年)が、フィボナッチ水準での反発確率は
+    # 非フィボナッチ水準と統計的に区別できない(広いゾーンではむしろ非フィボナッチの方が
+    # 反発しやすい)と実証した。38.2%を使い続ける唯一の実質的論拠は「浅さ」であり、
+    # フィボナッチ性(黄金比由来)そのものではない。「浅さ」はATRや移動平均線で直接
+    # 表現できるため、3トリガーの基準をATRに統一する。
+    # 旧値は後方互換・比較検証用に残す(zone_use_v2_atr=Falseで旧ロジックに戻せる)。
     zone_fib_retrace: float = field(default_factory=lambda: _f("ZONE_FIB_RETRACE", 0.382))
-    # 高値ブレイク: ブレイク水準〜1ATR下まで
+    zone_use_v2_atr: bool = field(default_factory=lambda: _b("ZONE_USE_V2_ATR", True))
+    # 材料反応(新): ギャップ足の終値を上端、そこから zone_gap_atr_mult×ATR 下を下端とする。
+    zone_gap_atr_mult: float = field(default_factory=lambda: _f("ZONE_GAP_ATR_MULT", 0.5))
+    # 押し目(新): 前日高値を上端。下端は「25日移動平均線」と「押し安値+zone_pull_atr_mult×ATR」
+    # のうち、より浅い(価格が高い)方を採用する。日本の個人投資家・実務で最も広く参照される
+    # 移動平均線(25日)をサポート候補に加え、自己成就的な反発を取り込む狙い。
+    zone_pull_ma_days: int = field(default_factory=lambda: _i("ZONE_PULL_MA_DAYS", 25))
+    zone_pull_atr_mult: float = field(default_factory=lambda: _f("ZONE_PULL_ATR_MULT", 0.5))
+    # 高値ブレイク: ブレイク水準〜1ATR下まで(現状維持。既にATR基準で妥当と判断)
     zone_break_atr_mult: float = field(default_factory=lambda: _f("ZONE_BREAK_ATR_MULT", 1.0))
     # 構造ストップの緩衝(ヒゲ刈られ回避・仮置き)
     stop_buffer_atr_mult: float = field(default_factory=lambda: _f("STOP_BUFFER_ATR_MULT", 0.2))
