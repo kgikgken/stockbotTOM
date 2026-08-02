@@ -189,7 +189,7 @@ def run(ohlcv: Dict[str, pd.DataFrame], cfg, start: str, end: str,
             bucket = _bucket(feat["adv20_jpy"])
             # 期待度スコア。バックテストではセクター情報を再現できないため
             # 順風/逆風/高ボラは False 固定(その分だけ本番よりスコアは低めに出る)
-            score, _ = _expectation_score(trigger, feat, False, False, False)
+            score, _ = _expectation_score(trigger, feat, False, False, False, cfg)
             after = df.loc[df.index > t]
             if len(after) < 5:
                 continue
