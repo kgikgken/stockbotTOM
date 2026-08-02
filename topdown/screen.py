@@ -207,7 +207,8 @@ def _decide_trigger(feat: dict, tailwind: bool):
     return None
 
 
-def _expectation_score(trigger: str, feat: dict, tailwind: bool, headwind: bool, hivol: bool):
+def _expectation_score(trigger: str, feat: dict, tailwind: bool, headwind: bool,
+                       hivol: bool, cfg=None):
     """期待度スコア(0〜10)。大きいほど上位に並べる。
 
     配点の軸は「日本市場でその現象にリターンの実証がどれだけあるか」に統一した。
@@ -252,6 +253,20 @@ def _expectation_score(trigger: str, feat: dict, tailwind: bool, headwind: bool,
         if dp is not None:
             if dp <= 1.0: pts += 2; parts.append(f"浅い押し({dp:.2f}ATR)+2")
             elif dp <= 2.0: pts += 1; parts.append(f"押し{dp:.2f}ATR+1")
+
+        # ★2026-08 追加: 短期RSIの売られすぎ(+1)。
+        # 「トレンド整列を要求する押し目」という文脈でのRSIは、逆張りではなく
+        # トレンド内の行き過ぎのタイミング調整として働き、この用途の方が実証は強い
+        # (Connors RSI-2、QuantpTrader QQQ分析。いずれも米国指数ベース)。
+        # 配点を+1に留めるのは、上の「浅い押し」と情報が部分的に重なるため
+        # (深く押すほどRSIも下がる)。RSIは深さでは測れない「下落の速度」を
+        # 補足する点で独立情報を持つが、完全独立ではない。
+        rsi = feat.get("rsi")
+        th = getattr(cfg, "rsi_oversold_th", 15.0) if cfg is not None else 15.0
+        rn = getattr(cfg, "rsi_period", 3) if cfg is not None else 3
+        if rsi is not None and rsi <= th:
+            pts += 1
+            parts.append(f"RSI({rn}){rsi:.0f}+1")
 
     if tailwind: pts += 1; parts.append("順風セクター+1")
     if headwind: pts -= 1; parts.append("逆風セクター-1")
@@ -344,7 +359,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         c.expire_date = _bday_str(today, cfg.zone_expire_days)
         c.gap_date = feat.get("gap_date")
         c.earnings_est_days = feat.get("earnings_est_days")
-        c.score, c.score_reason = _expectation_score(trigger, feat, tailwind, headwind, hivol)
+        c.score, c.score_reason = _expectation_score(trigger, feat, tailwind, headwind, hivol, cfg)
         c.risks = _risks_for(c, sentiment)
 
         if floored:
@@ -377,7 +392,7 @@ def run_screen(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         trigger, _, _, _ = hit
         is_semis = row.get("ticker") in semis
         hivol = bool(sentiment.get("hivol_env")) and is_semis
-        score, _ = _expectation_score(trigger, feat, tailwind, headwind, hivol)
+        score, _ = _expectation_score(trigger, feat, tailwind, headwind, hivol, cfg)
         price_excluded_scores.append(score)
 
     all_scores = sorted([c.score for c in fired] + price_excluded_scores, reverse=True)
