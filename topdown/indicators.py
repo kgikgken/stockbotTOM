@@ -14,7 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .ta import sma, atr_wilder, tob_suspect, bounce_confirmed, swing_high_depth  # noqa: F401
+from .ta import (sma, atr_wilder, tob_suspect, bounce_confirmed, swing_high_depth,
+                 rsi_wilder)  # noqa: F401
 
 
 def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
@@ -105,7 +106,7 @@ def compute_topdown_features(df: pd.DataFrame, cfg) -> dict | None:
         "chg1d_pct": (np.exp(chg1d) - 1) * 100, "ret5d": ret5d,
         "pullback_state_a": pullback_state_a,
         "trend_align": trend_align, "close_pos": _close_position(df),
-        "depth_atr": depth_atr,
+        "depth_atr": depth_atr, "rsi": _rsi_min_recent(c, cfg),
         "gap_high": gap_high, "gap_low": gap_low, "gap_date": gap_date,
         "breakout_level": breakout_level, "pre_breakout_low": pre_breakout_low,
         "dip_low": dip_low, "prev_day_high": prev_day_high,
@@ -173,5 +174,27 @@ def _close_position(df: pd.DataFrame) -> float | None:
     try:
         h = float(df["High"].iloc[-1]); l = float(df["Low"].iloc[-1]); c = float(df["Close"].iloc[-1])
         return (c - l) / (h - l) if h > l else None
+    except Exception:
+        return None
+
+
+def _rsi_min_recent(close: pd.Series, cfg) -> float | None:
+    """押しの底で記録した短期RSIの最小値(直近数日)。
+
+    ★重要: 直近のRSI(当日値)を使ってはいけない。押し目の検出条件には
+    「直近2営業日以内に反発を確認」というゲートがあるため、候補になった時点で
+    価格はすでに反発しており、当日のRSIは底値ではなく戻した後の値になる。
+    実測例では、押しの底でRSI(3)=31.9だった銘柄が、反発当日は75.8まで戻っていた。
+    「反発を確認してから売られすぎを測る」のは順序として矛盾するため、
+    反発する直前(=押しの底)にどれだけ売られたかを最小値で捉える。
+    """
+    try:
+        n = getattr(cfg, "rsi_period", 3)
+        look = getattr(cfg, "rsi_lookback_days", 5)
+        v = rsi_wilder(close, n).dropna()
+        if len(v) == 0:
+            return None
+        window = v.iloc[-look:] if len(v) >= look else v
+        return float(window.min())
     except Exception:
         return None
