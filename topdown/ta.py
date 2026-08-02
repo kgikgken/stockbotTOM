@@ -120,3 +120,22 @@ def tob_suspect(df: pd.DataFrame, cfg) -> tuple[bool, str]:
                           "(絶対水準として値動きがほぼ無い。TOB/MBO等で価格が固定されている疑い・要確認)")
 
     return False, ""
+
+
+def rsi_wilder(close: pd.Series, n: int = 3) -> pd.Series:
+    """RSI(Wilder方式)。
+
+    期間の既定を3にしているのは、押し目の保有が数営業日と短いため。
+    調査(2026-08)では、短期スイングでは標準の14日より2〜5日のRSIの方が
+    反発シグナルとしての実証が強いとされる(米国指数ベースの検証で、
+    日本個別株での直接検証は未確認)。ATRと同じくWilderの平滑化を使う。
+    """
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / n, min_periods=n, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / n, min_periods=n, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, pd.NA)
+    out = 100.0 - (100.0 / (1.0 + rs))
+    # avg_loss が 0(下落が一度もない)の場合は RSI=100 とする
+    return out.fillna(100.0).where(avg_gain.notna(), other=pd.NA)
