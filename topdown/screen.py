@@ -127,31 +127,48 @@ def build_zone(trigger: str, feat: dict, cfg: Config):
 
     if trigger == TRIG_GAP:
         gh, gl = feat.get("gap_high"), feat.get("gap_low")
+        gc = feat.get("gap_close")
         if gh is None or gl is None or gh <= gl:
             return None, "ギャップ足の構造を取得できない"
         stop = gl - buf
-        zone_hi = gh
-        zone_lo = gh - (gh - gl) * cfg.zone_fib_retrace
+        if cfg.zone_use_v2_atr and gc is not None:
+            # ★2026-08改訂: フィボナッチ38.2%(反証あり: Tsinaslanidis et al. 2022、
+            # 米独3市場でフィボナッチ水準に反発の統計的優位性なしと確認)→ATR基準へ。
+            # ギャップ足の終値(初動が最も強い水準)を上端とし、ボラティリティで
+            # 正規化した幅だけ下に取る。値幅固定比(38.2%)よりボラ適応的。
+            zone_hi = gc
+            zone_lo = gc - cfg.zone_gap_atr_mult * atr
+        else:
+            zone_hi = gh
+            zone_lo = gh - (gh - gl) * cfg.zone_fib_retrace
     elif trigger == TRIG_BREAK:
         lvl, plow = feat.get("breakout_level"), feat.get("pre_breakout_low")
         if lvl is None or plow is None or lvl <= plow:
             return None, "ブレイク構造を取得できない"
+        # 高値ブレイクは元々ATR基準(2026-08調査で「変更不要」と判定・現状維持)
         stop = plow - buf
         zone_hi = lvl
         zone_lo = lvl - cfg.zone_break_atr_mult * atr
     else:  # 押し目
         ph, dl = feat.get("prev_day_high"), feat.get("dip_low")
+        sma_pull = feat.get("sma_pull")
         if ph is None or dl is None or ph <= dl:
             return None, "押し目構造を取得できない"
         stop = dl - buf
         zone_hi = ph
-        # ★2026-07-23: 下端を押し安値そのものから38.2%押しへ変更。
-        # 上端の切り落としを廃止した結果、押し目のゾーンだけ「前日高値〜押し安値」の
-        # 全幅となり青天井に広がった(押し3ATRで幅2.7ATR)。材料反応と同じく
-        # 実証のある38.2%(Alajbeg 2017/Bulkowski「浅い押し>深い押し」)で浅い側に
-        # 揃え、3トリガーすべてが有界かつ浅い帯になるようにした。
-        # 押し安値そのものは STOP の根拠として引き続き使う(構造は不変)。
-        zone_lo = ph - (ph - dl) * cfg.zone_fib_retrace
+        if cfg.zone_use_v2_atr:
+            # ★2026-08改訂: フィボナッチ38.2%→「移動平均線」と「ATR基準の浅い押し」の
+            # うち、より浅い(価格が高い)方を採用。日本の個人投資家・実務で最も広く
+            # 参照される移動平均線(25日)をサポート候補に加え、自己成就的な反発を
+            # 取り込む狙い。両候補のうち max()=より浅い方を選ぶ。
+            atr_candidate = dl + cfg.zone_pull_atr_mult * atr
+            # ★ SMA25が前日高値(zone_hi)を上回るケースがある(狭いレンジで推移し、
+            # 単日の高値より25日平均の方が高い場合)。この場合MA候補は「上端の下の
+            # サポート」として意味を持たないため、ATR候補のみにフォールバックする。
+            ma_candidate = sma_pull if (sma_pull is not None and sma_pull < zone_hi) else None
+            zone_lo = max(ma_candidate, atr_candidate) if ma_candidate is not None else atr_candidate
+        else:
+            zone_lo = ph - (ph - dl) * cfg.zone_fib_retrace
 
     if stop <= 0:
         return None, "ストップ価格が0以下"
