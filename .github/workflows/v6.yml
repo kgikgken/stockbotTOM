@@ -1,0 +1,57 @@
+name: v6-screen
+
+# stockbotTOM v6.0 — 7人の手法による直列フィルター。
+# v5(screen.yml)とは独立して動く。並行運用して比較できるようにしてある。
+
+on:
+  schedule:
+    - cron: "0 22 * * 0-4"    # 7:00 JST 月〜金
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  v6:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run v6
+        env:
+          SCREEN_DRYRUN: '0'
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          V6_EQUITY: ${{ vars.V6_EQUITY }}
+          V6_PEAK_EQUITY: ${{ vars.V6_PEAK_EQUITY }}
+        run: python main_v6.py
+
+      - name: Persist watchlist and report
+        if: always()
+        run: |
+          git config user.name "stockbot"
+          git config user.email "stockbot@users.noreply.github.com"
+          for f in out_v6/watchlist.csv positions_v6.csv ; do
+            [ -f "$f" ] && git add "$f" || echo "skip (not present): $f"
+          done
+          git diff --cached --quiet || git commit -m "v6: $(date -u +%F)"
+          git push || echo "push skipped"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v6-report
+          path: out_v6/
+          if-no-files-found: warn
