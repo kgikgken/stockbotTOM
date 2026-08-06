@@ -194,14 +194,20 @@ def run_pipeline(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
     counts["layer3"] = len(l3)
 
     # ---- Layer 4: セットアップ点灯 ----
+    # ★セットアップ別の点灯数を記録する(2026-08-07)。
+    # 「VCPが通知に出ない」とき、検出段階で0件なのか、検出はされたが
+    # 後段のリスク判定で棄却されたのかを切り分けるために必要。
     l4 = []
+    setup_counts = {SETUP_VCP: 0, SETUP_PULL: 0, SETUP_PIVOT: 0}
     for it in l3:
         su = detect_setup(it["df"], it["stage_d"], cfg)
         if su is None:
             continue
+        setup_counts[su["setup"]] = setup_counts.get(su["setup"], 0) + 1
         it["setup_detail"] = su
         l4.append(it)
     counts["layer4"] = len(l4)
+    counts["by_setup"] = setup_counts
 
     # ---- Layer 5: 執行価格・リスク計算・ポートフォリオ制約 ----
     heat = portfolio_heat(positions, equity)
@@ -224,9 +230,18 @@ def run_pipeline(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         plan = build_risk_plan(entry, su["recent_swing_low"], atr, equity, cfg,
                                risk_pct_override=cfg.risk_per_trade * risk_mult)
         if plan.rejected:
+            # ★棄却理由を細分化する(2026-08-07)。「リスク」一括だと
+            # 8%ストップ超過なのか単元不足なのか区別できず、
+            # 特定セットアップが構造的に全滅していても気づけない。
+            if "8%上限より深い" in plan.rejected:
+                layer = "Layer5(8%超)"
+            elif "1単元" in plan.rejected:
+                layer = "Layer5(資金不足)"
+            else:
+                layer = "Layer5(リスク)"
             drops.append({"code": row["ticker"].replace(".T", ""),
-                          "name": row.get("name", ""), "layer": "Layer5(リスク)",
-                          "reason": plan.rejected})
+                          "name": row.get("name", ""), "layer": layer,
+                          "setup": su["setup"], "reason": plan.rejected})
             continue
 
         c = CandidateV6(
