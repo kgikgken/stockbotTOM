@@ -259,6 +259,15 @@ def render_png(outpath: str, today: str, res: dict, exits: list, cfg) -> str:
               f" → TT+RS {counts['layer2']} → 日足St {counts['layer3']}"
               f" → 点灯{counts['layer4']} → 通知{counts['layer5']}")
     lines = [(f"絞り込み: {funnel}", 18, INK, True)]
+    # 点灯したのに通知に至らなかった理由の内訳(設計不具合の早期発見のため)
+    drops = res.get("drops") or []
+    if drops:
+        by_reason = {}
+        for dr in drops:
+            k = dr.get("layer", "不明")
+            by_reason[k] = by_reason.get(k, 0) + 1
+        lines.append(("脱落: " + " / ".join(f"{k} {v}件" for k, v in sorted(by_reason.items())),
+                      15, SUB, False))
     h = 20 + sum(len(_wrap(d, s_, f(sz, b_), TOPW - 40)) * int(sz * 1.5) for s_, sz, _, b_ in lines)
     card(y, h, w=TOPW)
     yy = y + 12
