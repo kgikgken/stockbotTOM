@@ -260,6 +260,9 @@ def render_png(outpath: str, today: str, res: dict, exits: list, cfg) -> str:
               f" → 点灯{counts['layer4']} → 通知{counts['layer5']}")
     lines = [(f"絞り込み: {funnel}", 18, INK, True)]
     # 点灯したのに通知に至らなかった理由の内訳(設計不具合の早期発見のため)
+    bs = counts.get("by_setup") or {}
+    if bs:
+        lines.append(("点灯内訳: " + " / ".join(f"{k}{v}" for k, v in bs.items()), 15, SUB, False))
     drops = res.get("drops") or []
     if drops:
         by_reason = {}
