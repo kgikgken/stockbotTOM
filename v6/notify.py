@@ -25,6 +25,17 @@ def build_notification(res: dict, exits: list, today: str, cfg) -> str:
        f" → TT+RS {c['layer2']} → 日足St {c['layer3']}"
        f" → 点灯{c['layer4']} → 通知{c['layer5']}")
 
+    # ★点灯したのに通知に至らなかった銘柄の理由を集計して出す。
+    # これが無いと「点灯13→通知3」の間で何が起きたのか運用者から見えず、
+    # 設計上の不具合(例: リスク上限で特定セットアップが全滅)に気づけない。
+    drops = res.get("drops") or []
+    if drops:
+        by_reason = {}
+        for dr in drops:
+            key = dr.get("layer", "不明")
+            by_reason[key] = by_reason.get(key, 0) + 1
+        ap("　脱落: " + " / ".join(f"{k} {v}件" for k, v in sorted(by_reason.items())))
+
     # ---- 資金状態 ----
     dd = res["dd"]
     ap(f"【資金】ヒート{res['heat']*100:.1f}%(上限{cfg.portfolio_heat_max*100:.0f}%)"
