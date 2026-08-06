@@ -27,6 +27,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # ★2026-08 追加: PNGレポートの日本語文字が「豆腐(□)」になる不具合の修正。
+      # ubuntu-latestランナーには日本語フォントが入っておらず、report_png.pyが
+      # 指定するパス(/usr/share/fonts/opentype/noto/NotoSansCJK-*.ttc)が存在しないと
+      # PILがCJK非対応の代替フォントに落ち、日本語だけ文字化けする
+      # (英数字・記号は正常に見えるため発見が遅れやすい)。
+      - name: Install Japanese font (Noto Sans CJK)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y fonts-noto-cjk
+          fc-list | grep -i noto | grep -i cjk || echo "⚠フォントが見つからない場合は下のフォールバックを確認"
+          ls -la /usr/share/fonts/opentype/noto/ || true
+
       - name: Run v6
         env:
           SCREEN_DRYRUN: '0'
