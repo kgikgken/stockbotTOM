@@ -131,7 +131,14 @@ def main() -> dict:
             continue
 
     equity = cfg.equity
-    peak = float(os.getenv("V6_PEAK_EQUITY", equity))
+    # ★V6_PEAK_EQUITYが「未設定」ではなく「空文字列」で渡ってくるケースがある
+    # (GitHub ActionsでActions variablesを未設定のままworkflowのenv:に書くと、
+    # 変数自体は存在して値が''になる)。float(os.getenv(key, default))は
+    # 環境変数が"存在する"限りデフォルトを使わないため、float('')でエラーになる。
+    # cfg.equity算出に使っているconfig.pyの_f()と同じ考え方で、空文字列も
+    # 未設定として扱うようにする。
+    _peak_raw = os.getenv("V6_PEAK_EQUITY", "").strip()
+    peak = float(_peak_raw) if _peak_raw else equity
 
     res = run_pipeline(uni, ohlcv, index_daily, cfg, today,
                        positions=positions_for_heat, equity=equity, peak_equity=peak)
