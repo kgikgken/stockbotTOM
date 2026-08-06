@@ -28,6 +28,9 @@ def build_notification(res: dict, exits: list, today: str, cfg) -> str:
     # ★点灯したのに通知に至らなかった銘柄の理由を集計して出す。
     # これが無いと「点灯13→通知3」の間で何が起きたのか運用者から見えず、
     # 設計上の不具合(例: リスク上限で特定セットアップが全滅)に気づけない。
+    bs = c.get("by_setup") or {}
+    if bs:
+        ap("　点灯内訳: " + " / ".join(f"{k}{v}" for k, v in bs.items()))
     drops = res.get("drops") or []
     if drops:
         by_reason = {}
