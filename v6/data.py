@@ -78,16 +78,42 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int,
                 return df[idx.normalize() <= today_jst]
             return df[idx.normalize() < today_jst]
 
+        def _flatten_single(df, ticker):
+            """1銘柄取得でも yfinance が group_by="ticker" 指定によりMultiIndex列
+            (ticker, field) を返すことがある(バージョン依存)。列がMultiIndexなら
+            平らな 'Close'/'Open'等 の列に直す。既に平らならそのまま返す。
+            これを怠ると後段の df["Close"] が KeyError になる
+            (2026-08-06、本番の単独リトライ巡で発覚)。
+            """
+            if not isinstance(df.columns, pd.MultiIndex):
+                return df
+            lvl0 = set(df.columns.get_level_values(0))
+            lvl1 = set(df.columns.get_level_values(-1))
+            if ticker in lvl0:
+                return df[ticker]
+            if ticker in lvl1:
+                return df.xs(ticker, axis=1, level=-1)
+            # ティッカー名がどちらの階層にも見つからない場合の保険。
+            # 通常は起きないが、原因不明のまま欠測にするよりは1階層落として救う。
+            return df.droplevel(0, axis=1) if df.columns.nlevels > 1 else df
+
         if len(chunk) == 1:
-            df = _clean(raw)
+            t0 = chunk[0]
+            try:
+                df = _clean(_flatten_single(raw, t0))
+            except Exception:
+                return
             if len(df) >= 60:
-                out[chunk[0]] = df
+                out[t0] = df
             elif len(df):
-                short.add(chunk[0])
+                short.add(t0)
             return
         for t in chunk:
             try:
-                df = _clean(raw[t])
+                sub = raw[t]
+                if isinstance(sub.columns, pd.MultiIndex):
+                    sub = sub.droplevel(0, axis=1) if sub.columns.nlevels > 1 else sub
+                df = _clean(sub)
             except Exception:
                 continue
             if len(df) >= 60:
