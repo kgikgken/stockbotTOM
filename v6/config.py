@@ -69,7 +69,15 @@ class ConfigV6:
     vcp_swing_min_bars: int = field(default_factory=lambda: _i("V6_VCP_SWING_MIN_BARS", 3))
     vcp_min_contractions: int = field(default_factory=lambda: _i("V6_VCP_MIN_CONTRACTIONS", 2))
     vcp_shrink_ratio: float = field(default_factory=lambda: _f("V6_VCP_SHRINK_RATIO", 0.85))
-    vcp_final_depth_max: float = field(default_factory=lambda: _f("V6_VCP_FINAL_DEPTH_MAX", 0.12))
+    # ★2026-08-06改訂: 0.12 → 0.065。
+    # 根拠: VCPのエントリーはピボット(ベース上限)、ストップは直近スイング安値-0.5ATR。
+    # つまり「最終収縮の深さ + 0.5ATR」がそのままストップ幅になる。ところがミネルヴィニの
+    # 8%上限(hard_stop_pct=0.92)があるため、最終収縮が約6.5%を超えるVCPは
+    # build_risk_planで「構造ストップが8%より深い」として全件棄却されていた。
+    # 12%のまま運用すると、仕様書が「最優先」としたVCPが事実上ほぼ点灯しない
+    # (本番2026-08-06の通知3件が全て押し目だった原因)。
+    # 検出段階で8%ストップに収まる範囲に絞ることで、点灯したVCPが棄却されずに通るようにする。
+    vcp_final_depth_max: float = field(default_factory=lambda: _f("V6_VCP_FINAL_DEPTH_MAX", 0.065))
     vcp_vol_dry_ratio: float = field(default_factory=lambda: _f("V6_VCP_VOL_DRY_RATIO", 0.80))
     vcp_base_min_days: int = field(default_factory=lambda: _i("V6_VCP_BASE_MIN_DAYS", 15))
     vcp_base_max_days: int = field(default_factory=lambda: _i("V6_VCP_BASE_MAX_DAYS", 130))
