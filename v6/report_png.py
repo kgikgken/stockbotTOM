@@ -39,19 +39,53 @@ CARD_W = W - 2 * MARGIN
 STAGE_W_NAMES = {1: "底固め", 2: "上昇期", 3: "天井圏", 4: "下降期"}
 
 
+# ★2026-08: 日本語フォントが見つからないと、PILがCJK非対応の代替フォントに落ちて
+# 日本語だけ「豆腐(□)」になる事故があった(2026-08-06、本番で発覚)。英数字は
+# 正常に見えるため気づきにくい。cfg.font_pathが見つからない場合に備え、Ubuntu/Debian
+# でよく使われる複数のインストール先を順に試す保険を入れる。
+_FALLBACK_REG = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto-cjk/NotoSansCJK-Regular.ttc",
+]
+_FALLBACK_BOLD = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto-cjk/NotoSansCJK-Bold.ttc",
+]
+
+
 class F:
     def __init__(self, cfg):
         self._cache = {}
         self.reg = cfg.font_path
         self.bold = cfg.font_path_bold
+        self.warned = False
+
+    def _load(self, path: str, size: int):
+        candidates = [path] + (_FALLBACK_BOLD if path == self.bold else _FALLBACK_REG)
+        for p in candidates:
+            try:
+                return ImageFont.truetype(p, size, index=0), p
+            except Exception:
+                continue
+        return None, None
 
     def __call__(self, size: int, bold: bool = False):
         key = (size, bold)
         if key not in self._cache:
-            try:
-                self._cache[key] = ImageFont.truetype(self.bold if bold else self.reg, size, index=0)
-            except Exception:
-                self._cache[key] = ImageFont.load_default()
+            path = self.bold if bold else self.reg
+            font, used = self._load(path, size)
+            if font is None:
+                if not self.warned:
+                    print("[warn] 日本語フォントが1つも見つからない。"
+                          "PNGの日本語が文字化けする可能性がある。"
+                          "GitHub Actionsなら fonts-noto-cjk のインストールを確認すること。")
+                    self.warned = True
+                font = ImageFont.load_default()
+            self._cache[key] = font
         return self._cache[key]
 
 
