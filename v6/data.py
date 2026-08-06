@@ -70,7 +70,15 @@ def _fetch_ohlcv_real(tickers: List[str], history_days: int,
         include_today = now_jst >= market_close   # 引け後なら今日の足も確定済みとして使う
 
         def _clean(df):
+            # ★2026-08-07: dropna(how="all")は「全列がNaNの行」しか消さないため、
+            # Closeだけ欠損した行が残っていた。NaNは比較すると常にFalseになるので、
+            # 後段の「close <= pivot なら見送り」等のガードを全て素通りし、
+            # nan% のまま候補として通知される事故が起きた(ヤマハ発動機・本番)。
+            # 価格4本値が1つでも欠けている行はここで落とし、以降にNaNを持ち込まない。
             df = df.dropna(how="all")
+            for col in ("Open", "High", "Low", "Close"):
+                if col in df.columns:
+                    df = df[df[col].notna()]
             if len(df) == 0:
                 return df
             idx = df.index.tz_localize(None) if getattr(df.index, "tz", None) is not None else df.index
