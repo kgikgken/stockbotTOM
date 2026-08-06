@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -205,12 +207,19 @@ def detect_pivot_breakout(daily: pd.DataFrame, cfg) -> dict | None:
 
     # ピボット = 直近の確定スイング高値(当日を含まない)
     pivot = float(highs[-1]["price"])
-    close_now = float(daily["Close"].iloc[-1])
+    c_ok = daily["Close"].dropna()
+    if len(c_ok) == 0:
+        return None
+    close_now = float(c_ok.iloc[-1])
+    # ★NaN/異常値のガード。NaNは比較が常にFalseになり以降のガードを素通りするため、
+    # 数値として妥当であることを明示的に確認してから先へ進める(2026-08-07)。
+    if not (math.isfinite(close_now) and math.isfinite(pivot) and pivot > 0):
+        return None
     if close_now <= pivot:
         return None
 
     ext = (close_now - pivot) / pivot
-    if ext > cfg.pivot_max_extension:
+    if not math.isfinite(ext) or ext > cfg.pivot_max_extension:
         return None   # 追いかけない
 
     v = daily["Volume"].dropna()
@@ -220,7 +229,7 @@ def detect_pivot_breakout(daily: pd.DataFrame, cfg) -> dict | None:
         return None
 
     hi, lo = float(daily["High"].iloc[-1]), float(daily["Low"].iloc[-1])
-    if hi <= lo:
+    if not (math.isfinite(hi) and math.isfinite(lo)) or hi <= lo:
         return None
     if close_now < (hi - lo) * cfg.pivot_close_position + lo:
         return None   # 当日の終値が高値圏にない
