@@ -18,6 +18,7 @@ from v6.config import load_config_v6
 from v6.pipeline import run_pipeline
 from v6.exits import evaluate_exit
 from v6.notify import build_notification
+from v6.report_png import render_png, render_summary_png
 
 from v6.data import fetch_ohlcv
 from v6.universe import load_universe
@@ -155,7 +156,27 @@ def main() -> dict:
     text = build_notification(res, exits, today, cfg)
     (outdir / f"v6_report_{today}.txt").write_text(text, encoding="utf-8")
 
-    result = send_line(text)
+    # ★2026-08 追加: v5と同じく画像を主配信にする(テキストは画像が両方失敗した時の保険)。
+    png_path = str(outdir / f"v6_report_{today}.png")
+    sum_path = str(outdir / f"v6_summary_{today}.png")
+    images = []
+    try:
+        render_png(png_path, today, res, exits, cfg)
+        images.append(png_path)
+    except Exception:
+        print("[warn] メインPNG生成失敗")
+        traceback.print_exc()
+    try:
+        render_summary_png(sum_path, today, res, cfg)
+        images.append(sum_path)
+    except Exception:
+        print("[warn] まとめPNG生成失敗")
+        traceback.print_exc()
+
+    if images:
+        result = send_line("", image_paths=images)
+    else:
+        result = send_line(text)
     print(f"      LINE: {result}")
     return {"ok": True, "picked": c["layer5"], "line": result}
 
