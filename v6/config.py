@@ -95,6 +95,11 @@ class ConfigV6:
     pivot_vol_mult: float = field(default_factory=lambda: _f("V6_PIVOT_VOL_MULT", 1.5))
     pivot_max_extension: float = field(default_factory=lambda: _f("V6_PIVOT_MAX_EXT", 0.03))
     pivot_close_position: float = field(default_factory=lambda: _f("V6_PIVOT_CLOSE_POS", 0.6))
+    # ★ベース(ピボット〜直近スイング安値)の深さ上限。2026-08-07追加。
+    # 8%ストップ上限(hard_stop_pct)と整合させるための条件。これが無いと深いベースの
+    # ブレイクが検出されてもリスク計算で必ず棄却され、ピボットが機能しない。
+    # 0.5ATRの緩衝を考慮し、8%より少し内側の6.5%に置く(VCPの最終収縮上限と同じ考え方)。
+    pivot_base_depth_max: float = field(default_factory=lambda: _f("V6_PIVOT_BASE_DEPTH_MAX", 0.065))
 
     # ---- Layer 5: 執行(LoK) ----
     entry_stop_buy_mult: float = field(default_factory=lambda: _f("V6_ENTRY_STOP_BUY_MULT", 1.001))
