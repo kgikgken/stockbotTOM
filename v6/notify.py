@@ -31,6 +31,10 @@ def build_notification(res: dict, exits: list, today: str, cfg) -> str:
     bs = c.get("by_setup") or {}
     if bs:
         ap("　点灯内訳: " + " / ".join(f"{k}{v}" for k, v in bs.items()))
+    vd = c.get("vcp_diag") or {}
+    if vd and not bs.get("VCP"):
+        top = sorted(vd.items(), key=lambda x: -x[1])[:3]
+        ap("　VCP不成立の主因: " + " / ".join(f"{k}{v}" for k, v in top))
     drops = res.get("drops") or []
     if drops:
         by_reason = {}
