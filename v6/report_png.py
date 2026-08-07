@@ -263,6 +263,10 @@ def render_png(outpath: str, today: str, res: dict, exits: list, cfg) -> str:
     bs = counts.get("by_setup") or {}
     if bs:
         lines.append(("点灯内訳: " + " / ".join(f"{k}{v}" for k, v in bs.items()), 15, SUB, False))
+    vd = counts.get("vcp_diag") or {}
+    if vd and not bs.get("VCP"):
+        top = sorted(vd.items(), key=lambda x: -x[1])[:3]
+        lines.append(("VCP不成立の主因: " + " / ".join(f"{k}{v}" for k, v in top), 14, SUB, False))
     drops = res.get("drops") or []
     if drops:
         by_reason = {}
