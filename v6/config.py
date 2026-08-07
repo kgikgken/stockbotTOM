@@ -69,15 +69,14 @@ class ConfigV6:
     vcp_swing_min_bars: int = field(default_factory=lambda: _i("V6_VCP_SWING_MIN_BARS", 3))
     vcp_min_contractions: int = field(default_factory=lambda: _i("V6_VCP_MIN_CONTRACTIONS", 2))
     vcp_shrink_ratio: float = field(default_factory=lambda: _f("V6_VCP_SHRINK_RATIO", 0.85))
-    # ★2026-08-06改訂: 0.12 → 0.065。
-    # 根拠: VCPのエントリーはピボット(ベース上限)、ストップは直近スイング安値-0.5ATR。
-    # つまり「最終収縮の深さ + 0.5ATR」がそのままストップ幅になる。ところがミネルヴィニの
-    # 8%上限(hard_stop_pct=0.92)があるため、最終収縮が約6.5%を超えるVCPは
-    # build_risk_planで「構造ストップが8%より深い」として全件棄却されていた。
-    # 12%のまま運用すると、仕様書が「最優先」としたVCPが事実上ほぼ点灯しない
-    # (本番2026-08-06の通知3件が全て押し目だった原因)。
-    # 検出段階で8%ストップに収まる範囲に絞ることで、点灯したVCPが棄却されずに通るようにする。
-    vcp_final_depth_max: float = field(default_factory=lambda: _f("V6_VCP_FINAL_DEPTH_MAX", 0.065))
+    # 仕様書§6-Aの定義値(0.12)。
+    # ※2026-08-06に一度0.065へ下げたが、2026-08-07に仕様書の定義へ差し戻した。
+    # 経緯: 最終収縮が深いVCPは、8%ストップ上限(§8-1)により棄却される。これを
+    # 「VCPが点灯しない不具合」と捉えて上限を下げたが、仕様書§8-1は
+    # 「構造ストップが8%より深い銘柄は、そもそもリスクリワードが成立していないため棄却する。
+    # ストップを緩めて無理に取りにいかない」と明記しており、棄却されること自体が
+    # 意図された動作である。検出側を絞るのは仕様外の介入だったため元に戻した。
+    vcp_final_depth_max: float = field(default_factory=lambda: _f("V6_VCP_FINAL_DEPTH_MAX", 0.12))
     vcp_vol_dry_ratio: float = field(default_factory=lambda: _f("V6_VCP_VOL_DRY_RATIO", 0.80))
     vcp_base_min_days: int = field(default_factory=lambda: _i("V6_VCP_BASE_MIN_DAYS", 15))
     vcp_base_max_days: int = field(default_factory=lambda: _i("V6_VCP_BASE_MAX_DAYS", 130))
@@ -95,11 +94,7 @@ class ConfigV6:
     pivot_vol_mult: float = field(default_factory=lambda: _f("V6_PIVOT_VOL_MULT", 1.5))
     pivot_max_extension: float = field(default_factory=lambda: _f("V6_PIVOT_MAX_EXT", 0.03))
     pivot_close_position: float = field(default_factory=lambda: _f("V6_PIVOT_CLOSE_POS", 0.6))
-    # ★ベース(ピボット〜直近スイング安値)の深さ上限。2026-08-07追加。
-    # 8%ストップ上限(hard_stop_pct)と整合させるための条件。これが無いと深いベースの
-    # ブレイクが検出されてもリスク計算で必ず棄却され、ピボットが機能しない。
-    # 0.5ATRの緩衝を考慮し、8%より少し内側の6.5%に置く(VCPの最終収縮上限と同じ考え方)。
-    pivot_base_depth_max: float = field(default_factory=lambda: _f("V6_PIVOT_BASE_DEPTH_MAX", 0.065))
+
 
     # ---- Layer 5: 執行(LoK) ----
     entry_stop_buy_mult: float = field(default_factory=lambda: _f("V6_ENTRY_STOP_BUY_MULT", 1.001))
