@@ -199,8 +199,9 @@ def run_pipeline(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
     # 後段のリスク判定で棄却されたのかを切り分けるために必要。
     l4 = []
     setup_counts = {SETUP_VCP: 0, SETUP_PULL: 0, SETUP_PIVOT: 0}
+    vcp_diag: dict = {}
     for it in l3:
-        su = detect_setup(it["df"], it["stage_d"], cfg)
+        su = detect_setup(it["df"], it["stage_d"], cfg, vcp_diag)
         if su is None:
             continue
         setup_counts[su["setup"]] = setup_counts.get(su["setup"], 0) + 1
@@ -208,6 +209,7 @@ def run_pipeline(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
         l4.append(it)
     counts["layer4"] = len(l4)
     counts["by_setup"] = setup_counts
+    counts["vcp_diag"] = vcp_diag
 
     # ---- Layer 5: 執行価格・リスク計算・ポートフォリオ制約 ----
     heat = portfolio_heat(positions, equity)
