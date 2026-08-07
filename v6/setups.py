@@ -58,17 +58,25 @@ def _alternate(swings: list) -> list:
 
 # ============ 4-A. VCP(ミネルヴィニ・最優先) ============
 
-def detect_vcp(daily: pd.DataFrame, cfg) -> dict | None:
+def detect_vcp(daily: pd.DataFrame, cfg, diag: dict | None = None) -> dict | None:
     """収縮の連鎖(Volatility Contraction Pattern)を検出する。
 
     値幅の収縮だけでなく、出来高が枯れていること(供給が尽きたこと)を必須とする。
     仕様書§6-A: 出来高条件が最重要で、値幅収縮だけで通すと精度が大きく落ちる。
+
+    diag: 与えられると、どの条件で落ちたかを集計する(本番でVCPが0件だった原因を
+    特定するため。2026-08-07追加)。
     """
-    if len(daily) < cfg.vcp_lookback + 10:
+    def _no(reason):
+        if diag is not None:
+            diag[reason] = diag.get(reason, 0) + 1
         return None
+
+    if len(daily) < cfg.vcp_lookback + 10:
+        return _no("履歴不足")
     sw = _alternate(find_swings(daily, cfg.vcp_lookback, cfg.vcp_swing_min_bars))
     if len(sw) < 3:
-        return None
+        return _no("スイング3個未満")
 
     # 高値→安値のペアから収縮率を作る
     contractions = []
@@ -81,36 +89,36 @@ def detect_vcp(daily: pd.DataFrame, cfg) -> dict | None:
                 contractions.append(depth)
                 marks.append((a, b))
     if len(contractions) < cfg.vcp_min_contractions:
-        return None
+        return _no("収縮が2回未満")
 
     # 各回が前回の shrink_ratio 以下(=段階的に収縮している)
     shrinking = all(contractions[i + 1] < contractions[i] * cfg.vcp_shrink_ratio
                     for i in range(len(contractions) - 1))
     if not shrinking:
-        return None
+        return _no("段階的に収縮していない")
     if contractions[-1] > cfg.vcp_final_depth_max:
-        return None
+        return _no(f"最終収縮が{cfg.vcp_final_depth_max*100:.1f}%超")
 
     # 出来高の枯渇(最重要条件)
     v = daily["Volume"].dropna()
     if len(v) < 50:
-        return None
+        return _no("出来高履歴不足")
     vol_ma5 = float(v.iloc[-5:].mean())
     vol_ma50 = float(v.iloc[-50:].mean())
     if vol_ma50 <= 0 or vol_ma5 >= vol_ma50 * cfg.vcp_vol_dry_ratio:
-        return None
+        return _no("出来高が枯れていない")
 
     # 日柄(ロット): ベース形成日数
     base_start_idx = marks[0][0]["idx"]
     d = daily.iloc[-cfg.vcp_lookback:] if len(daily) > cfg.vcp_lookback else daily
     base_len = len(d) - base_start_idx
     if not (cfg.vcp_base_min_days <= base_len <= cfg.vcp_base_max_days):
-        return None
+        return _no("ベース日数が範囲外")
 
     # ピボット価格 = ベース内の直近スイング高値
     highs = [s["price"] for s in sw if s["kind"] == "H"]
     if not highs:
-        return None
+        return _no("高値なし")
     pivot = float(max(highs[-2:]))   # 直近2つの高値のうち高い方(ベース上限)
 
     return {
@@ -222,6 +230,20 @@ def detect_pivot_breakout(daily: pd.DataFrame, cfg) -> dict | None:
     if not math.isfinite(ext) or ext > cfg.pivot_max_extension:
         return None   # 追いかけない
 
+    # ★ベースのタイトさを要求する(2026-08-07追加)。
+    # ピボットは「ベース上限で買い、直近スイング安値にストップを置く」ため、
+    # ベースが深いほどストップ幅がそのまま広がる。ミネルヴィニの8%上限があるので、
+    # 深いベースのブレイクは build_risk_plan で必ず棄却されていた
+    # (本番2026-08-07: 検出4件が全て8%超で棄却=ピボットが機能していなかった)。
+    # 本人の手法もタイトなベースのみを買うことでこの整合を取っているため、
+    # 検出段階でベースの深さを制限し、通った分は棄却されずに通るようにする。
+    base_low = float(lows[-1]["price"])
+    if pivot <= 0 or base_low <= 0:
+        return None
+    base_depth = (pivot - base_low) / pivot
+    if not math.isfinite(base_depth) or base_depth > cfg.pivot_base_depth_max:
+        return None
+
     v = daily["Volume"].dropna()
     if len(v) < 50:
         return None
@@ -238,6 +260,7 @@ def detect_pivot_breakout(daily: pd.DataFrame, cfg) -> dict | None:
         "setup": SETUP_PIVOT,
         "pivot": pivot,
         "extension": round(ext, 4),
+        "base_depth": round(base_depth, 4),
         "vol_ratio": round(float(v.iloc[-1]) / float(v.iloc[-50:].mean()), 2),
         "recent_swing_low": float(lows[-1]["price"]),
     }
@@ -245,9 +268,9 @@ def detect_pivot_breakout(daily: pd.DataFrame, cfg) -> dict | None:
 
 # ============ 統合 ============
 
-def detect_setup(daily: pd.DataFrame, stage_d: int, cfg) -> dict | None:
+def detect_setup(daily: pd.DataFrame, stage_d: int, cfg, diag: dict | None = None) -> dict | None:
     """優先順位 VCP > 押し目 > ピボット で1つだけ返す。"""
-    r = detect_vcp(daily, cfg)
+    r = detect_vcp(daily, cfg, diag)
     if r:
         return r
     r = detect_pullback(daily, stage_d, cfg)
