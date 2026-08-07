@@ -78,11 +78,25 @@ def detect_vcp(daily: pd.DataFrame, cfg, diag: dict | None = None) -> dict | Non
     if len(sw) < 3:
         return _no("スイング3個未満")
 
-    # 高値→安値のペアから収縮率を作る
+    # ★2026-08-07修正: ベースの起点を特定し、そこ以降のスイングだけで収縮を測る。
+    # 従来は130日窓の全スイングを対象にしていたため、ベース形成前の値動きや
+    # ノイズまで収縮列に含まれ(検証では平均12.3回)、「全ての収縮が単調減少」を
+    # 満たすことが事実上不可能だった(本番で119銘柄が全てこの条件で脱落)。
+    # VCPは本来「ベースの中での収縮の連鎖」を指すため、ベース高値以降に限定するのが
+    # 手法の定義に忠実。
+    highs_all = [x for x in sw if x["kind"] == "H"]
+    if not highs_all:
+        return _no("高値なし")
+    base_high = max(highs_all, key=lambda x: x["price"])
+    sw_base = [x for x in sw if x["idx"] >= base_high["idx"]]
+    if len(sw_base) < 3:
+        return _no("ベース内のスイングが3個未満")
+
+    # 高値→安値のペアから収縮率を作る(ベース内のみ)
     contractions = []
     marks = []
-    for i in range(len(sw) - 1):
-        a, b = sw[i], sw[i + 1]
+    for i in range(len(sw_base) - 1):
+        a, b = sw_base[i], sw_base[i + 1]
         if a["kind"] == "H" and b["kind"] == "L" and a["price"] > 0:
             depth = (a["price"] - b["price"]) / a["price"]
             if depth > 0:
@@ -116,10 +130,10 @@ def detect_vcp(daily: pd.DataFrame, cfg, diag: dict | None = None) -> dict | Non
         return _no("ベース日数が範囲外")
 
     # ピボット価格 = ベース内の直近スイング高値
-    highs = [s["price"] for s in sw if s["kind"] == "H"]
+    highs = [s["price"] for s in sw_base if s["kind"] == "H"]
     if not highs:
         return _no("高値なし")
-    pivot = float(max(highs[-2:]))   # 直近2つの高値のうち高い方(ベース上限)
+    pivot = float(max(highs))        # ベース上限
 
     return {
         "setup": SETUP_VCP,
@@ -129,8 +143,8 @@ def detect_vcp(daily: pd.DataFrame, cfg, diag: dict | None = None) -> dict | Non
         "final_depth": round(contractions[-1], 4),
         "vol_ratio": round(vol_ma5 / vol_ma50, 3),
         "base_days": base_len,
-        "swing_low": float(min(s["price"] for s in sw if s["kind"] == "L")),
-        "recent_swing_low": float([s["price"] for s in sw if s["kind"] == "L"][-1]),
+        "swing_low": float(min(s["price"] for s in sw_base if s["kind"] == "L")),
+        "recent_swing_low": float([s["price"] for s in sw_base if s["kind"] == "L"][-1]),
     }
 
 
@@ -230,19 +244,12 @@ def detect_pivot_breakout(daily: pd.DataFrame, cfg) -> dict | None:
     if not math.isfinite(ext) or ext > cfg.pivot_max_extension:
         return None   # 追いかけない
 
-    # ★ベースのタイトさを要求する(2026-08-07追加)。
-    # ピボットは「ベース上限で買い、直近スイング安値にストップを置く」ため、
-    # ベースが深いほどストップ幅がそのまま広がる。ミネルヴィニの8%上限があるので、
-    # 深いベースのブレイクは build_risk_plan で必ず棄却されていた
-    # (本番2026-08-07: 検出4件が全て8%超で棄却=ピボットが機能していなかった)。
-    # 本人の手法もタイトなベースのみを買うことでこの整合を取っているため、
-    # 検出段階でベースの深さを制限し、通った分は棄却されずに通るようにする。
+    # ※ベースの深さによる足切りは行わない(仕様書§6-Cに無い条件のため)。
+    # 深いベースのブレイクはストップ幅が8%を超え、§8-1の規定により
+    # build_risk_plan で棄却される。棄却されること自体が意図された動作であり、
+    # 検出側で先回りして絞るのは仕様外の介入になる。
     base_low = float(lows[-1]["price"])
-    if pivot <= 0 or base_low <= 0:
-        return None
-    base_depth = (pivot - base_low) / pivot
-    if not math.isfinite(base_depth) or base_depth > cfg.pivot_base_depth_max:
-        return None
+    base_depth = (pivot - base_low) / pivot if (pivot > 0 and base_low > 0) else None
 
     v = daily["Volume"].dropna()
     if len(v) < 50:
@@ -260,7 +267,7 @@ def detect_pivot_breakout(daily: pd.DataFrame, cfg) -> dict | None:
         "setup": SETUP_PIVOT,
         "pivot": pivot,
         "extension": round(ext, 4),
-        "base_depth": round(base_depth, 4),
+        "base_depth": (round(base_depth, 4) if base_depth is not None else None),
         "vol_ratio": round(float(v.iloc[-1]) / float(v.iloc[-50:].mean()), 2),
         "recent_swing_low": float(lows[-1]["price"]),
     }
