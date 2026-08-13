@@ -1,1 +1,39 @@
+name: v7-verify-level1
 
+# v7.1 Level 1（独立性の検証）を手動で回す。
+# 仕様書§11.1「Level 1 が失敗すれば以降は無意味。順序を守ること」
+# 仕様書§13.1「Phase 4 を飛ばさない。最も安価に反証できる時点で反証を試みる」
+#
+# dimension_scores.csv は v7.yml が毎日コミットして蓄積する。
+# サンプルが30件を超えたあたりから判定に意味が出る。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Run Level 1 verification
+        run: |
+          python verify_level1.py out_v7/dimension_scores.csv | tee level1_report.txt
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: level1-report
+          path: level1_report.txt
+          if-no-files-found: warn
