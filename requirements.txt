@@ -6,3 +6,5 @@ yfinance>=0.2.40
 
 # PNG infographic (Noto Sans CJK JP required at OS level)
 Pillow>=10.0
+
+scipy>=1.11
