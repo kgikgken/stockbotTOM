@@ -176,6 +176,10 @@ def run_pipeline(universe: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
     return {
         "regime": regime, "dd": dd, "counts": counts,
         "main": main[: cfg.max_output], "watch": watch[: cfg.max_watch_output],
+        "all_scored": cands,  # L1通過・採点済みの全件(本命/監視/除外を問わない)。
+                              # Phase 2ヒストグラムとLevel1独立性検定はこの母集団で行う必要がある。
+                              # main/watchはmax_output等で切られた表示用の部分集合であり、
+                              # そこから統計を取ると選抜バイアス(コライダー)が乗る。
         "drops": drops, "halted": False,
         "enabled_dims": enabled,
         "asof": {"dcs": dcs_asof, "price": price_asof, "regime": regime.get("asof")},
