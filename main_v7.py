@@ -87,8 +87,13 @@ def main() -> dict:
           f"→本命:{c['main']}/監視:{c['watch']}")
 
     # ---- 次元スコアの分布を保存(Phase 2のヒストグラム確認用・§4.2.1) ----
+    # res["main"]/res["watch"]は表示用に上位max_output/max_watch_output件へ
+    # 切られた部分集合。ここから保存すると本命/監視への選抜バイアスが乗り、
+    # Phase 2のヒストグラムもverify_level1.pyの独立性検定も歪む(選抜条件が
+    # 5次元の和と相関するコライダーになるため)。L1通過・採点済みの全件(除外含む)
+    # であるall_scoredを使う。
     rows = []
-    for cand in (res["main"] + res["watch"]):
+    for cand in res.get("all_scored", []):
         r = {"date": today, "code": cand.code, "name": cand.name,
              "sector": cand.sector, "dcs": round(cand.dcs, 2),
              "coverage": round(cand.coverage, 3), "category": cand.category}
