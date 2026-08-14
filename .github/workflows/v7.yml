@@ -18,6 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug - check files
+        run: |
+          echo "=== ルート直下 ==="
+          ls -la
+          echo "=== v7フォルダの中身 ==="
+          ls -la v7/ 2>&1
+          echo "=== main_v7.pyの有無 ==="
+          ls -la main_v7.py 2>&1
+          echo "=== 現在の作業ディレクトリ ==="
+          pwd
+          echo "=== Pythonが認識するsys.path ==="
+          python3 -c "import sys; print('\n'.join(sys.path))" 2>&1 || echo "python3コマンド無し(次のsetup-pythonで入る)"
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
