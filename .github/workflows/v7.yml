@@ -20,8 +20,11 @@ jobs:
 
       - name: Debug - check files
         run: |
+          set +e
           echo "=== ルート直下 ==="
           ls -la
+          echo "=== ルート直下のファイル名バイト確認 ==="
+          python3 -c "import os; [print(repr(n), [hex(ord(c)) for c in n]) for n in os.listdir('.')]"
           echo "=== v7フォルダの中身 ==="
           ls -la v7/ 2>&1
           echo "=== main_v7.pyの有無 ==="
