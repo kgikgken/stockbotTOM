@@ -35,8 +35,10 @@ def fetch_index(cfg) -> pd.DataFrame | None:
     """
     if cfg.dryrun:
         import numpy as np
-        n = 500
-        idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=n)
+        # bdate_rangeはendが非営業日(土日)だと、periods指定より1件少なく返す
+        # ことがある(pandas 3.0.2で確認)。nをbdate_range側の実件数に合わせる。
+        idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=500)
+        n = len(idx)
         p = np.linspace(2000, 2900, n)
         return pd.DataFrame({"Open": p, "High": p * 1.01, "Low": p * 0.99,
                              "Close": p, "Volume": np.full(n, 1e9)}, index=idx)
@@ -99,6 +101,13 @@ def main() -> dict:
              "coverage": round(cand.coverage, 3), "category": cand.category}
         for d, v in cand.dims.items():
             r[f"dim{d}"] = None if v is None else round(v, 4)
+        # サブ指標(4-a等)。次元合成値だけでは「何が足を引っ張っているか」が
+        # 分からないため、Phase 2の較正判断(§13)にはこの粒度が要る。
+        # 銘柄によって base 未検出等で欠けるキーがあるため、DataFrame化の際は
+        # 全銘柄のキー和集合で列が作られ、無い銘柄はNaNになる(想定通り)。
+        for _, parts in cand.parts.items():
+            for key, val in parts.items():
+                r[f"part_{key}"] = None if val is None else round(val, 4)
         r["missing"] = ",".join(str(d) for d in cand.missing)
         rows.append(r)
     if rows:
