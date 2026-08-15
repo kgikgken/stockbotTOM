@@ -78,7 +78,17 @@ jobs:
           for f in out_v7/dimension_scores.csv ; do
             [ -f "$f" ] && git add "$f" || echo "skip (not present): $f"
           done
+          # 日付別の履歴。手順5(局面別・60営業日以上)と将来の前向き検証に要る。
+          if [ -d out_v7/history ]; then
+            git add out_v7/history
+          else
+            echo "skip (not present): out_v7/history"
+          fi
           git diff --cached --quiet || git commit -m "v7: $(date -u +%F)"
+          # 元は `git push || echo "push skipped"` で失敗を全て握り潰していた。
+          # これだとRun v7が落ちてCSVが更新されなくても本ステップは常に緑になり、
+          # 「更新されない」原因を特定できなかった。手動再実行が重なった時の
+          # 競合だけは1回リトライで拾い、それでも失敗すれば赤にする。
           if ! git push; then
             git pull --rebase && git push
           fi
