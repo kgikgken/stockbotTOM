@@ -79,7 +79,9 @@ jobs:
             [ -f "$f" ] && git add "$f" || echo "skip (not present): $f"
           done
           git diff --cached --quiet || git commit -m "v7: $(date -u +%F)"
-          git push || echo "push skipped"
+          if ! git push; then
+            git pull --rebase && git push
+          fi
 
       - name: Upload artifacts
         if: always()
