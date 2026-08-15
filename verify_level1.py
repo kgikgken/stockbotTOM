@@ -67,13 +67,23 @@ def check_sample_size(df: pd.DataFrame) -> bool:
 
 
 def pairwise_correlation(df: pd.DataFrame) -> pd.DataFrame:
-    """手順2: 次元間のペアワイズ順位相関（スピアマン）。"""
+    """手順2: 次元間のペアワイズ順位相関（スピアマン）。
+
+    ★行単位のdropnaをしてはいけない。
+      ある次元(例:④)が一部の銘柄でのみ測定可能な場合、行単位で落とすと
+      「④が測れる銘柄」だけの選抜済み標本になり、④と無関係な①②間の相関まで
+      値域制限(range restriction)で減衰する。実際に④をNone化した際、
+      ①②のスコアが一切変わっていないのにρ(①,②)が0.651→0.383へ動いた。
+      pandasのcorrは既定でペアワイズ完全観測なので、dropnaを挟まずに渡す。
+      その代わり、ペアごとに有効件数が異なるので必ず併記する。
+    """
     _section("手順2 — ペアワイズ順位相関（|ρ| > 0.7 なら独立でない）")
-    sub = df[DIMS].dropna()
-    if len(sub) < 3:
+    sub = df[DIMS]
+    if sub.notna().sum().max() < 3:
         print("データ不足で算出不可")
         return pd.DataFrame()
     rho = sub.corr(method="spearman")
+    nmat = sub.notna().astype(int).T @ sub.notna().astype(int)
 
     print(f"{'':12}", end="")
     for d in DIMS:
@@ -85,6 +95,18 @@ def pairwise_correlation(df: pd.DataFrame) -> pd.DataFrame:
             v = rho.loc[a, b]
             mark = "*" if (a != b and abs(v) > RHO_THRESHOLD) else " "
             print(f"{v:>9.3f}{mark}", end="")
+        print()
+
+    print()
+    print("ペアごとの有効件数（次元により測定可能な銘柄数が違う）:")
+    print(f"{'':12}", end="")
+    for d in DIMS:
+        print(f"{LABEL[d]:>10}", end="")
+    print()
+    for a in DIMS:
+        print(f"{LABEL[a]:12}", end="")
+        for b in DIMS:
+            print(f"{nmat.loc[a, b]:>10,d}", end="")
         print()
 
     print()
@@ -125,20 +147,30 @@ def priority_check_45(rho: pd.DataFrame, df: pd.DataFrame) -> None:
 
 
 def pca_check(df: pd.DataFrame) -> None:
-    """手順3: 主成分分析。第1主成分の寄与率 > 70% なら次元分解が機能していない。"""
+    """手順3: 主成分分析。第1主成分の寄与率 > 70% なら次元分解が機能していない。
+
+    標準化してから共分散を取る＝相関行列のPCAなので、行単位dropnaで
+    complete-caseに絞る代わりに、手順2と同じペアワイズ完全観測の
+    相関行列を直接分解する。こうすれば①②のように両方揃っている
+    ペアの情報を捨てずに済む。
+    ただしペアワイズ相関行列は半正定値とは限らない(ペアごとに標本が違うため)。
+    負の固有値が出たらその旨を明記する。黙って絶対値を取ったりしない。
+    """
     _section("手順3 — 主成分分析（第1主成分 > 70% なら次元分解が機能していない）")
-    sub = df[DIMS].dropna()
-    if len(sub) < len(DIMS) + 1:
+    sub = df[DIMS]
+    if sub.notna().sum().min() < len(DIMS) + 1:
         print("データ不足で算出不可")
         return
-    X = sub.values.astype(float)
-    # 標準化（分散の大きい次元に引きずられないように）
-    sd = X.std(axis=0, ddof=1)
-    sd[sd == 0] = 1.0
-    Z = (X - X.mean(axis=0)) / sd
     try:
-        cov = np.cov(Z, rowvar=False)
-        vals = np.linalg.eigvalsh(cov)[::-1]
+        corr = sub.corr(method="spearman").values.astype(float)
+        vals = np.linalg.eigvalsh(corr)[::-1]
+        neg = vals[vals < -1e-9]
+        if len(neg):
+            print(f"※負の固有値が {len(neg)} 個（最小 {neg.min():.4f}）。")
+            print("  ペアごとに標本が異なるため相関行列が半正定値になっていない。")
+            print("  寄与率は参考値として読むこと。")
+            print()
+            vals = np.clip(vals, 0.0, None)
         total = vals.sum()
         if total <= 0:
             print("分散がゼロ。算出不可")
@@ -161,22 +193,42 @@ def pca_check(df: pd.DataFrame) -> None:
 
 
 def exclusion_impact(df: pd.DataFrame) -> None:
-    """手順4: 各次元を除外した場合のDCS順位変化。不変なら冗長。"""
+    """手順4: 各次元を除外した場合のDCS順位変化。不変なら冗長。
+
+    ここは手順2・3と違い行単位のdropnaが必要。5次元平均と4次元平均を
+    同じ銘柄で比べる必要があり、欠損があると比較自体が成立しないため。
+    ただしその結果はcomplete-case(全次元が測定可能な銘柄)に限った話なので、
+    件数を明記する。
+
+    ★重要: この順位相関は「独立なら0に近い」種類の指標ではない。
+      DCSは5次元の平均なので、1つ抜いた4次元平均は入力の4/5を共有する。
+      5次元が完全に独立でも順位相関は sqrt(4/5) ≒ 0.894 付近になる。
+      つまり意味のある範囲は 0.89〜1.00 に圧縮されており、
+      素の0.95という値は「95%冗長」ではない。帰無基準を併記する。
+    """
     _section("手順4 — 各次元を除外したときのDCS順位変化（不変なら冗長）")
     sub = df[DIMS].dropna()
     if len(sub) < 5:
         print("データ不足で算出不可")
         return
+    null_base = float(np.sqrt((len(DIMS) - 1) / len(DIMS)))
+    print(f"complete-case {len(sub):,}件で算出（全次元が測定可能な銘柄のみ）")
+    print(f"帰無基準（5次元が完全独立でも到達する値）= {null_base:.3f}")
+    print()
     base_rank = sub.mean(axis=1).rank(ascending=False)
-    print(f"{'除外した次元':16}{'順位相関':>10}   判定")
+    print(f"{'除外した次元':16}{'順位相関':>10}{'冗長側へ':>10}   判定")
     for d in DIMS:
         rest = [x for x in DIMS if x != d]
         r = sub[rest].mean(axis=1).rank(ascending=False)
         tau = base_rank.corr(r, method="spearman")
+        # 帰無基準(独立)から1.0(完全冗長)までの何%地点にいるか
+        pos = (tau - null_base) / (1.0 - null_base) * 100
         verdict = "★冗長の疑い" if tau > 0.99 else ("要注意" if tau > 0.95 else "情報あり")
-        print(f"{LABEL[d]:16}{tau:>10.4f}   {verdict}")
+        print(f"{LABEL[d]:16}{tau:>10.4f}{pos:>9.0f}%   {verdict}")
     print()
     print("順位相関が1.00に近いほど、その次元を外しても並びが変わらない＝冗長。")
+    print(f"「冗長側へ」は帰無基準{null_base:.3f}を0%、完全冗長1.000を100%とした位置。")
+    print("マイナスなら、独立な次元が示すより強く順位に効いている。")
 
 
 def by_regime(df: pd.DataFrame) -> None:
@@ -194,18 +246,22 @@ def by_regime(df: pd.DataFrame) -> None:
     dates = sorted(df["date"].unique())
     thirds = np.array_split(np.array(dates), 3)
     for i, block in enumerate(thirds, 1):
-        seg = df[df["date"].isin(block)][DIMS].dropna()
-        if len(seg) < MIN_SAMPLES:
-            print(f"期間{i}: n={len(seg)} 不足")
+        # 手順2と同じ理由で行単位dropnaはしない(ペアワイズ完全観測)。
+        seg = df[df["date"].isin(block)][DIMS]
+        n_max = int(seg.notna().sum().max())
+        if n_max < MIN_SAMPLES:
+            print(f"期間{i}: n={n_max} 不足")
             continue
         rho = seg.corr(method="spearman")
+        nmat = seg.notna().astype(int).T @ seg.notna().astype(int)
         mx = 0.0; pair = None
         for a_i, a in enumerate(DIMS):
             for b in DIMS[a_i + 1:]:
                 if abs(rho.loc[a, b]) > abs(mx):
                     mx = rho.loc[a, b]; pair = (a, b)
-        print(f"期間{i}（{block[0]}〜{block[-1]}, n={len(seg)}）"
-              f" 最大相関 {LABEL[pair[0]]}×{LABEL[pair[1]]} ρ={mx:+.3f}")
+        print(f"期間{i}（{block[0]}〜{block[-1]}, n={n_max}）"
+              f" 最大相関 {LABEL[pair[0]]}×{LABEL[pair[1]]} ρ={mx:+.3f}"
+              f" (該当ペアn={nmat.loc[pair[0], pair[1]]:,})")
 
 
 def main(path: str) -> None:
