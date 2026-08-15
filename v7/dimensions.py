@@ -20,6 +20,17 @@ from .core import (sma, atr_wilder, slope_normalized, to_weekly, find_swings,
                    kojiro_stage, kojiro_stage_days)
 
 
+# ④時間に関する定数。
+# D4B_MAX_DAYS: 4-b(200日線超えからの経過日数)の探索上限であり、同時に
+#   peak_scoreのhiでもある。両者は必ず一致していなければならない。
+#   一致していないと、探索上限で頭打ちになった値がhiに到達できず、
+#   宣言レンジの一部が使われないまま死ぬ。
+D4B_MAX_DAYS = 400
+# ④は4項目すべてが揃って初めて意味を持つ(§9.3)。一部欠落のまま平均すると
+# 銘柄間で分母が変わり比較できなくなるため、揃わない場合はNoneを返す。
+D4_REQUIRED_PARTS = ("4-a", "4-b", "4-c", "4-d")
+
+
 # ============================================================
 # ① トレンド方向 — 自己価格系列における上昇トレンドの成立度
 #    証拠: 階層B(時系列モメンタム。日本株個別での直接検証なし)
@@ -271,16 +282,22 @@ def dim4_time(daily: pd.DataFrame, cfg, base: dict | None) -> dict:
 
     # 4-b: 直前の下降局面終了からの経過(ワインスタインStage1相当)
     # 200日線を上抜けてからの経過日数で近似する
+    #
+    # ※修正前はカウント上限が300、peak_scoreのhiが400で食い違っていた。
+    #   カウントが299で頭打ちになるためhi=400には決して到達せず、宣言レンジの
+    #   上位25%が使われない状態だった(長期上昇銘柄は4-b=0.297が天井)。
+    #   両者をD4B_MAX_DAYSで揃える。値そのものの妥当性(何日を「遅すぎ」と
+    #   するか)は別途の設計判断であり、ここでは内部矛盾の解消のみを行う。
     try:
         s200 = sma(c, cfg.d1_ma_long)
         above = (c > s200).astype(int)
         days_since_cross = 0
-        for i in range(1, min(300, len(above))):
+        for i in range(1, min(D4B_MAX_DAYS, len(above))):
             if above.iloc[-i] == 1:
                 days_since_cross += 1
             else:
                 break
-        p["4-b"] = peak_score(days_since_cross, 5, 60, 400)
+        p["4-b"] = peak_score(days_since_cross, 5, 60, D4B_MAX_DAYS)
     except Exception:
         pass
 
@@ -304,7 +321,19 @@ def dim4_time(daily: pd.DataFrame, cfg, base: dict | None) -> dict:
     except Exception:
         pass
 
-    score = float(np.mean(list(p.values()))) if p else None
+    # ④は4項目(4-a〜4-d)の平均として定義される。一部が欠けたまま平均を取ると
+    # 銘柄によって「4項目平均」と「3項目平均」が混在し、④の値が銘柄間で
+    # 比較できなくなる(実測で4-a欠損18.6%)。
+    # ベースが検出できない銘柄は「セットアップが無い」のであり、
+    # 「セットアップの成熟度が低い」のとは意味が違う。低い値を割り当てるのでは
+    # なくNone(測定不能)を返し、カバレッジ判定では未充足として扱わせる。
+    if len(p) < len(D4_REQUIRED_PARTS):
+        lacking = [k for k in D4_REQUIRED_PARTS if k not in p]
+        return {"score": None, "parts": p,
+                "reason": f"測定不能(欠落: {','.join(lacking)})",
+                "meta": {"base_weeks": base.get("weeks") if base else None}}
+
+    score = float(np.mean(list(p.values())))
     return {"score": score, "parts": p, "reason": "",
             "meta": {"base_weeks": base.get("weeks") if base else None}}
 
