@@ -37,11 +37,13 @@ jobs:
 
       - name: Run Level 1 verification
         run: |
+          set -o pipefail
           python verify_level1.py out_v7/dimension_scores.csv | tee level1_report.txt
 
       - name: Run Phase 2 histogram
         run: |
-          python phase2_histogram.py out_v7/dimension_scores.csv | tee phase2_report.txt
+          set -o pipefail
+          python histogram.py out_v7/dimension_scores.csv | tee phase2_report.txt
 
       - name: Upload report
         if: always()
