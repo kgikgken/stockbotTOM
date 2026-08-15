@@ -1,25 +1,52 @@
-name: v7-verify-level1
+name: v7-screen
 
-# v7.1 Level 1（独立性の検証）を手動で回す。
-# 仕様書§11.1「Level 1 が失敗すれば以降は無意味。順序を守ること」
-# 仕様書§13.1「Phase 4 を飛ばさない。最も安価に反証できる時点で反証を試みる」
-#
-# dimension_scores.csv は v7.yml が毎日コミットして蓄積する。
-# サンプルが30件を超えたあたりから判定に意味が出る。
-#
-# Level 1(独立性)に続けてPhase 2(θ較正のためのヒストグラム、仕様書§13)も
-# ここで実行する。両方とも dimension_scores.csv を読むだけの検証で、
-# 実際のスクリーニング(v7.yml)には影響しない。
+# stockbotTOM v7.1 — 次元抽出型スクリーニング(Dimension Coverage Model)。
+# v6は廃止済み。本ワークフローが唯一のスクリーニング。
 
 on:
+  schedule:
+    - cron: "0 22 * * 0-4"    # 7:00 JST 月〜金
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  verify:
+  v7:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v4
+
+      - name: One-time fix - rename v7 directory
+        run: |
+          set -e
+          if [ -d "v7 " ]; then
+            git config user.name "stockbot"
+            git config user.email "stockbot@users.noreply.github.com"
+            git mv "v7 " v7
+            git commit -m "fix: remove trailing space from v7 directory name"
+            git push
+            echo "'v7 ' -> 'v7' にリネームしてpush完了。このまま後続ステップに進みます。"
+          else
+            echo "'v7 '(末尾スペース付き)は存在しません。スキップします。"
+          fi
+
+      - name: Debug - check files
+        run: |
+          set +e
+          echo "=== ルート直下 ==="
+          ls -la
+          echo "=== ルート直下のファイル名バイト確認 ==="
+          python3 -c "import os; [print(repr(n), [hex(ord(c)) for c in n]) for n in os.listdir('.')]"
+          echo "=== v7フォルダの中身 ==="
+          ls -la v7/ 2>&1
+          echo "=== main_v7.pyの有無 ==="
+          ls -la main_v7.py 2>&1
+          echo "=== 現在の作業ディレクトリ ==="
+          pwd
+          echo "=== Pythonが認識するsys.path ==="
+          python3 -c "import sys; print('\n'.join(sys.path))" 2>&1 || echo "python3コマンド無し(次のsetup-pythonで入る)"
 
       - uses: actions/setup-python@v5
         with:
@@ -35,23 +62,35 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y fonts-noto-cjk
 
-      - name: Run Level 1 verification
-        run: |
-          set -o pipefail
-          python verify_level1.py out_v7/dimension_scores.csv | tee level1_report.txt
+      - name: Run v7
+        env:
+          SCREEN_DRYRUN: '0'
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+        run: python main_v7.py
 
-      - name: Run Phase 2 histogram
+      - name: Persist dimension scores
+        if: always()
         run: |
-          set -o pipefail
-          python histogram.py out_v7/dimension_scores.csv | tee phase2_report.txt
+          git config user.name "stockbot"
+          git config user.email "stockbot@users.noreply.github.com"
+          for f in out_v7/dimension_scores.csv ; do
+            [ -f "$f" ] && git add "$f" || echo "skip (not present): $f"
+          done
+          git diff --cached --quiet || git commit -m "v7: $(date -u +%F)"
+          # 元は `git push || echo "push skipped"` で失敗を全て握り潰していた。
+          # これだとRun v7が落ちてCSVが更新されなくても本ステップは常に緑になり、
+          # 「更新されない」原因を特定できなかった。手動再実行が重なった時の
+          # 競合だけは1回リトライで拾い、それでも失敗すれば赤にする。
+          if ! git push; then
+            git pull --rebase && git push
+          fi
 
-      - name: Upload report
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: level1-report
-          path: |
-            level1_report.txt
-            phase2_report.txt
-            out_v7/phase2_histogram.png
+          name: v7-report
+          path: out_v7/
           if-no-files-found: warn
