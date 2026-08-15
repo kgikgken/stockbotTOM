@@ -295,7 +295,7 @@ def dim4_time(daily: pd.DataFrame, cfg, base: dict | None) -> dict:
         p["4-a"] = peak_score(base["weeks"], cfg.d4_base_min_weeks - 2,
                               cfg.d4_base_ideal_weeks, cfg.d4_base_max_weeks)
 
-    # 4-b: 直前の下降局面終了からの経過(ワインスタインStage1相当)
+    # 4-b: 直前の下降局面終了からの経過(ワインスタインStage2の経過日数)。
     # 200日線を上抜けてからの経過日数で近似する。
     #
     # この指標は本質的に上に開いた量(いくらでも長くなりうる)なので、
@@ -307,16 +307,18 @@ def dim4_time(daily: pd.DataFrame, cfg, base: dict | None) -> dict:
     #   1. 飽和点をD4B_MAX_DAYSに固定し、探索上限とhiを同一の定数から引く
     #   2. 測定可能日数(バー数 − SMA200ウォームアップ)が飽和点に満たない
     #      銘柄は、上限に張り付いた値を返さずNone(測定不能)とする
-    # 2がないと、履歴の短い新規上場銘柄などが「上限＝遅すぎ＝0」と誤って
-    # 評価される。データが足りないことと遅すぎることは別である。
+    #   3. 現在200日線より下にある銘柄はNoneとする。「Stage 2に入って
+    #      いない」のは「Stage 2で日柄が悪い」のと違う。ここを区別せず
+    #      0を返すと、「まだ始まっていない」銘柄と「250日超え継続で
+    #      終わりかけ」の銘柄が同じ0.0に潰れ、4-bが情報を失う
+    #      (実測でθ未満の62%がこの0.0に集中していた)。
+    # 2・3が無いと、測れないものに低スコアを割り当てることになる。
+    # データが足りない・状態が違うことと、遅すぎることは別である。
     try:
         s200 = sma(c, cfg.d1_ma_long)
         measurable = len(c) - SMA200_WARMUP
-        if measurable < D4B_MAX_DAYS:
-            # 測定可能範囲が不足。値を作らない(④はD4_REQUIRED_PARTS判定で
-            # Noneになる)。
-            pass
-        else:
+        in_stage2 = c.iloc[-1] > s200.iloc[-1]
+        if measurable >= D4B_MAX_DAYS and in_stage2:
             above = (c > s200).astype(int)
             days_since_cross = 0
             for i in range(1, D4B_MAX_DAYS + 1):
