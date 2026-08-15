@@ -111,9 +111,19 @@ def main() -> dict:
         r["missing"] = ",".join(str(d) for d in cand.missing)
         rows.append(r)
     if rows:
-        pd.DataFrame(rows).to_csv(outdir / "dimension_scores.csv",
-                                  index=False, encoding="utf-8-sig")
-    print(f"[5/6] 次元スコア {len(rows)}件 → dimension_scores.csv")
+        scores_df = pd.DataFrame(rows)
+        scores_df.to_csv(outdir / "dimension_scores.csv",
+                         index=False, encoding="utf-8-sig")
+        # 履歴を日付別ファイルとして蓄積する(§11.2 手順5は60営業日以上、
+        # 将来の前向き検証はDCS基準日と実現リターンの突合を要する)。
+        # 1つの巨大CSVに追記していく方式にしないのは、gitが「毎日書き換わる
+        # 肥大化ファイル」を毎回まるごと保存してしまいリポジトリが膨らむため。
+        # 日付別なら各コミットは新規1ファイルの追加で済み、既存分は再保存されない。
+        histdir = outdir / "history"
+        histdir.mkdir(parents=True, exist_ok=True)
+        scores_df.to_csv(histdir / f"dimension_scores_{today}.csv",
+                         index=False, encoding="utf-8-sig")
+    print(f"[5/6] 次元スコア {len(rows)}件 → dimension_scores.csv (+履歴)")
 
     text = build_notification(res, today, cfg)
     (outdir / f"v7_report_{today}.txt").write_text(text, encoding="utf-8")
