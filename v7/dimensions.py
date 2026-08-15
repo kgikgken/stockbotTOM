@@ -21,11 +21,26 @@ from .core import (sma, atr_wilder, slope_normalized, to_weekly, find_swings,
 
 
 # ④時間に関する定数。
-# D4B_MAX_DAYS: 4-b(200日線超えからの経過日数)の探索上限であり、同時に
-#   peak_scoreのhiでもある。両者は必ず一致していなければならない。
-#   一致していないと、探索上限で頭打ちになった値がhiに到達できず、
-#   宣言レンジの一部が使われないまま死ぬ。
-D4B_MAX_DAYS = 400
+#
+# D4B_MAX_DAYS: 4-b「200日線を上抜けてからの経過日数」の測定上限。探索ループの
+#   上限であり、同時にpeak_scoreのhi(=これ以上は「遅すぎ」として0)でもある。
+#
+#   ★この値は必ず「実際に測定可能な日数」より小さくなければならない。
+#     測定可能日数 = 取得したバー数 − SMA200のウォームアップ(199本)。
+#     ここを超える値を置くと、日数がデータ窓の端で頭打ちになり、
+#     「銘柄の性質」ではなく「取得設定」に依存した値が混入する。
+#     しかもスコアとしては成立してしまうため、誰も気づけない。
+#     (実際にhi=400・探索上限300で運用され、約120銘柄が上限に張り付いていた)
+#
+#   250は「200日線超えから1年強＝十分に遅い」を表す。これ以上細かく
+#   「どれだけ遅いか」を区別する意味は薄いため、250以上は一律0でよい。
+#   history_days=500(≒330〜500バー)に対して十分内側であり、
+#   多少データ長が変動しても定数側が拘束条件であり続ける。
+D4B_MAX_DAYS = 250
+D4B_LO_DAYS = 5        # これ以下は「上抜け直後で未確認」
+D4B_IDEAL_DAYS = 60    # ワインスタインStage2として理想的な経過
+SMA200_WARMUP = 199    # sma(c,200)の先頭NaN本数
+
 # ④は4項目すべてが揃って初めて意味を持つ(§9.3)。一部欠落のまま平均すると
 # 銘柄間で分母が変わり比較できなくなるため、揃わない場合はNoneを返す。
 D4_REQUIRED_PARTS = ("4-a", "4-b", "4-c", "4-d")
@@ -281,23 +296,36 @@ def dim4_time(daily: pd.DataFrame, cfg, base: dict | None) -> dict:
                               cfg.d4_base_ideal_weeks, cfg.d4_base_max_weeks)
 
     # 4-b: 直前の下降局面終了からの経過(ワインスタインStage1相当)
-    # 200日線を上抜けてからの経過日数で近似する
+    # 200日線を上抜けてからの経過日数で近似する。
     #
-    # ※修正前はカウント上限が300、peak_scoreのhiが400で食い違っていた。
-    #   カウントが299で頭打ちになるためhi=400には決して到達せず、宣言レンジの
-    #   上位25%が使われない状態だった(長期上昇銘柄は4-b=0.297が天井)。
-    #   両者をD4B_MAX_DAYSで揃える。値そのものの妥当性(何日を「遅すぎ」と
-    #   するか)は別途の設計判断であり、ここでは内部矛盾の解消のみを行う。
+    # この指標は本質的に上に開いた量(いくらでも長くなりうる)なので、
+    # peak_scoreの有限なhiに通すには必ず飽和点が要る。問題はその飽和点が
+    # 「定数」で決まるか「たまたまのデータ長」で決まるかで、後者だと
+    # 銘柄の性質ではなく取得設定に依存した値が混じる(旧実装がこれだった)。
+    #
+    # そこで:
+    #   1. 飽和点をD4B_MAX_DAYSに固定し、探索上限とhiを同一の定数から引く
+    #   2. 測定可能日数(バー数 − SMA200ウォームアップ)が飽和点に満たない
+    #      銘柄は、上限に張り付いた値を返さずNone(測定不能)とする
+    # 2がないと、履歴の短い新規上場銘柄などが「上限＝遅すぎ＝0」と誤って
+    # 評価される。データが足りないことと遅すぎることは別である。
     try:
         s200 = sma(c, cfg.d1_ma_long)
-        above = (c > s200).astype(int)
-        days_since_cross = 0
-        for i in range(1, min(D4B_MAX_DAYS, len(above))):
-            if above.iloc[-i] == 1:
-                days_since_cross += 1
-            else:
-                break
-        p["4-b"] = peak_score(days_since_cross, 5, 60, D4B_MAX_DAYS)
+        measurable = len(c) - SMA200_WARMUP
+        if measurable < D4B_MAX_DAYS:
+            # 測定可能範囲が不足。値を作らない(④はD4_REQUIRED_PARTS判定で
+            # Noneになる)。
+            pass
+        else:
+            above = (c > s200).astype(int)
+            days_since_cross = 0
+            for i in range(1, D4B_MAX_DAYS + 1):
+                if above.iloc[-i] == 1:
+                    days_since_cross += 1
+                else:
+                    break
+            p["4-b"] = peak_score(days_since_cross, D4B_LO_DAYS,
+                                  D4B_IDEAL_DAYS, D4B_MAX_DAYS)
     except Exception:
         pass
 
