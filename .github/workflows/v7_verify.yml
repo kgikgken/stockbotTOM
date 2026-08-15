@@ -54,4 +54,5 @@ jobs:
             level1_report.txt
             phase2_report.txt
             out_v7/phase2_histogram.png
+            out_v7/dim4_parts.png
           if-no-files-found: warn
