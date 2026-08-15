@@ -9,8 +9,8 @@ Level 1（独立性）が通った後、Phase 2ではθ=0.60という切り方�
 ここで出すのはその判断のための材料（分布・θ近傍の密度）のみ。
 
 使い方:
-    python phase2_histogram.py out_v7/dimension_scores.csv
-    python phase2_histogram.py out_v7/dimension_scores.csv --theta 0.55
+    python histogram.py out_v7/dimension_scores.csv
+    python histogram.py out_v7/dimension_scores.csv --theta 0.55
 """
 
 from __future__ import annotations
