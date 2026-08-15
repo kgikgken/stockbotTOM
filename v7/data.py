@@ -333,13 +333,19 @@ def _synthetic(tickers: List[str]) -> Tuple[Dict[str, pd.DataFrame], dict]:
 
     先頭8銘柄に各パターンを配置し、残りはnormal。
     次元スコアが単一値に固まっていないことを毎回確認できる。
+
+    n=520: ④の4-b(200日線超えからの経過日数)は
+    SMA200のウォームアップ199本 + 測定上限250本 = 449本を要求する。
+    これを下回るとDRYRUNでは④が常にNoneになり、④を含む経路が
+    一切テストされないまま通ってしまう。本番相当(500暦日≒500本超)に
+    合わせて余裕を持たせる。
     """
     modes = ["vcp", "pullback", "pivot", "choppy", "downtrend",
              "pullback", "vcp", "choppy"]
     out: Dict[str, pd.DataFrame] = {}
     for i, t in enumerate(tickers[:60]):
         m = modes[i] if i < len(modes) else "normal"
-        out[t] = _mk_v6(seed=511 + i, n=420, mode=m)
+        out[t] = _mk_v6(seed=511 + i, n=520, mode=m)
     meta = {
         "data_total": len(tickers[:60]), "data_ok": len(out),
         "data_coverage": 1.0 if tickers else 0.0,
