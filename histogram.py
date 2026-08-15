@@ -34,6 +34,86 @@ LABEL = {"dim1": "①トレンド", "dim2": "②相対力", "dim3": "③需給",
 THETA_DEFAULT = 0.60   # v7/config.py の V7_THETA 既定値と同じ。変更時はそちらと揃える。
 NEAR_BAND = 0.05       # θ近傍とみなす片側の幅
 
+# ④時間のサブ指標(すべてconfig.pyのd4_*で定義されるpeak_score/山形)。
+# ④=4項目の単純平均。どれが足を引っ張っているかは合成値だけでは分からない。
+DIM4_PARTS = ["part_4-a", "part_4-b", "part_4-c", "part_4-d"]
+DIM4_PART_LABEL = {
+    "part_4-a": "4-a ベース継続週数",
+    "part_4-b": "4-b 200日線超え日数",
+    "part_4-c": "4-c ステージ滞在日数",
+    "part_4-d": "4-d ベース形成回数",
+}
+
+
+def analyze_dim4_parts(df: pd.DataFrame, theta: float) -> dict | None:
+    """④の内訳(4-a〜4-d)を分析する。列が無い場合はNoneを返す(旧CSV互換)。"""
+    if not all(c in df.columns for c in DIM4_PARTS):
+        return None
+    sub = df[DIM4_PARTS].copy()
+    stats = {}
+    for c in DIM4_PARTS:
+        s = sub[c].dropna()
+        stats[c] = {
+            "n": len(s), "n_missing": len(sub) - len(s),
+            "mean": s.mean() if len(s) else float("nan"),
+            "median": s.median() if len(s) else float("nan"),
+            "below": (s < theta).mean() if len(s) else float("nan"),
+        }
+    # ボトルネック分析: 4項目すべて揃っている行で、どれが最小値(足を引っ張る
+    # 項目)になっている頻度が高いかを見る。同点は複数カウント。
+    complete = sub.dropna()
+    bottleneck = {c: 0 for c in DIM4_PARTS}
+    if len(complete):
+        row_min = complete.min(axis=1)
+        for c in DIM4_PARTS:
+            bottleneck[c] = int((complete[c] <= row_min + 1e-9).sum())
+    stats["_bottleneck_n"] = len(complete)
+    stats["_bottleneck"] = bottleneck
+    return stats
+
+
+def print_dim4_parts(stats: dict | None, theta: float) -> None:
+    if stats is None:
+        print("\n(④のサブ指標列が無いCSVのため、④内訳分析はスキップ)")
+        return
+    _section(f"④時間のサブ指標内訳（θ={theta:.2f}）")
+    print(f"{'サブ指標':24}{'n':>7}{'欠損':>6}{'平均':>7}{'中央値':>7}{'θ未満':>8}")
+    for c in DIM4_PARTS:
+        st = stats[c]
+        print(f"{DIM4_PART_LABEL[c]:24}{st['n']:>7,d}{st['n_missing']:>6,d}"
+              f"{st['mean']:>7.3f}{st['median']:>7.3f}{st['below']*100:>7.1f}%")
+    n_bn = stats["_bottleneck_n"]
+    print(f"\n4項目全て揃う{n_bn:,}件中、各項目が最小値(ボトルネック)だった回数:")
+    for c in DIM4_PARTS:
+        cnt = stats["_bottleneck"][c]
+        pct = cnt / n_bn * 100 if n_bn else float("nan")
+        print(f"  {DIM4_PART_LABEL[c]:24}{cnt:>6,d}件  ({pct:5.1f}%)")
+    print()
+    print("特定の項目に偏っていれば、④が低い主因はその項目のスケール(idealの")
+    print("位置・レンジ)にある。均等に近ければ、4項目の同時充足が構造的に")
+    print("難しいこと自体が主因(§13.1の判断で言う『スケール修正』の対象範囲)。")
+
+
+def plot_dim4_parts(df: pd.DataFrame, theta: float, out_path: str) -> bool:
+    if not all(c in df.columns for c in DIM4_PARTS):
+        return False
+    fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+    axes = axes.flatten()
+    bins = np.linspace(0.0, 1.0, 41)
+    for ax, c in zip(axes, DIM4_PARTS):
+        s = df[c].dropna()
+        ax.hist(s, bins=bins, color="#55A868", edgecolor="white", alpha=0.85)
+        ax.axvline(theta, color="#C44E52", linestyle="--", linewidth=2)
+        below = (s < theta).mean() * 100 if len(s) else float("nan")
+        ax.set_title(f"{DIM4_PART_LABEL[c]}\nn={len(s):,}  θ未満{below:.0f}%",
+                     fontsize=10)
+        ax.set_xlim(0, 1)
+    fig.suptitle("stockbotTOM v7.1 — ④時間 サブ指標内訳", fontsize=14)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    print(f"図を保存: {out_path}")
+    return True
+
 
 def load_scores(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, encoding="utf-8-sig")
@@ -124,6 +204,14 @@ def main(path: str, theta: float, out_path: str) -> None:
     stats = summarize(df, theta)
     print_summary(stats, theta, len(df))
     plot(df, stats, theta, out_path)
+
+    d4_stats = analyze_dim4_parts(df, theta)
+    print_dim4_parts(d4_stats, theta)
+    d4_out = str(Path(out_path).with_name("dim4_parts.png"))
+    if plot_dim4_parts(df, theta, d4_out):
+        pass
+    else:
+        print("\n(④のサブ指標列が無いCSVのため、④内訳の図はスキップ)")
 
 
 if __name__ == "__main__":
