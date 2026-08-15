@@ -49,7 +49,12 @@ from v7.pipeline import run_pipeline
 from v7.universe import load_universe
 from v7.data import fetch_ohlcv
 
-HOLD_DAYS = [5, 10, 20]
+# 保有期間。5〜20日はスイングの主戦場、40・60日はモメンタム本来の帯域。
+# 初回の試運転(universe_cap=200)で本命が5/10/20日すべて負(−0.60/−0.81/
+# −0.78%)だったため、「選別が無効」なのか「保有期間が短期リバーサルの
+# 帯域に入っている」のかを切り分ける目的で長期側を追加した。
+# 60日で優位性が出るなら後者、出ないなら前者。
+HOLD_DAYS = [5, 10, 20, 40, 60]
 PRIMARY_HOLD = 10
 # 評価日より前に必要な最低営業日数。④の要件(SMA200ウォームアップ199+
 # 測定上限250=449)に余裕を持たせる。
@@ -250,8 +255,16 @@ def report_coverage_vs_dcs(panel: pd.DataFrame) -> str:
         lines.append(f"{'カバレッジ':9}{st_cov['mean']:>9.3f}{st_cov['se']:>8.3f}"
                     f"{st_cov['t']:>8.2f}{st_cov['n']:>6d}")
         if not (np.isnan(st_dcs["mean"]) or np.isnan(st_cov["mean"])):
-            winner = "カバレッジ" if abs(st_cov["mean"]) > abs(st_dcs["mean"]) else "DCS"
-            lines.append(f"  → 平均|ρ|が大きいのは: {winner}")
+            # 両方が統計的にゼロと区別できない場合、|ρ|の大小を比べても意味が
+            # ない(ノイズ同士の比較になる)。勝敗を出すのは、少なくとも
+            # 一方が有意な場合に限る。
+            sig = max(abs(st_dcs["t"]), abs(st_cov["t"])) >= 2.0
+            if not sig:
+                lines.append("  → どちらも統計的にゼロと区別できない"
+                            "(|t|<2)。優劣の判定はしない。")
+            else:
+                winner = "カバレッジ" if abs(st_cov["mean"]) > abs(st_dcs["mean"]) else "DCS"
+                lines.append(f"  → 平均|ρ|が大きいのは: {winner}")
     return "\n".join(lines)
 
 
