@@ -43,7 +43,21 @@ def _section(title: str) -> None:
 
 
 def load_scores(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, encoding="utf-8-sig")
+    """CSV単体、またはCSVを含むディレクトリを読む。
+
+    ディレクトリを渡すと配下の*.csvを全て連結する。日付別に蓄積した
+    out_v7/history/ をそのまま指定して、複数営業日を横断した検証ができる。
+    """
+    p = Path(path)
+    if p.is_dir():
+        files = sorted(p.glob("*.csv"))
+        if not files:
+            raise SystemExit(f"CSVが1つも無い: {path}")
+        df = pd.concat([pd.read_csv(f, encoding="utf-8-sig") for f in files],
+                       ignore_index=True)
+        print(f"({len(files)}ファイルを連結)")
+    else:
+        df = pd.read_csv(p, encoding="utf-8-sig")
     df.columns = [c.lstrip("\ufeff").strip() for c in df.columns]
     missing = [d for d in DIMS if d not in df.columns]
     if missing:
