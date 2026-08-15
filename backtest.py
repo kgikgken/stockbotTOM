@@ -56,6 +56,11 @@ from v7.data import fetch_ohlcv
 # 60日で優位性が出るなら後者、出ないなら前者。
 HOLD_DAYS = [5, 10, 20, 40, 60]
 PRIMARY_HOLD = 10
+DIM_LABELS = {1: "①トレンド", 2: "②相対力", 3: "③需給", 4: "④時間", 5: "⑤収縮"}
+# Fama-MacBeth集計の日数がこれ未満なら、|t|が大きくても有意とは表示しない。
+# 日数が少ないとSEが不安定になり、見せかけの巨大なt値が出ることがある
+# (実測でn=4の時にt=-483が出た)。t値だけを閾値にするのは危険。
+MIN_FM_DATES = 15
 # 評価日より前に必要な最低営業日数。④の要件(SMA200ウォームアップ199+
 # 測定上限250=449)に余裕を持たせる。
 LOOKBACK_BUFFER = 500
@@ -131,6 +136,9 @@ def evaluate_date(date: pd.Timestamp, ohlcv_full: dict, index_full: pd.DataFrame
             continue
         rec = {"code": c.code, "dcs": c.dcs, "coverage": c.coverage,
                "category": c.category}
+        for d in range(1, 6):
+            v = c.dims.get(d)
+            rec[f"dim{d}"] = None if v is None else float(v)
         ok = True
         for h in HOLD_DAYS:
             r = forward_return(full["Close"], epos, h)
@@ -257,14 +265,63 @@ def report_coverage_vs_dcs(panel: pd.DataFrame) -> str:
         if not (np.isnan(st_dcs["mean"]) or np.isnan(st_cov["mean"])):
             # 両方が統計的にゼロと区別できない場合、|ρ|の大小を比べても意味が
             # ない(ノイズ同士の比較になる)。勝敗を出すのは、少なくとも
-            # 一方が有意な場合に限る。
-            sig = max(abs(st_dcs["t"]), abs(st_cov["t"])) >= 2.0
-            if not sig:
+            # 一方が有意(|t|≥2.0 かつ 日数≥MIN_FM_DATES)な場合に限る。
+            dcs_sig = abs(st_dcs["t"]) >= 2.0 and st_dcs["n"] >= MIN_FM_DATES
+            cov_sig = abs(st_cov["t"]) >= 2.0 and st_cov["n"] >= MIN_FM_DATES
+            if not (dcs_sig or cov_sig):
                 lines.append("  → どちらも統計的にゼロと区別できない"
-                            "(|t|<2)。優劣の判定はしない。")
+                            "(|t|<2、または日数不足)。優劣の判定はしない。")
             else:
                 winner = "カバレッジ" if abs(st_cov["mean"]) > abs(st_dcs["mean"]) else "DCS"
                 lines.append(f"  → 平均|ρ|が大きいのは: {winner}")
+    return "\n".join(lines)
+
+
+def report_dim_ic(panel: pd.DataFrame) -> str:
+    """④ 次元別のIC(超過リターンとの断面順位相関)。
+
+    等ウェイト合成(DCS)がシグナルを薄めていないかを見る。一部の次元だけが
+    予測力を持つ場合、合成値のICより個別次元のICが高くなりうる。
+    有意判定は|t|≥2.0のみ(手順③と同じ基準)。
+    """
+    lines = ["\n" + "=" * 68,
+            "④ 次元別の予測力(IC) — 等ウェイト合成がシグナルを薄めていないか",
+            "=" * 68]
+    lines.append("各次元単独が超過リターンとどれだけ相関するか(Fama-MacBeth)。")
+    lines.append("*は|t|≥2.0(統計的にゼロと区別できる)。\n")
+    dim_cols = [d for d in range(1, 6) if f"dim{d}" in panel.columns]
+    for h in HOLD_DAYS:
+        lines.append(f"--- 保有{h}営業日 ---")
+        lines.append(f"{'':10}{'平均IC':>9}{'SE':>8}{'t値':>8}{'日数':>6}")
+        results = {}
+        for d in dim_cols:
+            col = f"dim{d}"
+            rhos = []
+            for _, g in panel.groupby("date"):
+                gg = g[[col, f"exc_{h}"]].dropna()
+                if len(gg) < 10:
+                    continue
+                rhos.append(gg[col].corr(gg[f"exc_{h}"], method="spearman"))
+            st = fama_macbeth(rhos)
+            results[d] = st
+            sig = "*" if (not np.isnan(st["t"]) and abs(st["t"]) >= 2.0
+                         and st["n"] >= MIN_FM_DATES) else " "
+            lines.append(f"{DIM_LABELS[d]:10}{st['mean']:>9.3f}{st['se']:>8.3f}"
+                        f"{st['t']:>7.2f}{sig}{st['n']:>6d}")
+        sig_dims = [d for d in results
+                   if not np.isnan(results[d]["t"]) and abs(results[d]["t"]) >= 2.0
+                   and results[d]["n"] >= MIN_FM_DATES]
+        thin_dims = [d for d in results
+                    if not np.isnan(results[d]["t"]) and abs(results[d]["t"]) >= 2.0
+                    and results[d]["n"] < MIN_FM_DATES]
+        if sig_dims:
+            names = "、".join(DIM_LABELS[d] for d in sig_dims)
+            lines.append(f"  → 有意(|t|≥2.0 かつ 日数≥{MIN_FM_DATES}): {names}")
+        else:
+            lines.append("  → 有意な次元なし")
+        if thin_dims:
+            names = "、".join(f"{DIM_LABELS[d]}(n={results[d]['n']})" for d in thin_dims)
+            lines.append(f"    (|t|≥2.0だが日数不足のため参考値扱い: {names})")
     return "\n".join(lines)
 
 
@@ -382,6 +439,7 @@ def main(dryrun: bool, n_dates: int, universe_cap, history_days: int, out_dir: s
     dec_text, dec_means = report_decile(panel)
     report.append(dec_text)
     report.append(report_coverage_vs_dcs(panel))
+    report.append(report_dim_ic(panel))
     text = "\n".join(report)
     print("\n" + text)
 
