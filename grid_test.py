@@ -65,13 +65,19 @@ FORMATION = [5, 10, 20, 40, 60, 120]
 HOLDING = [5, 10, 20, 40, 60]
 SKIPS = [1, 5]
 DECILE_Q = 0.10
-MIN_NAMES_PER_DECILE = 15
+# デシル1本あたりの最低銘柄数。小さすぎると断面の分位が不安定になるが、
+# 大きすぎると小規模ユニバース(米国の陽性対照=数百銘柄)で全期間が
+# 除外され、グリッドが空になる。実際に15で米国側が全滅した
+# (147銘柄取得でも、各日の有効数が140を割るとデシルが14になり弾かれた)。
+# 日本側は3,658銘柄・デシル365なので、この値の影響を受けない。
+MIN_NAMES_PER_DECILE = 12
 MIN_TURNOVER_JP = 1e8      # 60日中央値売買代金(円)の下限
 MIN_TURNOVER_US = 5e6      # 60日中央値売買代金(ドル)の下限
 T_SIG = 3.0                 # Harvey-Liu-Zhu基準
 HISTORY_DAYS = 1825
 
 # 米国側の陽性対照用ユニバース。生存バイアスは承知の上(検出力確認が目的)。
+# 銘柄数はデシル判定に余裕を持たせるため250前後を確保する。
 US_TICKERS = [
     "AAPL","MSFT","GOOGL","AMZN","META","NVDA","TSLA","BRK-B","JPM","V",
     "UNH","JNJ","PG","HD","MA","XOM","CVX","ABBV","MRK","PEP",
@@ -83,12 +89,23 @@ US_TICKERS = [
     "CI","REGN","SO","DUK","PGR","BSX","ETN","FI","AON","APD",
     "CME","ITW","SLB","EQIX","MU","PANW","SNPS","CDNS","MCK","NOC",
     "WM","ORLY","MAR","CSX","EMR","FDX","APH","PSA","ROP","AJG",
-    "TGT","NSC","PXD","MCO","PH","ADI","GD","AIG","CTAS","MSI",
-    "TT","ECL","CARR","NXPI","PCAR","AZO","CMG","SRE","HUM","FTNT",
-    "MET","F","GM","OXY","D","EW","KLAC","LRCX","MNST","IDXX",
-    "AEP","EXC","XEL","ED","WEC","ES","DTE","PPL","CMS","FE",
-    "ROK","DOV","XYL","AME","IEX","PWR","EFX","VRSK","CTSH","FAST",
+    "TGT","NSC","MCO","PH","ADI","GD","AIG","CTAS","MSI","TT",
+    "ECL","CARR","NXPI","PCAR","AZO","CMG","SRE","HUM","FTNT","MET",
+    "F","GM","OXY","D","EW","KLAC","LRCX","MNST","IDXX","AEP",
+    "EXC","XEL","ED","WEC","ES","DTE","PPL","CMS","FE","ROK",
+    "DOV","XYL","AME","IEX","PWR","EFX","VRSK","CTSH","FAST","ODFL",
+    "PAYX","ROST","YUM","KMB","GIS","SYY","HSY","K","CLX","CAG",
+    "CPB","MKC","HRL","SJM","TSN","ADM","STZ","KDP","KHC","EL",
+    "COP","EOG","MPC","PSX","VLO","HES","DVN","FANG","HAL","BKR",
+    "WMB","KMI","OKE","TRGP","LNG","CTRA","APA","MRO","EQT","AR",
+    "USB","PNC","TFC","COF","BK","STT","FITB","HBAN","RF","CFG",
+    "KEY","MTB","ZION","CMA","ALL","TRV","HIG","AFL","PRU","LNC",
+    "DIS","CMCSA","NFLX","T","VZ","TMUS","CHTR","EA","TTWO","OMC",
+    "LOW","DG","DLTR","BBY","GPC","TSCO","ULTA","LULU","DECK","RL",
+    "AMT","CCI","SPG","O","VTR","WELL","AVB","EQR","MAA","ESS",
+    "UDR","CPT","ARE","BXP","HST","REG","FRT","KIM","DOC","IRM",
 ]
+US_TICKERS = list(dict.fromkeys(US_TICKERS))   # 重複除去(LOWが2回入っていた)
 
 
 # ============================================================
@@ -281,6 +298,29 @@ def grid_table(results: dict, S: int, key: str, field: str) -> str:
     return "\n".join(lines)
 
 
+def diagnose_empty(results: dict, label: str) -> str:
+    """グリッドが空(全セルNaN)の場合に、その理由を数値で示す。
+
+    「—」だけが並ぶ表は原因が分からず、実際に米国側で一度これに遭遇した
+    (デシル最小銘柄数の閾値で全期間が除外されていた)。同じ事故を繰り返さない。
+    """
+    n_valid = sum(1 for k in results if not np.isnan(results[k]["ew"]["t"]))
+    if n_valid > 0:
+        return ""
+    L = [f"\n  【診断】{label}のグリッドが全セル空。原因を特定するための内訳:"]
+    L.append(f"  {'形成':>6}{'保有':>6}{'skip':>5}{'上位デシル中央値':>18}{'有効期間数':>10}")
+    shown = 0
+    for (F, H, S), r in results.items():
+        if shown >= 6:
+            break
+        L.append(f"  {F:>6}{H:>6}{S:>5}{r['n_top_med']:>18.1f}{r['ew']['n']:>10d}")
+        shown += 1
+    L.append(f"  → 上位デシルが {MIN_NAMES_PER_DECILE} 銘柄未満なら、その日は除外される。")
+    L.append(f"     中央値がnanなら、そもそも条件を満たす日が1日も無い。")
+    L.append(f"     有効期間数が10未満なら、Newey-West集計自体が実行されない。")
+    return "\n".join(L)
+
+
 def build_report(results_jp: dict, results_us: dict | None) -> tuple:
     L = ["形成×保有グリッド検証(Jegadeesh-Titman型)",
         "重複ポートフォリオ + Newey-West HAC(lag=保有−1)。有意水準 t>3.0(Harvey-Liu-Zhu)。",
@@ -293,6 +333,9 @@ def build_report(results_jp: dict, results_us: dict | None) -> tuple:
         L.append("形成60〜120日・保有20〜60日で正・有意が事前予測。")
         for S in SKIPS:
             L.append("\n" + grid_table(results_us, S, "ew", "t"))
+        diag = diagnose_empty(results_us, "米国")
+        if diag:
+            L.append(diag)
         found = []
         for F in [60, 120]:
             for H in [20, 40, 60]:
@@ -313,6 +356,9 @@ def build_report(results_jp: dict, results_us: dict | None) -> tuple:
     L.append("=" * 72)
     for S in SKIPS:
         L.append("\n" + grid_table(results_jp, S, "ew", "t"))
+    diag = diagnose_empty(results_jp, "日本")
+    if diag:
+        L.append(diag)
 
     L.append("\n" + "=" * 72)
     L.append("③ 日本株グリッド — 平均WML(等加重)")
