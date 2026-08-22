@@ -64,13 +64,18 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        dryrun = _b("SCREEN_DRYRUN", False)
+        # DRYRUN は既定で本番と別ディレクトリに書く。同じ data/ を共有すると、
+        # 合成データが git コミットや Actions cache 経由で本番データに混入する
+        # （2026-08-22 実運用で発生・確認済み）。DATA_DIR を明示指定すれば無効。
+        default_data_dir = "data-dryrun" if dryrun else "data"
         return cls(
-            data_dir=Path(os.getenv("DATA_DIR", "data")),
+            data_dir=Path(os.getenv("DATA_DIR", default_data_dir)),
             universe_seed_csv=Path(os.getenv("UNIVERSE_SEED_CSV", "universe_jpx.csv")),
             history_days=_i("HISTORY_DAYS", 400),
             fetch_deadline_sec=_i("FETCH_DEADLINE_SEC", 5400),
             fetch_scope=os.getenv("FETCH_SCOPE", "auto").strip().lower(),
-            dryrun=_b("SCREEN_DRYRUN", False),
+            dryrun=dryrun,
             market_close_hhmm=os.getenv("MARKET_CLOSE_HHMM", "15:30"),
             jpx_listed_url=os.getenv("JPX_LISTED_URL", JPX_LISTED_URL_DEFAULT),
             min_adv_jpy=_f("MIN_ADV_JPY", 2e8),
