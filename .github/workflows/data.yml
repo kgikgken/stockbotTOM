@@ -1,0 +1,90 @@
+
+**5/25 `.github/workflows/data.yml`**
+```yaml
+name: data-daily
+
+# M1 データ基盤: 平日 7:00 JST に取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース。
+# LINE 配信はまだ無い（M5 で screen.yml に統合する）。今日から前向きアーカイブを貯め始めるのが目的。
+
+on:
+  schedule:
+    - cron: "0 22 * * 0-4"    # 7:00 JST 月〜金
+  workflow_dispatch:
+    inputs:
+      fetch_scope:
+        description: "all | universe | auto"
+        default: "auto"
+      dryrun:
+        description: "1 で合成データ"
+        default: "0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      # 保存データ(store)は git にコミットしない。Actions cache で日をまたいで引き継ぐ。
+      - name: Restore store
+        uses: actions/cache@v4
+        with:
+          path: data/store
+          key: store-${{ github.run_id }}
+          restore-keys: |
+            store-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Daily data
+        env:
+          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
+          FETCH_SCOPE: ${{ github.event.inputs.fetch_scope || 'auto' }}
+          FETCH_DEADLINE_SEC: "5400"
+          HISTORY_DAYS: "400"
+          MIN_ADV_JPY: "200000000"
+          MIN_PRICE: "200"
+          MIN_HISTORY_BARS: "250"
+        run: python -m stockbot.cli daily
+
+      - name: Commit snapshots
+        if: always()
+        run: |
+          git config user.name "stockbot"
+          git config user.email "stockbot@users.noreply.github.com"
+          git add data/daily data/universe data/reference 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "data: $(date -u +%F)"
+          if ! git push; then
+            git pull --rebase && git push
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ github.run_id }}
+          path: |
+            data/store/fetch_meta.json
+            data/store/revisions.csv.gz
+            data/store/split_issues.csv
+            data/universe/summary.json
+          if-no-files-found: ignore
