@@ -135,12 +135,21 @@ def step_index(cfg: Settings, log=print) -> pd.DataFrame:
     return df
 
 
+def _bar_counts(long_df: pd.DataFrame) -> pd.Series:
+    """縦持ち OHLCV から銘柄ごとの本数。"""
+    if long_df is None or len(long_df) == 0:
+        return pd.Series(dtype=int)
+    return long_df.groupby("ticker")["date"].count()
+
+
 def step_backfill(cfg: Settings, log=print) -> dict:
     """検証用の長期履歴を取得する（T-103）。`daily` とは別コマンド。
 
-    HISTORY_DAYS（例: 2600）で全上場株式を取得する。締切（FETCH_DEADLINE_SEC）に
-    到達して中断した場合、次回実行時は store に既に入っている銘柄をスキップして
-    残りだけを取得する（取得済み銘柄への冗長な再取得はしない）。
+    HISTORY_DAYS（例: 2600）で全上場株式を取得する。「取得済み」の判定は本数基準
+    ―― 銘柄ごとの store 本数が int(HISTORY_DAYS * 0.9) 未満なら、store に存在して
+    いても再取得対象に含める（本数不足のまま取りこぼさない）。締切
+    （FETCH_DEADLINE_SEC）に到達して中断した場合、次回実行時は基準を満たす銘柄
+    をスキップして残りだけを取得する。
     """
     cfg.ensure_dirs()
     now = _now()
@@ -148,10 +157,11 @@ def step_backfill(cfg: Settings, log=print) -> dict:
     eq = listed[listed["is_equity"].astype(bool)]["ticker"].tolist()
 
     store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
-    existing = set(store.load()["ticker"].unique())
-    already_done = [t for t in eq if t in existing]
-    target = [t for t in eq if t not in existing]
-    log(f"[backfill] ユニバース {len(eq)} 銘柄 / 取得済み {len(already_done)} 件をスキップ / "
+    threshold = int(cfg.history_days * 0.9)
+    existing_counts = _bar_counts(store.load())
+    already_done = [t for t in eq if existing_counts.get(t, 0) >= threshold]
+    target = [t for t in eq if existing_counts.get(t, 0) < threshold]
+    log(f"[backfill] ユニバース {len(eq)} 銘柄 / 本数基準(>= {threshold}) 済み {len(already_done)} 件をスキップ / "
         f"残り {len(target)} 件を取得")
 
     if cfg.dryrun:
@@ -178,10 +188,12 @@ def step_backfill(cfg: Settings, log=print) -> dict:
         allx = pd.concat([prev, issues], ignore_index=True) if prev is not None else issues
         allx.drop_duplicates(subset=["ticker", "date", "kind"], keep="last").to_csv(p, index=False)
 
-    cumulative_done = len(already_done) + meta["data_ok"]
+    merged_counts = _bar_counts(merged)
+    cumulative_done = int(sum(1 for t in eq if merged_counts.get(t, 0) >= threshold))
     completion_rate = (cumulative_done / len(eq)) if eq else 0.0
     meta.update({
         "universe_total": len(eq),
+        "bar_threshold": threshold,
         "already_done": len(already_done),
         "newly_done": meta["data_ok"],
         "cumulative_done": cumulative_done,
