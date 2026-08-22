@@ -6,3 +6,5 @@ build/
 dist/
 # 保存データは git に入れない（Actions cache / ローカル）。日次スナップショットとユニバースは入れる。
 data/store/
+# DRYRUN の出力先（config.py: dryrun 時の既定 DATA_DIR）。本番 data/ とは物理的に分離する
+data-dryrun/
