@@ -1,14 +1,14 @@
 {
  "equities": 60,
- "with_data": 60,
- "passes": 51,
- "fail_adv": 8,
- "fail_price": 1,
+ "with_data": 21,
+ "passes": 8,
+ "fail_adv": 13,
+ "fail_price": 0,
  "fail_history": 0,
  "fail_split": 1,
  "fail_fresh": 0,
  "by_market": {
-  "プライム（内国株式）": 35,
-  "スタンダード（内国株式）": 16
+  "プライム（内国株式）": 6,
+  "スタンダード（内国株式）": 2
  }
 }
