@@ -19,9 +19,9 @@ import pandas as pd
 from .config import Settings
 from .data.adjust import check_all
 from .data.jpx_lists import load_listed_with_fallback, normalize_listed
-from .data.store import OhlcvStore, from_long, to_long
-from .data.synthetic import make_synthetic, synthetic_listed
-from .data.yf_fetch import fetch_ohlcv
+from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
+from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
+from .data.yf_fetch import fetch_index, fetch_ohlcv
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -109,6 +109,30 @@ def step_fetch(cfg: Settings, listed: pd.DataFrame, log=print) -> tuple[dict, di
     return from_long(merged), meta, issues
 
 
+def step_index(cfg: Settings, log=print) -> pd.DataFrame:
+    """指数（TOPIX、失敗時は日経225）を取得し、store に ticker=IDX_TICKER として保存する（T-102）。
+
+    D2（相対力）と地合いゲージ（DESIGN.md §8.1）が後で参照する。DRYRUN は合成。
+    """
+    cfg.ensure_dirs()
+    now = _now()
+    if cfg.dryrun:
+        df = make_synthetic_index(n_bars=cfg.history_days, end=now.tz_localize(None))
+        used = IDX_TICKER
+    else:
+        df, used = fetch_index(cfg.history_days, now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
+    if len(df) == 0:
+        log("[index] 取得できず。store は前回値のまま")
+        return df
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
+    merged, added, revisions = store.upsert(to_long({IDX_TICKER: df}))
+    store.save(merged)
+    store.write_daily_increments(added)
+    store.append_revisions(revisions, now)
+    log(f"[index] source={used or 'synthetic'} 本数={len(df)} 新規={len(added)} 改訂={len(revisions)}")
+    return df
+
+
 def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None,
                   issues: pd.DataFrame | None = None, log=print) -> pd.DataFrame:
     cfg.ensure_dirs()
@@ -133,7 +157,7 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
-    ap.add_argument("command", choices=["daily", "listed", "fetch", "universe"])
+    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "universe"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -145,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fetch":
             listed = _load_listed_cached(cfg, log)
             step_fetch(cfg, listed, log)
+        elif args.command == "index":
+            step_index(cfg, log)
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)
@@ -152,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             refresh = cfg.dryrun or _now().weekday() == 0 or not (cfg.reference_dir / "listed_latest.csv").exists()
             listed = step_listed(cfg, log) if refresh else _load_listed_cached(cfg, log)
             ohlcv, meta, issues = step_fetch(cfg, listed, log)
+            step_index(cfg, log)
             step_universe(cfg, listed, ohlcv, issues, log)
         return 0
     except Exception as e:  # 失敗は赤にする（握り潰さない）
