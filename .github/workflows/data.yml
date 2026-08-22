@@ -1,6 +1,4 @@
 
-**5/25 `.github/workflows/data.yml`**
-```yaml
 name: data-daily
 
 # M1 データ基盤: 平日 7:00 JST に取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース。
