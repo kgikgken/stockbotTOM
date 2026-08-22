@@ -1,11 +1,7 @@
-# Core runtime dependencies
 numpy>=1.26
 pandas>=2.1
 requests>=2.31
 yfinance>=0.2.40
-
-# PNG infographic (Noto Sans CJK JP required at OS level)
-Pillow>=10.0
-
-scipy>=1.11        # verify_level1.py 手順4(除外時順位変化)
-matplotlib>=3.8    # phase2_histogram.py
+xlrd>=2.0
+pyarrow>=15
+pytest>=8
