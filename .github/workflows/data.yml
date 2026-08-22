@@ -63,6 +63,13 @@ jobs:
           MIN_HISTORY_BARS: "250"
         run: python -m stockbot.cli daily
 
+      # 決算発表予定日・上場廃止銘柄一覧の更新（T-104）。取得失敗時も例外を投げず
+      # 既存ファイルを維持するだけなので、ここが失敗して daily 側の成果を失う心配はない。
+      - name: References data
+        env:
+          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
+        run: python -m stockbot.cli references
+
       - name: Commit snapshots
         if: always()
         run: |

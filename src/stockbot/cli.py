@@ -5,6 +5,7 @@
   python -m stockbot.cli fetch       # 取得と保存のみ
   python -m stockbot.cli index       # 指数（TOPIX/日経225）の取得と保存のみ
   python -m stockbot.cli backfill    # 検証用の長期履歴取得（HISTORY_DAYS=2600 等）。中断再開可
+  python -m stockbot.cli references  # 決算発表予定日・上場廃止銘柄一覧の更新のみ
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
 
 環境変数: SPEC/README 参照。SCREEN_DRYRUN=1 で合成データ・ネットワーク不要。
@@ -20,7 +21,12 @@ import pandas as pd
 
 from .config import Settings
 from .data.adjust import check_all
-from .data.jpx_lists import load_listed_with_fallback, normalize_listed
+from .data.jpx_lists import (
+    fetch_delistings,
+    fetch_earnings_schedule,
+    load_listed_with_fallback,
+    normalize_listed,
+)
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
@@ -207,6 +213,33 @@ def step_backfill(cfg: Settings, log=print) -> dict:
     return meta
 
 
+def step_references(cfg: Settings, log=print) -> None:
+    """決算発表予定日・上場廃止銘柄一覧を JPX から取得し reference/ を更新する（T-104）。
+
+    決算発表予定日はローリング更新（直近1〜2ヶ月分のみ）で完全網羅ではない。
+    詳細・制約は docs/DATA_SOURCES.md 参照。取得失敗や0件時は既存ファイルを維持する。
+    DRYRUN はネットワークを叩かず何もしない。
+    """
+    cfg.ensure_dirs()
+    if cfg.dryrun:
+        log("[references] DRYRUN のためスキップ（既存ファイルを維持）")
+        return
+
+    earnings = fetch_earnings_schedule(cfg.jpx_earnings_url, log=log)
+    if len(earnings):
+        earnings.to_csv(cfg.reference_dir / "earnings_schedule.csv", index=False, encoding="utf-8-sig")
+        log(f"[references] 決算発表予定日 {len(earnings)} 件を保存")
+    else:
+        log("[references] 決算発表予定日 取得0件 → 既存ファイルを維持")
+
+    delistings = fetch_delistings(cfg.jpx_delistings_url, log=log)
+    if len(delistings):
+        delistings.to_csv(cfg.reference_dir / "delistings.csv", index=False, encoding="utf-8-sig")
+        log(f"[references] 上場廃止 {len(delistings)} 件を保存")
+    else:
+        log("[references] 上場廃止 取得0件 → 既存ファイルを維持")
+
+
 def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None,
                   issues: pd.DataFrame | None = None, log=print) -> pd.DataFrame:
     cfg.ensure_dirs()
@@ -231,7 +264,7 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
-    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill", "universe"])
+    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill", "references", "universe"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -247,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
             step_index(cfg, log)
         elif args.command == "backfill":
             step_backfill(cfg, log)
+        elif args.command == "references":
+            step_references(cfg, log)
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)

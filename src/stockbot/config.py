@@ -35,6 +35,10 @@ def _b(name: str, default: bool = False) -> bool:
 JPX_LISTED_URL_DEFAULT = (
     "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
 )
+JPX_EARNINGS_URL_DEFAULT = (
+    "https://www.jpx.co.jp/listing/event-schedules/financial-announcement/index.html"
+)
+JPX_DELISTINGS_URL_DEFAULT = "https://www.jpx.co.jp/listing/stocks/delisted/index.html"
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,8 @@ class Settings:
     dryrun: bool                     # SCREEN_DRYRUN=1 で合成データ
     market_close_hhmm: str           # 東証の引け。これ以前は当日足を未確定として捨てる
     jpx_listed_url: str
+    jpx_earnings_url: str             # 決算発表予定日ページ（T-104）
+    jpx_delistings_url: str           # 上場廃止銘柄一覧ページ（T-104）
 
     # ---- ユニバース（SPEC §1）----
     min_adv_jpy: float               # 20日平均売買代金の下限（円）
@@ -90,6 +96,8 @@ class Settings:
             dryrun=dryrun,
             market_close_hhmm=os.getenv("MARKET_CLOSE_HHMM", "15:30"),
             jpx_listed_url=os.getenv("JPX_LISTED_URL", JPX_LISTED_URL_DEFAULT),
+            jpx_earnings_url=os.getenv("JPX_EARNINGS_URL", JPX_EARNINGS_URL_DEFAULT),
+            jpx_delistings_url=os.getenv("JPX_DELISTINGS_URL", JPX_DELISTINGS_URL_DEFAULT),
             min_adv_jpy=_f("MIN_ADV_JPY", 2e8),
             min_price=_f("MIN_PRICE", 200.0),
             min_history_bars=_i("MIN_HISTORY_BARS", 250),
