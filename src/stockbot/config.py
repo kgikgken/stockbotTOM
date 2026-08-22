@@ -62,6 +62,18 @@ class Settings:
     rev_close_tol: float             # 終値の相対差がこれを超えたら「改訂」
     rev_volume_tol: float            # 出来高の相対差がこれを超えたら「改訂」
 
+    # ---- 事前登録パラメータ（DESIGN.md §12。これ以外を増やさない）----
+    k: int                           # スイング確定ラグ（本）
+    pullback_max_days: int           # 押し目の上限日数
+    pullback_max_depth: float        # 押し目の上限（下落率）
+    shallow_depth: float             # 浅押し除外の閾値（depth_pct がこれ未満は除外）
+    deep_depth: float                # 深押し条件の閾値（depth_pct がこれ超は d3_bad_news=0 のときのみ候補）
+    pool_days: int                   # プール正規化の営業日数
+    sector_cap: int                  # 上位 N 件中の業種上限
+    corr_threshold: float            # 相関閾値（60 日リターン）
+    top_n: int                       # 出力件数（候補）
+    label_n: int                     # ラベル N（保有日数上限の目安）
+
     @classmethod
     def from_env(cls) -> "Settings":
         dryrun = _b("SCREEN_DRYRUN", False)
@@ -85,6 +97,16 @@ class Settings:
             max_staleness_days=_i("MAX_STALENESS_DAYS", 7),
             rev_close_tol=_f("REV_CLOSE_TOL", 0.005),
             rev_volume_tol=_f("REV_VOLUME_TOL", 0.05),
+            k=_i("K", 3),
+            pullback_max_days=_i("PULLBACK_MAX_DAYS", 25),
+            pullback_max_depth=_f("PULLBACK_MAX_DEPTH", 0.25),
+            shallow_depth=_f("SHALLOW_DEPTH", 0.03),
+            deep_depth=_f("DEEP_DEPTH", 0.10),
+            pool_days=_i("POOL_DAYS", 20),
+            sector_cap=_i("SECTOR_CAP", 3),
+            corr_threshold=_f("CORR_THRESHOLD", 0.8),
+            top_n=_i("TOP_N", 10),
+            label_n=_i("LABEL_N", 15),
         )
 
     # ---- 派生パス ----
