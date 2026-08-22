@@ -3,6 +3,8 @@
   python -m stockbot.cli daily       # 取得 → 整合性検査 → 保存・スナップショット → ユニバース
   python -m stockbot.cli listed      # JPX 上場銘柄一覧の更新のみ
   python -m stockbot.cli fetch       # 取得と保存のみ
+  python -m stockbot.cli index       # 指数（TOPIX/日経225）の取得と保存のみ
+  python -m stockbot.cli backfill    # 検証用の長期履歴取得（HISTORY_DAYS=2600 等）。中断再開可
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
 
 環境変数: SPEC/README 参照。SCREEN_DRYRUN=1 で合成データ・ネットワーク不要。
@@ -133,6 +135,66 @@ def step_index(cfg: Settings, log=print) -> pd.DataFrame:
     return df
 
 
+def step_backfill(cfg: Settings, log=print) -> dict:
+    """検証用の長期履歴を取得する（T-103）。`daily` とは別コマンド。
+
+    HISTORY_DAYS（例: 2600）で全上場株式を取得する。締切（FETCH_DEADLINE_SEC）に
+    到達して中断した場合、次回実行時は store に既に入っている銘柄をスキップして
+    残りだけを取得する（取得済み銘柄への冗長な再取得はしない）。
+    """
+    cfg.ensure_dirs()
+    now = _now()
+    listed = _load_listed_cached(cfg, log)
+    eq = listed[listed["is_equity"].astype(bool)]["ticker"].tolist()
+
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
+    existing = set(store.load()["ticker"].unique())
+    already_done = [t for t in eq if t in existing]
+    target = [t for t in eq if t not in existing]
+    log(f"[backfill] ユニバース {len(eq)} 銘柄 / 取得済み {len(already_done)} 件をスキップ / "
+        f"残り {len(target)} 件を取得")
+
+    if cfg.dryrun:
+        ohlcv = make_synthetic(target, n_bars=cfg.history_days, end=now.tz_localize(None))
+        meta = {"data_total": len(target), "data_ok": len(ohlcv), "short": [], "failed": [],
+                "elapsed_sec": 0.0, "rounds": [], "period": "synthetic", "asof": str(now)}
+    elif not target:
+        meta = {"data_total": 0, "data_ok": 0, "short": [], "failed": [],
+                "elapsed_sec": 0.0, "rounds": [], "period": "", "asof": str(now)}
+        ohlcv = {}
+    else:
+        ohlcv, meta = fetch_ohlcv(target, cfg.history_days, cfg.fetch_deadline_sec,
+                                  now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
+    ohlcv, issues = check_all(ohlcv)
+
+    merged, added, revisions = store.upsert(to_long(ohlcv))
+    store.save(merged)
+    store.write_daily_increments(added)
+    store.append_revisions(revisions, now)
+    if len(issues):
+        p = cfg.store_dir / "split_issues.csv"
+        prev = pd.read_csv(p) if p.exists() else None
+        issues["observed_on"] = now.strftime("%Y-%m-%d")
+        allx = pd.concat([prev, issues], ignore_index=True) if prev is not None else issues
+        allx.drop_duplicates(subset=["ticker", "date", "kind"], keep="last").to_csv(p, index=False)
+
+    cumulative_done = len(already_done) + meta["data_ok"]
+    completion_rate = (cumulative_done / len(eq)) if eq else 0.0
+    meta.update({
+        "universe_total": len(eq),
+        "already_done": len(already_done),
+        "newly_done": meta["data_ok"],
+        "cumulative_done": cumulative_done,
+        "completion_rate": round(completion_rate, 4),
+        "store_rows": int(len(merged)), "added": int(len(added)),
+        "revisions": int(len(revisions)), "split_issues": int(len(issues)),
+    })
+    (cfg.store_dir / "backfill_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    log(f"[backfill] 累計 {cumulative_done}/{len(eq)} ({completion_rate:.1%}) / "
+        f"今回取得 {meta['data_ok']} / 新規行 {len(added)}")
+    return meta
+
+
 def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None,
                   issues: pd.DataFrame | None = None, log=print) -> pd.DataFrame:
     cfg.ensure_dirs()
@@ -157,7 +219,7 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
-    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "universe"])
+    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill", "universe"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -171,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
             step_fetch(cfg, listed, log)
         elif args.command == "index":
             step_index(cfg, log)
+        elif args.command == "backfill":
+            step_backfill(cfg, log)
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)
