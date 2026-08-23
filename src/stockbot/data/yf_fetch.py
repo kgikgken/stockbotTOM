@@ -119,6 +119,42 @@ def extract_chunk(raw: Optional[pd.DataFrame], chunk: List[str], out: Dict[str, 
             short.add(t)
 
 
+def fetch_index(history_days: int, now_jst: Optional[pd.Timestamp] = None,
+                close_hhmm: str = "15:30", primary: str = "^TPX", fallback: str = "^N225",
+                attempts: int = 3, backoff: float = 3.0,
+                downloader: Optional[Downloader] = None,
+                sleep: Callable[[float], None] = time.sleep,
+                log: Callable[[str], None] = print) -> Tuple[pd.DataFrame, str]:
+    """指数（TOPIX、失敗時は日経225）の日足を取得する（DESIGN.md §12 / TASKS T-102）。
+
+    戻り値: (DataFrame[COLS], 実際に取れた ticker)。両方失敗した場合は空 DataFrame と空文字列。
+    """
+    now_jst = now_jst or pd.Timestamp.now(tz="Asia/Tokyo")
+    dl = downloader or _yf_downloader
+    period = f"{max(int(history_days), 60)}d"
+    for ticker in (primary, fallback):
+        raw = None
+        for a in range(attempts):
+            try:
+                raw = dl([ticker], period)
+                if raw is not None and len(raw):
+                    break
+            except Exception:
+                raw = None
+            if a < attempts - 1:
+                sleep(backoff * (a + 1))
+        if raw is None or len(raw) == 0:
+            log(f"[index] {ticker} 取得失敗")
+            continue
+        df = clean_frame(flatten_single(raw, ticker), now_jst, close_hhmm)
+        if len(df):
+            log(f"[index] source={ticker} 本数={len(df)}")
+            return df, ticker
+        log(f"[index] {ticker} 清掃後0本")
+    log("[index] TOPIX/日経225 とも取得失敗")
+    return pd.DataFrame(columns=COLS), ""
+
+
 # ------------------------------------------------------------------ download
 def _yf_downloader(chunk: List[str], period: str) -> Optional[pd.DataFrame]:
     import yfinance as yf  # 遅延 import

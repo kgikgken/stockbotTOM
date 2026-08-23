@@ -3,6 +3,9 @@
   python -m stockbot.cli daily       # 取得 → 整合性検査 → 保存・スナップショット → ユニバース
   python -m stockbot.cli listed      # JPX 上場銘柄一覧の更新のみ
   python -m stockbot.cli fetch       # 取得と保存のみ
+  python -m stockbot.cli index       # 指数（TOPIX/日経225）の取得と保存のみ
+  python -m stockbot.cli backfill    # 検証用の長期履歴取得（HISTORY_DAYS=2600 等）。中断再開可
+  python -m stockbot.cli references  # 決算発表予定日・上場廃止銘柄一覧の更新のみ
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
 
 環境変数: SPEC/README 参照。SCREEN_DRYRUN=1 で合成データ・ネットワーク不要。
@@ -18,10 +21,15 @@ import pandas as pd
 
 from .config import Settings
 from .data.adjust import check_all
-from .data.jpx_lists import load_listed_with_fallback, normalize_listed
-from .data.store import OhlcvStore, from_long, to_long
-from .data.synthetic import make_synthetic, synthetic_listed
-from .data.yf_fetch import fetch_ohlcv
+from .data.jpx_lists import (
+    fetch_delistings,
+    fetch_earnings_schedule,
+    load_listed_with_fallback,
+    normalize_listed,
+)
+from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
+from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
+from .data.yf_fetch import fetch_index, fetch_ohlcv
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -109,6 +117,129 @@ def step_fetch(cfg: Settings, listed: pd.DataFrame, log=print) -> tuple[dict, di
     return from_long(merged), meta, issues
 
 
+def step_index(cfg: Settings, log=print) -> pd.DataFrame:
+    """指数（TOPIX、失敗時は日経225）を取得し、store に ticker=IDX_TICKER として保存する（T-102）。
+
+    D2（相対力）と地合いゲージ（DESIGN.md §8.1）が後で参照する。DRYRUN は合成。
+    """
+    cfg.ensure_dirs()
+    now = _now()
+    if cfg.dryrun:
+        df = make_synthetic_index(n_bars=cfg.history_days, end=now.tz_localize(None))
+        used = IDX_TICKER
+    else:
+        df, used = fetch_index(cfg.history_days, now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
+    if len(df) == 0:
+        log("[index] 取得できず。store は前回値のまま")
+        return df
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
+    merged, added, revisions = store.upsert(to_long({IDX_TICKER: df}))
+    store.save(merged)
+    store.write_daily_increments(added)
+    store.append_revisions(revisions, now)
+    log(f"[index] source={used or 'synthetic'} 本数={len(df)} 新規={len(added)} 改訂={len(revisions)}")
+    return df
+
+
+def _bar_counts(long_df: pd.DataFrame) -> pd.Series:
+    """縦持ち OHLCV から銘柄ごとの本数。"""
+    if long_df is None or len(long_df) == 0:
+        return pd.Series(dtype=int)
+    return long_df.groupby("ticker")["date"].count()
+
+
+def step_backfill(cfg: Settings, log=print) -> dict:
+    """検証用の長期履歴を取得する（T-103）。`daily` とは別コマンド。
+
+    HISTORY_DAYS（例: 2600）で全上場株式を取得する。「取得済み」の判定は本数基準
+    ―― 銘柄ごとの store 本数が int(HISTORY_DAYS * 0.9) 未満なら、store に存在して
+    いても再取得対象に含める（本数不足のまま取りこぼさない）。締切
+    （FETCH_DEADLINE_SEC）に到達して中断した場合、次回実行時は基準を満たす銘柄
+    をスキップして残りだけを取得する。
+    """
+    cfg.ensure_dirs()
+    now = _now()
+    listed = _load_listed_cached(cfg, log)
+    eq = listed[listed["is_equity"].astype(bool)]["ticker"].tolist()
+
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
+    threshold = int(cfg.history_days * 0.9)
+    existing_counts = _bar_counts(store.load())
+    already_done = [t for t in eq if existing_counts.get(t, 0) >= threshold]
+    target = [t for t in eq if existing_counts.get(t, 0) < threshold]
+    log(f"[backfill] ユニバース {len(eq)} 銘柄 / 本数基準(>= {threshold}) 済み {len(already_done)} 件をスキップ / "
+        f"残り {len(target)} 件を取得")
+
+    if cfg.dryrun:
+        ohlcv = make_synthetic(target, n_bars=cfg.history_days, end=now.tz_localize(None))
+        meta = {"data_total": len(target), "data_ok": len(ohlcv), "short": [], "failed": [],
+                "elapsed_sec": 0.0, "rounds": [], "period": "synthetic", "asof": str(now)}
+    elif not target:
+        meta = {"data_total": 0, "data_ok": 0, "short": [], "failed": [],
+                "elapsed_sec": 0.0, "rounds": [], "period": "", "asof": str(now)}
+        ohlcv = {}
+    else:
+        ohlcv, meta = fetch_ohlcv(target, cfg.history_days, cfg.fetch_deadline_sec,
+                                  now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
+    ohlcv, issues = check_all(ohlcv)
+
+    merged, added, revisions = store.upsert(to_long(ohlcv))
+    store.save(merged)
+    store.write_daily_increments(added)
+    store.append_revisions(revisions, now)
+    if len(issues):
+        p = cfg.store_dir / "split_issues.csv"
+        prev = pd.read_csv(p) if p.exists() else None
+        issues["observed_on"] = now.strftime("%Y-%m-%d")
+        allx = pd.concat([prev, issues], ignore_index=True) if prev is not None else issues
+        allx.drop_duplicates(subset=["ticker", "date", "kind"], keep="last").to_csv(p, index=False)
+
+    merged_counts = _bar_counts(merged)
+    cumulative_done = int(sum(1 for t in eq if merged_counts.get(t, 0) >= threshold))
+    completion_rate = (cumulative_done / len(eq)) if eq else 0.0
+    meta.update({
+        "universe_total": len(eq),
+        "bar_threshold": threshold,
+        "already_done": len(already_done),
+        "newly_done": meta["data_ok"],
+        "cumulative_done": cumulative_done,
+        "completion_rate": round(completion_rate, 4),
+        "store_rows": int(len(merged)), "added": int(len(added)),
+        "revisions": int(len(revisions)), "split_issues": int(len(issues)),
+    })
+    (cfg.store_dir / "backfill_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    log(f"[backfill] 累計 {cumulative_done}/{len(eq)} ({completion_rate:.1%}) / "
+        f"今回取得 {meta['data_ok']} / 新規行 {len(added)}")
+    return meta
+
+
+def step_references(cfg: Settings, log=print) -> None:
+    """決算発表予定日・上場廃止銘柄一覧を JPX から取得し reference/ を更新する（T-104）。
+
+    決算発表予定日はローリング更新（直近1〜2ヶ月分のみ）で完全網羅ではない。
+    詳細・制約は docs/DATA_SOURCES.md 参照。取得失敗や0件時は既存ファイルを維持する。
+    DRYRUN はネットワークを叩かず何もしない。
+    """
+    cfg.ensure_dirs()
+    if cfg.dryrun:
+        log("[references] DRYRUN のためスキップ（既存ファイルを維持）")
+        return
+
+    earnings = fetch_earnings_schedule(cfg.jpx_earnings_url, log=log)
+    if len(earnings):
+        earnings.to_csv(cfg.reference_dir / "earnings_schedule.csv", index=False, encoding="utf-8-sig")
+        log(f"[references] 決算発表予定日 {len(earnings)} 件を保存")
+    else:
+        log("[references] 決算発表予定日 取得0件 → 既存ファイルを維持")
+
+    delistings = fetch_delistings(cfg.jpx_delistings_url, log=log)
+    if len(delistings):
+        delistings.to_csv(cfg.reference_dir / "delistings.csv", index=False, encoding="utf-8-sig")
+        log(f"[references] 上場廃止 {len(delistings)} 件を保存")
+    else:
+        log("[references] 上場廃止 取得0件 → 既存ファイルを維持")
+
+
 def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None,
                   issues: pd.DataFrame | None = None, log=print) -> pd.DataFrame:
     cfg.ensure_dirs()
@@ -133,7 +264,7 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
-    ap.add_argument("command", choices=["daily", "listed", "fetch", "universe"])
+    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill", "references", "universe"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -145,6 +276,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fetch":
             listed = _load_listed_cached(cfg, log)
             step_fetch(cfg, listed, log)
+        elif args.command == "index":
+            step_index(cfg, log)
+        elif args.command == "backfill":
+            step_backfill(cfg, log)
+        elif args.command == "references":
+            step_references(cfg, log)
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)
@@ -152,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
             refresh = cfg.dryrun or _now().weekday() == 0 or not (cfg.reference_dir / "listed_latest.csv").exists()
             listed = step_listed(cfg, log) if refresh else _load_listed_cached(cfg, log)
             ohlcv, meta, issues = step_fetch(cfg, listed, log)
+            step_index(cfg, log)
             step_universe(cfg, listed, ohlcv, issues, log)
         return 0
     except Exception as e:  # 失敗は赤にする（握り潰さない）

@@ -59,6 +59,23 @@ def make_synthetic(tickers: Iterable[str], n_bars: int = 400, seed: int = 0,
     return out
 
 
+def make_synthetic_index(n_bars: int = 400, seed: int = 0,
+                         end: pd.Timestamp | None = None) -> pd.DataFrame:
+    """DRYRUN 用の合成指数（TOPIX 代替、T-102）。個別銘柄と同じ日付軸で緩やかな上昇トレンドを作る。"""
+    idx = _bdays(n_bars, end)
+    rng = np.random.default_rng(seed)
+    ret = rng.normal(0.0004, 0.009, n_bars)
+    close = 2000.0 * np.exp(np.cumsum(ret))
+    o = close * (1 + rng.normal(0, 0.002, n_bars))
+    h = np.maximum(o, close) * (1 + np.abs(rng.normal(0, 0.003, n_bars)))
+    lo = np.minimum(o, close) * (1 - np.abs(rng.normal(0, 0.003, n_bars)))
+    v = rng.lognormal(mean=np.log(1.2e9), sigma=0.3, size=n_bars)
+    df = pd.DataFrame({"Open": o, "High": h, "Low": lo, "Close": close, "Volume": v,
+                       "Dividends": 0.0, "Stock Splits": 0.0}, index=idx)
+    df.index.name = "Date"
+    return df[COLS]
+
+
 def synthetic_listed(n: int = 60) -> pd.DataFrame:
     """合成ユニバース（JPX 正規化後の列）。"""
     rows = []

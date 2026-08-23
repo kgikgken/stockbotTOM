@@ -14,6 +14,7 @@ from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 
+IDX_TICKER = "__IDX__"  # 指数（TOPIX/日経225）を store に保存するときの ticker 値（T-102）
 LONG_COLS = ["ticker", "date", "open", "high", "low", "close", "volume", "dividends", "splits"]
 _WIDE_TO_LONG = {"Open": "open", "High": "high", "Low": "low", "Close": "close",
                  "Volume": "volume", "Dividends": "dividends", "Stock Splits": "splits"}
