@@ -131,9 +131,12 @@ class MissingCountTest(unittest.TestCase):
     def test_missing_count_is_low_in_well_populated_state(self):
         open_s, high_s, low_s, close_s, vol_s, div_s, idx_close_s = _build_acceptance_series()
         _, df, _ = _compute(open_s, high_s, low_s, close_s, vol_s, div_s, idx_close_s, 253)
-        always_nan = {"d3_template", "regime", "breadth_75", "breadth_200"}
+        # regime/breadth_75/breadth_200 は呼び出し側で渡さない限り常にNaN（T-207）。
+        # d3_template は T-302 で実装済みなのでここでは値が入っているはず
+        always_nan = {"regime", "breadth_75", "breadth_200"}
         nan_ids = set(df[df["value"].isna()]["id"])
-        # 常時NaNの4つを除けば、ブレイク状態でここまで計算できていない特徴量はごく僅かのはず
+        self.assertNotIn("d3_template", nan_ids)
+        # 常時NaNの3つを除けば、ブレイク状態でここまで計算できていない特徴量はごく僅かのはず
         self.assertLessEqual(len(nan_ids - always_nan), 3, msg=nan_ids - always_nan)
         self.assertTrue(always_nan.issubset(nan_ids))
 
