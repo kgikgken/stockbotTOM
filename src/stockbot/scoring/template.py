@@ -1,36 +1,46 @@
 """テンプレート適合度 d3_template（DESIGN.md §7 / TASKS.md T-302）。
 
-現状の実装範囲: 価格テンプレート（格子化・滞在比率 P・理想経路 W・適合度）のみ。
-出来高テンプレート（Vol/mean(Vol[l0..h0]) の格子で「上昇脚で高く、押し目で減衰」の
-理想経路）は DESIGN.md §7 に理想経路の具体的な数値アンカー（どの比率域を狙うか）が
-書かれておらず、CLAUDE.md「パラメータを増やさない・新しい閾値が欲しければ質問ログへ」
-に従い実装していない（docs/TASKS.md 質問ログ T-302 参照、設計責任者の回答待ち）。
-d3_template（価格と出来高の平均、DESIGN.md §7）はこの回答が出るまで確定できないため、
-features/dimensions.py にはまだ配線していない（引き続き NaN のまま）。
+価格テンプレートと出来高テンプレートの2つ（それぞれ格子化・滞在比率 P・理想経路 W・
+適合度）を実装し、d3_template = (価格の適合度 + 出来高の適合度) / 2 として返す
+（d3_template_score）。features.dimensions.compute_dimensions が呼び出す。
+出来高テンプレートの理想経路の数値アンカー（W_vol の帯）は DESIGN.md に明記が無かった
+ため、docs/TASKS.md 質問ログ T-302 で設計責任者に確認し、その回答を DESIGN.md §7/§12 に
+追記したうえで実装している。
 
 窓は l0..T（両端含む）。横軸（時間）は l0→0、H0→a、T→1 となる二区間線形写像
-（a = leg_bars/(leg_bars+d)）で 0〜1 に正規化し、10 等分した列に落とす。
-縦軸（価格位置）は y=(Close-L0.low)/leg（L0が0、H0が1）を -0.2〜1.2 の範囲で
-10 等分（幅0.14）した行に落とす。
+（a = leg_bars/(leg_bars+d)）で 0〜1 に正規化し、10 等分した列に落とす（価格・出来高
+共通）。縦軸は特徴量ごとに異なる（価格: y=(Close-L0.low)/leg、出来高:
+v=Vol[t]/mean(Vol[l0..h0])）。
 """
 from __future__ import annotations
+
+from typing import Callable
 
 import numpy as np
 
 GRID_N = 10
 Y_LO, Y_HI = -0.2, 1.2
 Y_BIN_WIDTH = (Y_HI - Y_LO) / GRID_N  # 0.14
+V_LO, V_HI = 0.0, 3.0
+V_BIN_WIDTH = (V_HI - V_LO) / GRID_N  # 0.3
 
 # DESIGN.md §7: W の初期値（固定の重み定数。これ以外の数値を増やさない）
 W_PATH = 1.0
 W_ADJACENT = 0.5
 W_BELOW_L0 = -1.0
 W_ABOVE_H0_EARLY_PULLBACK = -0.5
+W_VOL_INCREASE_PENALTY = -1.0
 
 # DESIGN.md §7: 押し目の理想経路が下がっていく先（y=0.6〜0.67）。行の丸め込み先として
 # 区間の下端寄りである行5（y=0.50〜0.64）を使う（0.6 はこの行に、0.67 はわずかに行6に
 # はみ出るが、行の刻み幅0.14に対して丸め誤差の範囲として行5に統一する）
 PB_DECLINE_TARGET_ROW = 5
+
+# DESIGN.md §7 出来高: 上昇脚 v=1.0〜1.4 の帯（行3〜4）、押し目 v=0.5〜0.8 の帯（行1〜2）、
+# 押し目の増加ペナルティは v>1.5（行5以上）
+UP_LEG_VOL_BAND = (3, 4)
+PB_VOL_BAND = (1, 2)
+PB_VOL_PENALTY_ROW_MIN = 5
 
 
 def time_column(t_norm: float) -> int:
@@ -39,8 +49,13 @@ def time_column(t_norm: float) -> int:
 
 
 def y_row(y: float) -> int:
-    """正規化価格位置 y を行インデックス（0〜9）に落とす。"""
+    """正規化価格位置 y を行インデックス（0〜9）に落とす（価格テンプレート用）。"""
     return int(np.clip(np.floor((y - Y_LO) / Y_BIN_WIDTH), 0, GRID_N - 1))
+
+
+def v_row(v: float) -> int:
+    """相対出来高 v を行インデックス（0〜9）に落とす（出来高テンプレート用）。"""
+    return int(np.clip(np.floor((v - V_LO) / V_BIN_WIDTH), 0, GRID_N - 1))
 
 
 def normalized_time(i: int, l0: int, h0: int, t_pos: int, leg_bars: int, d: int) -> float:
@@ -59,6 +74,24 @@ def _pullback_column_split(leg_bars: int, d: int) -> tuple[list[int], list[int]]
     return list(range(0, col_start)), list(range(col_start, GRID_N))
 
 
+def _build_grid(l0: int, h0: int, t_pos: int, leg_bars: int, d: int,
+                value_at: Callable[[int], float], row_of: Callable[[float], int]) -> np.ndarray:
+    """P[row][col] を作る共通処理（価格・出来高で共有。列ごとに合計1、データが無い
+    列は全0のまま）。value_at(i) が縦軸の生値、row_of(v) がそれを行に落とす関数。"""
+    grid = np.zeros((GRID_N, GRID_N))
+    counts = np.zeros(GRID_N)
+    for i in range(l0, t_pos + 1):
+        t_norm = normalized_time(i, l0, h0, t_pos, leg_bars, d)
+        col = time_column(t_norm)
+        row = row_of(value_at(i))
+        grid[row, col] += 1
+        counts[col] += 1
+    for col in range(GRID_N):
+        if counts[col] > 0:
+            grid[:, col] /= counts[col]
+    return grid
+
+
 def build_price_grid(close: np.ndarray, l0: int, h0: int, t_pos: int,
                      l0_low: float, leg: float, leg_bars: int, d: int) -> np.ndarray:
     """P[row][col] を作る（列ごとに合計1。データが無い列は全0のまま）。
@@ -67,19 +100,20 @@ def build_price_grid(close: np.ndarray, l0: int, h0: int, t_pos: int,
     """
     if leg <= 0 or leg_bars < 1 or d < 1:
         return np.full((GRID_N, GRID_N), np.nan)
-    grid = np.zeros((GRID_N, GRID_N))
-    counts = np.zeros(GRID_N)
-    for i in range(l0, t_pos + 1):
-        t_norm = normalized_time(i, l0, h0, t_pos, leg_bars, d)
-        col = time_column(t_norm)
-        y = (float(close[i]) - l0_low) / leg
-        row = y_row(y)
-        grid[row, col] += 1
-        counts[col] += 1
-    for col in range(GRID_N):
-        if counts[col] > 0:
-            grid[:, col] /= counts[col]
-    return grid
+    return _build_grid(l0, h0, t_pos, leg_bars, d,
+                       value_at=lambda i: (float(close[i]) - l0_low) / leg,
+                       row_of=y_row)
+
+
+def build_volume_grid(volume: np.ndarray, l0: int, h0: int, t_pos: int,
+                      vol_leg_mean: float, leg_bars: int, d: int) -> np.ndarray:
+    """P[row][col] を作る（出来高テンプレート）。vol_leg_mean<=0 等、正規化できない
+    場合は全て NaN の格子を返す。"""
+    if not np.isfinite(vol_leg_mean) or vol_leg_mean <= 0 or leg_bars < 1 or d < 1:
+        return np.full((GRID_N, GRID_N), np.nan)
+    return _build_grid(l0, h0, t_pos, leg_bars, d,
+                       value_at=lambda i: float(volume[i]) / vol_leg_mean,
+                       row_of=v_row)
 
 
 def build_price_weight(leg_bars: int, d: int) -> np.ndarray:
@@ -123,17 +157,68 @@ def build_price_weight(leg_bars: int, d: int) -> np.ndarray:
     return W
 
 
+def _fitness(W: np.ndarray, P: np.ndarray) -> float:
+    """DESIGN.md §7: 適合度 = Σ(W∘P) / W の正の総和、0〜1 に丸める。"""
+    if np.isnan(P).all():
+        return np.nan
+    positive_sum = W[W > 0].sum()
+    if positive_sum <= 0:
+        return np.nan
+    score = float((W * P).sum() / positive_sum)
+    return float(np.clip(score, 0.0, 1.0))
+
+
 def price_template_score(close: np.ndarray, l0: int, h0: int, t_pos: int,
                          l0_low: float, leg: float, leg_bars: int, d: int) -> float:
     """価格テンプレート適合度（0〜1）。窓が定義できない場合は NaN。"""
     if leg <= 0 or leg_bars < 1 or d < 1:
         return np.nan
     P = build_price_grid(close, l0, h0, t_pos, l0_low, leg, leg_bars, d)
-    if np.isnan(P).all():
-        return np.nan
     W = build_price_weight(leg_bars, d)
-    positive_sum = W[W > 0].sum()
-    if positive_sum <= 0:
+    return _fitness(W, P)
+
+
+def build_volume_weight(leg_bars: int, d: int) -> np.ndarray:
+    """DESIGN.md §7 の理想経路 W_vol（出来高）。上昇脚は v=1.0〜1.4 の帯、押し目
+    （最後の1列を除く）は v=0.5〜0.8 の帯かつ v>1.5 に−1。押し目の最後の1列は全0。"""
+    up_cols, pb_cols = _pullback_column_split(leg_bars, d)
+    W = np.zeros((GRID_N, GRID_N))
+
+    def _band(lo_row: int, hi_row: int, col: int) -> None:
+        W[lo_row, col] += W_PATH
+        W[hi_row, col] += W_PATH
+        if lo_row - 1 >= 0:
+            W[lo_row - 1, col] += W_ADJACENT
+        if hi_row + 1 < GRID_N:
+            W[hi_row + 1, col] += W_ADJACENT
+
+    for col in up_cols:
+        _band(*UP_LEG_VOL_BAND, col)
+
+    pb_rest = pb_cols[:-1] if pb_cols else []  # 最後の1列（再上昇の出来高増を許容）を除く
+    for col in pb_rest:
+        _band(*PB_VOL_BAND, col)
+        W[PB_VOL_PENALTY_ROW_MIN:, col] = W_VOL_INCREASE_PENALTY
+
+    return W
+
+
+def volume_template_score(volume: np.ndarray, l0: int, h0: int, t_pos: int,
+                          leg_bars: int, d: int) -> float:
+    """出来高テンプレート適合度（0〜1）。窓が定義できない場合は NaN。"""
+    if leg_bars < 1 or d < 1 or h0 <= l0:
         return np.nan
-    score = float((W * P).sum() / positive_sum)
-    return float(np.clip(score, 0.0, 1.0))
+    vol_leg_mean = float(np.mean(volume[l0:h0 + 1]))
+    if not np.isfinite(vol_leg_mean) or vol_leg_mean <= 0:
+        return np.nan
+    P = build_volume_grid(volume, l0, h0, t_pos, vol_leg_mean, leg_bars, d)
+    W = build_volume_weight(leg_bars, d)
+    return _fitness(W, P)
+
+
+def d3_template_score(price_score: float, volume_score: float) -> float:
+    """DESIGN.md §7: d3_template = (価格の適合度 + 出来高の適合度) / 2。
+    どちらかが未定義（NaN）なら d3_template も未定義。"""
+    if np.isnan(price_score) or np.isnan(volume_score):
+        return np.nan
+    return (price_score + volume_score) / 2.0

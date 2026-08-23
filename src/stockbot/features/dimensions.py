@@ -10,9 +10,8 @@
 SMA/ATR/BB幅など §5 の式に必要な指標は features.indicators を使って内部で計算する
 （features.pullback.pullback_state の呼び出し結果だけを外から受け取る）。
 
-範囲外（このタスクでは実装しない。ID は表に含めて NaN で返す）:
-- d3_template（§7 テンプレート適合度）… T-302
-- regime, breadth_75, breadth_200（§8.1 地合いゲージ・ブレス、ユニバース全体が必要）… T-207
+d3_template（§7 テンプレート適合度、T-302）は scoring.template を使って計算する
+（価格・出来高テンプレートの平均。窓が定義できない場合は NaN）。
 
 d3_ma_dist の「着地 MA の種別」（集計用、DESIGN.md 表の注記）は特徴量スコアの対象
 ではないため、戻り値のメイン表には入れず、2つ目の戻り値（extra dict）で返す。
@@ -29,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.jpx_lists import next_earnings_business_days
+from ..scoring import template
 from .indicators import atr_simple, atr_wilder, bb_width, sma, true_range, weekly_ohlcv
 from .pullback import STATE_BOUNCE, STATE_BREAK, trigger_fired
 from .swings import SWING_HIGH, swings_as_of
@@ -58,7 +58,7 @@ FEATURE_METADATA: list[tuple[str, str, Optional[str], Optional[tuple]]] = [
     ("d3_position", "D3", "band", (0.10, 0.50)),
     ("d3_dev5", "D3", "band", (-0.08, -0.03)),
     ("d3_bad_news", "D3", "binary", None),
-    ("d3_template", "D3", "up", None),  # T-302 で実装。ここでは常に NaN
+    ("d3_template", "D3", "up", None),
     ("d4_pb_ratio", "D4", "down", None),
     ("d4_pb_slope", "D4", "down", None),
     ("d4_bounce_vol", "D4", "up", None),
@@ -272,7 +272,11 @@ def compute_dimensions(
                     bad_news = True
                     break
             values["d3_bad_news"] = bad_news
-        # d3_template: T-302 未実装、常に NaN のまま
+
+        price_score = template.price_template_score(
+            c, l0, h0, t_pos, l0_low, pullback["leg"], pullback["leg_bars"], d)
+        volume_score = template.volume_template_score(v, l0, h0, t_pos, pullback["leg_bars"], d)
+        values["d3_template"] = template.d3_template_score(price_score, volume_score)
 
     # ---------------------------------------------------------------- D4
     if has_structure:

@@ -1,14 +1,18 @@
-"""価格テンプレート（DESIGN.md §7 / TASKS.md T-302）のテスト。
-
-出来高テンプレートは未実装（docs/TASKS.md 質問ログ T-302、設計責任者の回答待ち）のため
-ここでは価格テンプレートのみを対象にする。
-"""
+"""テンプレート適合度（DESIGN.md §7 / TASKS.md T-302）のテスト。価格・出来高の両方と、
+その平均である d3_template_score を対象にする。"""
 import unittest
 
 import numpy as np
 
 from . import _path  # noqa: F401
-from stockbot.scoring.template import GRID_N, build_price_grid, price_template_score
+from stockbot.scoring.template import (
+    GRID_N,
+    build_price_grid,
+    build_volume_grid,
+    d3_template_score,
+    price_template_score,
+    volume_template_score,
+)
 
 L0_LOW = 100.0
 H0_HIGH = 200.0
@@ -116,6 +120,96 @@ class EdgeCaseTest(unittest.TestCase):
         self.assertFalse(np.isnan(score))
         self.assertGreaterEqual(score, 0.0)
         self.assertLessEqual(score, 1.0)
+
+
+BASE_VOL = 1000.0
+
+
+def _volume_path(decline: bool) -> np.ndarray:
+    """上昇脚は出来高が増える（~1.0x→1.35x）。押し目は decline=True なら1.35x→0.65xへ
+    緩やかに減衰、decline=False なら1.35x→2.35xへ増加する（分配の兆候、ペナルティ域）。"""
+    vol = np.empty(T_POS + 1)
+    for i in range(0, H0):
+        vol[i] = BASE_VOL * (1.0 + 0.35 * (i / LEG_BARS))
+    vol[H0] = BASE_VOL * 1.35
+    for i in range(H0 + 1, T_POS + 1):
+        frac = (i - H0) / D
+        if decline:
+            v = 1.35 - min(frac, 0.8) / 0.8 * 0.70  # 1.35 -> 0.65
+        else:
+            v = 1.35 + min(frac, 0.8) / 0.8 * 1.00  # 1.35 -> 2.35
+        vol[i] = BASE_VOL * v
+    return vol
+
+
+class VolumeGridColumnSumTest(unittest.TestCase):
+    """必須テスト: 列ごとの P の合計が1（出来高テンプレート）。"""
+
+    def test_every_populated_column_sums_to_one(self):
+        vol = _volume_path(decline=True)
+        vol_leg_mean = float(np.mean(vol[L0:H0 + 1]))
+        P = build_volume_grid(vol, L0, H0, T_POS, vol_leg_mean, LEG_BARS, D)
+        col_sums = P.sum(axis=0)
+        self.assertTrue((col_sums > 0).all(), msg=col_sums)
+        for col in range(GRID_N):
+            self.assertAlmostEqual(col_sums[col], 1.0, places=9, msg=f"col={col}")
+
+    def test_undefined_vol_leg_mean_gives_all_nan_grid(self):
+        vol = _volume_path(decline=True)
+        P = build_volume_grid(vol, L0, H0, T_POS, 0.0, LEG_BARS, D)
+        self.assertTrue(np.isnan(P).all())
+
+
+class VolumeIdealVsIncreaseTest(unittest.TestCase):
+    """受け入れ: 「脚で出来高が多く押し目で減る」経路 > 「押し目で出来高が増える」経路。"""
+
+    def test_declining_pullback_volume_scores_higher_than_increasing(self):
+        decline_score = volume_template_score(_volume_path(True), L0, H0, T_POS, LEG_BARS, D)
+        increase_score = volume_template_score(_volume_path(False), L0, H0, T_POS, LEG_BARS, D)
+        self.assertFalse(np.isnan(decline_score))
+        self.assertFalse(np.isnan(increase_score))
+        self.assertGreater(decline_score, increase_score)
+
+    def test_score_is_clipped_to_zero_one(self):
+        for score in (
+            volume_template_score(_volume_path(True), L0, H0, T_POS, LEG_BARS, D),
+            volume_template_score(_volume_path(False), L0, H0, T_POS, LEG_BARS, D),
+        ):
+            self.assertGreaterEqual(score, 0.0)
+            self.assertLessEqual(score, 1.0)
+
+
+class VolumeRecalcConsistencyTest(unittest.TestCase):
+    """必須テスト（DESIGN.md §11）: T 時点の値は T より後のデータを追加しても変わらない。"""
+
+    def test_appending_future_bars_does_not_change_score(self):
+        vol = _volume_path(True)
+        score_full = volume_template_score(vol, L0, H0, T_POS, LEG_BARS, D)
+        extended = np.concatenate([vol, np.array([9999.0, 1.0, 5000.0])])
+        score_same_t = volume_template_score(extended, L0, H0, T_POS, LEG_BARS, D)
+        self.assertEqual(score_full, score_same_t)
+
+
+class VolumeEdgeCaseTest(unittest.TestCase):
+    def test_zero_leg_mean_returns_nan(self):
+        vol = np.zeros(T_POS + 1)
+        self.assertTrue(np.isnan(volume_template_score(vol, L0, H0, T_POS, LEG_BARS, D)))
+
+    def test_h0_equal_l0_returns_nan(self):
+        vol = _volume_path(True)
+        self.assertTrue(np.isnan(volume_template_score(vol, 5, 5, T_POS, LEG_BARS, D)))
+
+
+class D3TemplateScoreTest(unittest.TestCase):
+    def test_is_average_of_price_and_volume(self):
+        price = 0.8
+        volume = 0.4
+        self.assertAlmostEqual(d3_template_score(price, volume), 0.6, places=9)
+
+    def test_nan_if_either_side_undefined(self):
+        self.assertTrue(np.isnan(d3_template_score(np.nan, 0.5)))
+        self.assertTrue(np.isnan(d3_template_score(0.5, np.nan)))
+        self.assertTrue(np.isnan(d3_template_score(np.nan, np.nan)))
 
 
 if __name__ == "__main__":
