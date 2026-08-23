@@ -284,10 +284,10 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
         earnings_schedule = load_earnings_schedule(p)
 
     tickers = universe[universe["passes"]]["ticker"].tolist()
-    df = compute_daily_features(ohlcv, tickers, idx_df["Close"], cfg.k,
+    df = compute_daily_features(ohlcv, tickers, idx_df["Close"], cfg.k, cfg.label_n,
                                 earnings_schedule=earnings_schedule, log=log)
     path = save_daily_features(df, cfg.daily_dir, _now())
-    log(f"[features] 採点対象 {len(tickers)} 銘柄中 {len(df)} 件を {path.name} に保存")
+    log(f"[features] ユニバース通過 {len(tickers)} 銘柄中 {len(df)} 件を {path.name} に保存")
     return df
 
 

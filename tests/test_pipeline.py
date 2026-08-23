@@ -1,4 +1,4 @@
-"""日次特徴量の保存（T-206）。列名の安定性・状態フィルタ・保存往復を確認する。"""
+"""日次特徴量の保存（T-206/T-208）。列名の安定性・状態/ゲートフィルタ・保存往復を確認する。"""
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +8,7 @@ import pandas as pd
 
 from . import _path  # noqa: F401
 from stockbot.data.synthetic import make_synthetic, make_synthetic_index
-from stockbot.features import dimensions, pullback
+from stockbot.features import dimensions, gates, pullback
 from stockbot.pipeline import (
     DAILY_FEATURES_COLS,
     DIMENSION_SCORE_COLS,
@@ -32,24 +32,34 @@ def _synthetic(n_tickers=10, n_bars=400, seed=0):
 class SchemaStabilityTest(unittest.TestCase):
     def test_columns_are_stable_and_include_all_registered_features(self):
         tickers, ohlcv, idx_close = _synthetic()
-        df = compute_daily_features(ohlcv, tickers, idx_close, K)
+        df = compute_daily_features(ohlcv, tickers, idx_close, K, label_n=15)
         self.assertEqual(list(df.columns), DAILY_FEATURES_COLS)
         for fid in dimensions.FEATURE_IDS:
             self.assertIn(fid, df.columns)
+        for col in gates.GATE_COLS:
+            self.assertIn(col, df.columns)
         for col in DIMENSION_SCORE_COLS + SCORE_COLS:
             self.assertIn(col, df.columns)
+
+    def test_kept_rows_all_pass_all_gates(self):
+        """採点対象として残った行は全てゲートを通過しているはず（T-208）。"""
+        tickers, ohlcv, idx_close = _synthetic()
+        df = compute_daily_features(ohlcv, tickers, idx_close, K, label_n=15)
+        if len(df):
+            self.assertTrue(df["gate_pass"].all())
+            self.assertTrue((df[["g0", "g1", "g2", "g3"]] == True).all().all())  # noqa: E712
 
     def test_score_columns_are_nan_placeholders(self):
         """T-301/T-302 未実装のため、次元スコア・総合スコアは常にNaN。"""
         tickers, ohlcv, idx_close = _synthetic()
-        df = compute_daily_features(ohlcv, tickers, idx_close, K)
+        df = compute_daily_features(ohlcv, tickers, idx_close, K, label_n=15)
         if len(df):
             for col in DIMENSION_SCORE_COLS + SCORE_COLS:
                 self.assertTrue(df[col].isna().all(), msg=col)
 
     def test_empty_result_still_has_full_schema(self):
         empty = compute_daily_features({}, [], pd.Series([100.0, 101.0],
-                                        index=pd.bdate_range("2024-01-01", periods=2)), K)
+                                        index=pd.bdate_range("2024-01-01", periods=2)), K, label_n=15)
         self.assertEqual(list(empty.columns), DAILY_FEATURES_COLS)
         self.assertEqual(len(empty), 0)
 
@@ -57,7 +67,7 @@ class SchemaStabilityTest(unittest.TestCase):
 class ScorableStateFilterTest(unittest.TestCase):
     def test_only_forming_bounce_break_states_are_kept(self):
         tickers, ohlcv, idx_close = _synthetic()
-        df = compute_daily_features(ohlcv, tickers, idx_close, K)
+        df = compute_daily_features(ohlcv, tickers, idx_close, K, label_n=15)
         allowed = {pullback.STATE_FORMING, pullback.STATE_BOUNCE, pullback.STATE_BREAK}
         self.assertTrue(set(df["state"].unique()).issubset(allowed))
         self.assertGreater(len(df), 0, "合成データなら少なくとも1件は採点対象になるはず")
@@ -66,14 +76,14 @@ class ScorableStateFilterTest(unittest.TestCase):
         tickers, ohlcv, idx_close = _synthetic()
         short_ticker = "9999.T"
         ohlcv[short_ticker] = ohlcv[tickers[0]].iloc[:10].copy()
-        df = compute_daily_features(ohlcv, tickers + [short_ticker], idx_close, K)
+        df = compute_daily_features(ohlcv, tickers + [short_ticker], idx_close, K, label_n=15)
         self.assertNotIn(short_ticker, set(df["ticker"]))
 
 
 class RegimeWiringTest(unittest.TestCase):
     def test_regime_and_breadth_columns_are_populated(self):
         tickers, ohlcv, idx_close = _synthetic()
-        df = compute_daily_features(ohlcv, tickers, idx_close, K)
+        df = compute_daily_features(ohlcv, tickers, idx_close, K, label_n=15)
         if len(df):
             self.assertTrue(df["regime"].isin(["強", "中", "弱"]).all())
             self.assertTrue(((df["breadth_75"] >= 0) & (df["breadth_75"] <= 1)).all())
@@ -86,7 +96,7 @@ class RegimeWiringTest(unittest.TestCase):
 class SaveDailyFeaturesTest(unittest.TestCase):
     def test_filename_and_roundtrip(self):
         tickers, ohlcv, idx_close = _synthetic()
-        df = compute_daily_features(ohlcv, tickers, idx_close, K)
+        df = compute_daily_features(ohlcv, tickers, idx_close, K, label_n=15)
         with TemporaryDirectory() as tmp:
             path = save_daily_features(df, Path(tmp), pd.Timestamp("2026-08-21"))
             self.assertEqual(path.name, "features_2026-08-21.csv.gz")
