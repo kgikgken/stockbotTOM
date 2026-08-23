@@ -71,7 +71,7 @@ def find_l0(alternated_swings: pd.DataFrame, t_pos: int, h0: int) -> Optional[in
     return int(lows["index"].max())
 
 
-def _trigger_fired(close: np.ndarray, sma5: np.ndarray, high: np.ndarray, t: int) -> bool:
+def trigger_fired(close: np.ndarray, sma5: np.ndarray, high: np.ndarray, t: int) -> bool:
     """反発トリガー（§4.3）。t-2 が存在しない先頭付近は発火しない。"""
     if t < 2:
         return False
@@ -189,7 +189,7 @@ def pullback_state(high: pd.Series, low: pd.Series, close: pd.Series,
     for t_trig in (t_pos - 2, t_pos - 1, t_pos):
         if t_trig <= h0 or t_trig >= len(close):
             continue
-        if _trigger_fired(c_arr, sma5_arr, h_arr, t_trig) and lp <= t_trig:
+        if trigger_fired(c_arr, sma5_arr, h_arr, t_trig) and lp <= t_trig:
             bounced = True
             break
     result["state"] = STATE_BOUNCE if bounced else STATE_FORMING
