@@ -28,6 +28,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from ..data.jpx_lists import next_earnings_business_days
 from .indicators import atr_simple, atr_wilder, bb_width, sma, true_range, weekly_ohlcv
 from .pullback import STATE_BOUNCE, STATE_BREAK, trigger_fired
 from .swings import SWING_HIGH, swings_as_of
@@ -423,12 +424,9 @@ def compute_dimensions(
     values["limit_flag"] = limit_flag
 
     if earnings_schedule is not None and ticker is not None:
-        sched = earnings_schedule[earnings_schedule["ticker"] == ticker]
-        future = sched[sched["date"] >= asof]
-        if len(future):
-            next_date = future["date"].min()
-            values["earnings_days"] = int(np.busday_count(
-                np.datetime64(asof, "D"), np.datetime64(next_date, "D")))
+        days = next_earnings_business_days(earnings_schedule, asof, ticker)
+        if days is not None:
+            values["earnings_days"] = days
     if regime is not None:
         values["regime"] = regime
     if breadth_75 is not None and not np.isnan(breadth_75):

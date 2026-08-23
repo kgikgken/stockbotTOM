@@ -26,6 +26,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
+import numpy as np
 import pandas as pd
 
 JPX_HOST = "https://www.jpx.co.jp"  # 既定 URL は config.py の JPX_*_URL_DEFAULT 側で持つ
@@ -294,3 +295,20 @@ def next_earnings_days(schedule: pd.DataFrame, asof: pd.Timestamp, ticker: str) 
     if len(s) == 0:
         return None
     return int((s["date"].min() - asof).days)
+
+
+def next_earnings_business_days(schedule: pd.DataFrame, asof: pd.Timestamp,
+                                ticker: str) -> Optional[int]:
+    """asof 以降で最も近い決算発表日までの営業日数。無ければ None。
+
+    土日のみを除外する近似（np.busday_count。祝日カレンダーは考慮しない）。
+    D8 earnings_days（DESIGN.md §5）・G0（§2、保有上限 label_n 営業日）で共用する。
+    """
+    if schedule is None or len(schedule) == 0:
+        return None
+    s = schedule[(schedule["ticker"] == ticker) & (schedule["date"] >= asof)]
+    if len(s) == 0:
+        return None
+    next_date = s["date"].min()
+    return int(np.busday_count(np.datetime64(pd.Timestamp(asof), "D"),
+                               np.datetime64(pd.Timestamp(next_date), "D")))

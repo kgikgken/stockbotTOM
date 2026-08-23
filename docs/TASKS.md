@@ -65,6 +65,21 @@ L1 の判定が出るまで M3b（表示・テンプレート校正）と M5（�
 - 目的: DESIGN.md §8.1 の 6 点ゲージ。指数と store 全体から計算
 - 受け入れ: 合成データで 強/中/弱 が出る。再計算一致
 
+### T-208 ゲート G0〜G3
+- 目的: `features/gates.py`: DESIGN.md §2 の 4 ゲートを判定する
+  - G0: ユニバース通過（universe/latest.csv の passes）、かつ T から label_n 営業日以内に
+    決算発表が無い（earnings_schedule が空、または当該銘柄の予定日が取れない場合は
+    この条件を省略して True とし、`g0_earnings_unknown = True` を立てる）
+  - G1: SMA75[T] > SMA200[T] かつ SMA200[T] > SMA200[T-30]
+  - G2: Close[T] >= SMA200[T]
+  - G3: Close[T] >= 0.75 * max(High[T-251..T])
+- 戻り値: 各ゲートの bool と総合 `gate_pass`、および g0_earnings_unknown
+- pipeline.py: 採点対象を「gate_pass かつ 状態が形成中/反発開始/ブレイク」に変更する。
+  日次特徴量ファイルには gate 列も保存し、ゲート落ちの内訳がログに出るようにする
+  （G1 落ち / G2 落ち / G3 落ち / 決算接近 の件数）
+- 受け入れ: 合成データで各ゲートが単独で効く。決算データが無い場合も落ちない
+- 必須テスト: 再計算一致（DESIGN.md §11）。SMA200[T-30] の履歴が足りない日は False
+
 ---
 
 ## M3a スコア合成（L1 に必要な部分）
