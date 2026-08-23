@@ -63,6 +63,9 @@ class HandCalcTest(unittest.TestCase):
         for hz in (10, 15, 20, 30):
             self.assertTrue(np.isnan(out[f"r_{hz}"]), msg=hz)
 
+        # censored_at: T+1以降、系列には25-11=14本あるが N=5 で頭打ちなので5
+        self.assertEqual(out["censored_at"], 5)
+
 
 class OutcomeLabelPriorityTest(unittest.TestCase):
     """成功/失敗/未決の判定順（同日に両方成立したら失敗を優先）。"""
@@ -151,19 +154,24 @@ class ExcessReturnTest(unittest.TestCase):
 
 
 class UniverseBenchmarkReturnsTest(unittest.TestCase):
+    """T-401 条件付き承認: 生存バイアス対策（打ち切り扱い）と n_used/n_truncated/n_excluded。"""
+
     def _df(self, opens, closes):
         idx = pd.bdate_range("2024-01-01", periods=len(opens))
         return pd.DataFrame({"Open": opens, "Close": closes}, index=idx)
 
     def test_simple_average_across_universe(self):
         date_t = pd.bdate_range("2024-01-01", periods=1)[0]  # 位置0がT
-        # T+1=位置1の始値、T+3=位置3の終値
+        # T+1=位置1の始値、T+3=位置3の終値。どちらも打ち切り無し
         a = self._df([0, 100.0, 0, 0], [0, 0, 0, 110.0])
         b = self._df([0, 100.0, 0, 0], [0, 0, 0, 121.0])
         universe = {"A": a, "B": b}
         result = universe_benchmark_returns(universe, date_t, h_list=(3,))
         expected = float(np.mean([np.log(110.0 / 100.0), np.log(121.0 / 100.0)]))
-        self.assertAlmostEqual(result[3], expected, places=9)
+        self.assertAlmostEqual(result[3]["mean"], expected, places=9)
+        self.assertEqual(result[3]["n_used"], 2)
+        self.assertEqual(result[3]["n_truncated"], 0)
+        self.assertEqual(result[3]["n_excluded"], 0)
 
     def test_ticker_without_date_t_is_excluded(self):
         date_t = pd.Timestamp("2024-01-01")
@@ -171,20 +179,85 @@ class UniverseBenchmarkReturnsTest(unittest.TestCase):
         b = pd.DataFrame({"Open": [1.0], "Close": [1.0]},
                          index=pd.bdate_range("2030-01-01", periods=1))  # date_t が無い
         result = universe_benchmark_returns({"A": a, "B": b}, date_t, h_list=(3,))
-        self.assertAlmostEqual(result[3], np.log(110.0 / 100.0), places=9)
+        self.assertAlmostEqual(result[3]["mean"], np.log(110.0 / 100.0), places=9)
+        self.assertEqual(result[3]["n_used"], 1)
+        self.assertEqual(result[3]["n_excluded"], 1)
 
-    def test_ticker_with_insufficient_forward_data_is_excluded(self):
+    def test_missing_th_close_is_truncated_not_excluded(self):
+        """生存バイアス対策の核心: T+h が無い銘柄は除外せず、最後の有効な終値で打ち切る。"""
+        date_t = pd.bdate_range("2024-01-01", periods=1)[0]
+        a = self._df([0, 100.0, 0, 0], [0, 0, 0, 110.0])  # T+3まで揃っている
+        # B は T, T+1, T+2 の3本しか無い（上場廃止等でT+3が存在しない）
+        idx_b = pd.bdate_range("2024-01-01", periods=3)
+        b = pd.DataFrame({"Open": [0.0, 100.0, 0.0], "Close": [0.0, 0.0, 90.0]}, index=idx_b)
+        result = universe_benchmark_returns({"A": a, "B": b}, date_t, h_list=(3,))
+        # Bは T+2 の終値(90)までの打ち切りリターン ln(90/100) を使う（除外しない）
+        expected = float(np.mean([np.log(110.0 / 100.0), np.log(90.0 / 100.0)]))
+        self.assertAlmostEqual(result[3]["mean"], expected, places=9)
+        self.assertEqual(result[3]["n_used"], 2)
+        self.assertEqual(result[3]["n_truncated"], 1)
+        self.assertEqual(result[3]["n_excluded"], 0)
+
+    def test_ticker_without_t1_open_is_excluded(self):
         date_t = pd.bdate_range("2024-01-01", periods=1)[0]
         a = self._df([0, 100.0, 0, 0], [0, 0, 0, 110.0])
-        b = self._df([0, 100.0], [0, 0])  # T+3が存在しない
+        # B は T しか無い（T+1 の始値自体が存在しない）→ 打ち切りようがなく除外
+        idx_b = pd.bdate_range("2024-01-01", periods=1)
+        b = pd.DataFrame({"Open": [1.0], "Close": [1.0]}, index=idx_b)
         result = universe_benchmark_returns({"A": a, "B": b}, date_t, h_list=(3,))
-        self.assertAlmostEqual(result[3], np.log(110.0 / 100.0), places=9)
+        self.assertAlmostEqual(result[3]["mean"], np.log(110.0 / 100.0), places=9)
+        self.assertEqual(result[3]["n_used"], 1)
+        self.assertEqual(result[3]["n_excluded"], 1)
 
     def test_no_qualifying_ticker_gives_nan(self):
         date_t = pd.bdate_range("2024-01-01", periods=1)[0]
-        b = self._df([0, 100.0], [0, 0])
+        idx_b = pd.bdate_range("2024-01-01", periods=1)
+        b = pd.DataFrame({"Open": [1.0], "Close": [1.0]}, index=idx_b)  # T+1が無い
         result = universe_benchmark_returns({"B": b}, date_t, h_list=(3,))
-        self.assertTrue(np.isnan(result[3]))
+        self.assertTrue(np.isnan(result[3]["mean"]))
+        self.assertEqual(result[3]["n_used"], 0)
+        self.assertEqual(result[3]["n_excluded"], 1)
+
+
+class CensoredAtTest(unittest.TestCase):
+    """T-401 条件付き承認: censored_at で「上場廃止等でデータが尽きた」ことを区別できる。"""
+
+    def test_censored_at_is_capped_at_n_when_enough_data(self):
+        open_, high, low, close = HandCalcTest()._build()
+        benchmarks = {h: np.nan for h in (3, 5, 10, 15, 20, 30)}
+        out = compute_labels(close, open_, high, low, HandCalcTest.T_POS, HandCalcTest.H0_HIGH,
+                             HandCalcTest.LP_VALUE, HandCalcTest.ATR_T, benchmarks, n=5)
+        self.assertEqual(out["censored_at"], 5)
+
+    @staticmethod
+    def _unpadded_series(values: list[float]) -> pd.Series:
+        # _series() は IDX(25本)に合わせてNaNで埋めてしまうため、系列が本当に短い
+        # （上場廃止で打ち切られた）ケースを再現するにはそのままの長さで作る
+        return pd.Series(values, index=pd.bdate_range("2024-01-01", periods=len(values)))
+
+    def test_censored_at_reflects_series_ending_early(self):
+        # T_POS=10、系列はT+1,T+2の2本しか無い（n=15を要求してもcensored_atは2）
+        t_pos = 10
+        open_ = self._unpadded_series([0.0] * t_pos + [0.0, 100.0, 101.0])
+        high = self._unpadded_series([0.0] * t_pos + [0.0, 105.0, 106.0])
+        low = self._unpadded_series([0.0] * t_pos + [0.0, 98.0, 99.0])
+        close = self._unpadded_series([0.0] * t_pos + [0.0, 102.0, 103.0])
+        benchmarks = {h: np.nan for h in (3, 5, 10, 15, 20, 30)}
+        out = compute_labels(close, open_, high, low, t_pos, h0_high=200.0, lp_value=50.0,
+                             atr_t=5.0, universe_benchmarks=benchmarks, n=15)
+        self.assertEqual(out["censored_at"], 2)
+
+    def test_censored_at_is_zero_when_t_is_the_last_bar(self):
+        t_pos = 10
+        open_ = self._unpadded_series([0.0] * (t_pos + 1))
+        high = self._unpadded_series([0.0] * (t_pos + 1))
+        low = self._unpadded_series([0.0] * (t_pos + 1))
+        close = self._unpadded_series([0.0] * (t_pos + 1))
+        benchmarks = {h: np.nan for h in (3, 5, 10, 15, 20, 30)}
+        out = compute_labels(close, open_, high, low, t_pos, h0_high=200.0, lp_value=50.0,
+                             atr_t=5.0, universe_benchmarks=benchmarks, n=15)
+        self.assertEqual(out["censored_at"], 0)
+        self.assertEqual(out["label"], LABEL_UNDETERMINED)
 
 
 class NoLookaheadTest(unittest.TestCase):
@@ -233,7 +306,7 @@ class NoLookaheadTest(unittest.TestCase):
         a2 = pd.DataFrame({"Open": [999.0, 100.0, 1.0, 0.0], "Close": [0, 0, 0, 110.0]}, index=idx)
         r1 = universe_benchmark_returns({"A": a1}, date_t, h_list=(3,))
         r2 = universe_benchmark_returns({"A": a2}, date_t, h_list=(3,))
-        self.assertEqual(r1[3], r2[3])
+        self.assertEqual(r1[3]["mean"], r2[3]["mean"])
 
 
 if __name__ == "__main__":
