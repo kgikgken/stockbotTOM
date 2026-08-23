@@ -1,23 +1,26 @@
-"""日次パイプライン: 指標→ゲート→スイング→押し目→特徴量→地合いを通し、日次スナップ
-ショットに保存する（DESIGN.md §1 / TASKS.md T-206, T-208）。
+"""日次パイプライン: 指標→ゲート→スイング→押し目→特徴量→地合い→プール正規化と合成を
+通し、日次スナップショットに保存する（DESIGN.md §1 / TASKS.md T-206, T-208, T-301）。
 
-DESIGN.md §1 の手順のうち、正規化と合成・次元スコア・総合スコア（§6、T-301/T-302）は
-未実装。受け入れ条件（T-206: 列名が安定し、後日 resolver（T-504）が読める）を満たす
-ため、次元スコア（dim_D1_score..dim_D7_score）・総合スコア（score_v1/v2/v3）の列は
-スキーマ上ここで確保し、値は NaN のまま保存する。T-301/T-302 実装後は、この関数の中で
-値を埋めるだけで済み、列名・列順は変えない。
+DESIGN.md §1 の手順のうち、d3_template（§7, T-302）は未実装（常に NaN。§6.2 の欠損
+規則により次元合成では 0.5 として扱われる）。次元スコア（dim_D1_score..dim_D7_score）・
+総合スコア（score_v1/v2/v3）は T-301（scoring/composite.py）で計算する。history_pool
+（直近 pool_days-1 営業日ぶんの過去の日次特徴量。load_recent_daily_features 参照）を
+渡すと当日ぶんと合わせてプールを組む。渡さない場合は当日ぶんだけがプールになる
+（DESIGN.md §6.1 の「プールの日数が足りない初期は利用可能な日数で計算」に該当する
+一形態であり、1 日だけの自己正規化として composite 側がログに出す）。
 
 採点対象（T-208）は「gate_pass（G0〜G3 全通過）かつ 状態が形成中/反発開始/ブレイク」。
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from .features import dimensions, gates, indicators, pullback, regime, swings
+from .scoring import composite
 
 # DESIGN.md §6.3: 次元スコアの対象は D1〜D7（D8 は採点しない）
 SCORED_DIMENSIONS = ["D1", "D2", "D3", "D4", "D5", "D6", "D7"]
@@ -39,18 +42,31 @@ DAILY_FEATURES_COLS = (STRUCT_COLS + gates.GATE_COLS + dimensions.FEATURE_IDS
 SCORABLE_STATES = (pullback.STATE_FORMING, pullback.STATE_BOUNCE, pullback.STATE_BREAK)
 MIN_HISTORY_BARS = 60  # 指標計算に必要な最低限（SMA200 等はこれ未満だと自然に NaN になる）
 
+# CSV 往復でブール列が壊れないよう明示的に変換する対象（T-301）
+BOOL_COLS = (list(gates.GATE_COLS) + ["is_shallow", "is_deep"]
+            + [fid for fid, _dim, direction, _band in dimensions.FEATURE_METADATA
+               if direction == "binary"])
+DATE_COLS = ["date", "h0_date", "l0_date", "lp_date"]
+
 
 def compute_daily_features(
     ohlcv: Dict[str, pd.DataFrame], universe_tickers: Iterable[str],
     idx_close: pd.Series, k: int, label_n: int,
     earnings_schedule: Optional[pd.DataFrame] = None,
+    history_pool: Optional[pd.DataFrame] = None,
+    pool_days: int = composite.POOL_DAYS,
     log=print,
 ) -> pd.DataFrame:
-    """全採点銘柄（gate_pass かつ 状態が形成中/反発開始/ブレイク）の特徴量・状態・地合い
-    を1銘柄1行でまとめる。各銘柄は自身の系列の最終日（＝当日）だけを評価する。
+    """全採点銘柄（gate_pass かつ 状態が形成中/反発開始/ブレイク）の特徴量・状態・地合い・
+    プール正規化スコア（DESIGN.md §6、T-301）を1銘柄1行でまとめる。各銘柄は自身の系列の
+    最終日（＝当日）だけを評価する。
 
     universe_tickers は既にユニバース通過済み（G0 の「ユニバース通過」条件）の銘柄一覧
     を渡す想定。地合いゲージ・ブレスは日次で1回だけ計算し、全銘柄で共有する。
+
+    history_pool を渡すと、当日ぶんの行と合わせて直近 pool_days 営業日ぶんのプールを
+    組んでスコアを計算する（load_recent_daily_features で読み込んだものを渡す想定）。
+    渡さない場合は当日ぶんだけをプールとして計算する。
     """
     universe_tickers = list(universe_tickers)
     breadth_universe = {t: ohlcv[t] for t in universe_tickers
@@ -123,7 +139,7 @@ def compute_daily_features(
         for fid, value in zip(feats["id"], feats["value"]):
             row[fid] = value
         for col in DIMENSION_SCORE_COLS + SCORE_COLS:
-            row[col] = np.nan  # T-301/T-302 実装後にここを埋める
+            row[col] = np.nan  # 下でプール正規化スコアにより上書きする（採点対象が無ければ NaN のまま）
         rows.append(row)
 
     log(f"[features] 評価 {n_evaluated} 銘柄 / 状態該当 {n_state_scorable} / "
@@ -134,8 +150,70 @@ def compute_daily_features(
 
     if not rows:
         return pd.DataFrame(columns=DAILY_FEATURES_COLS)
-    out = pd.DataFrame(rows)
-    return out[DAILY_FEATURES_COLS]
+    out = pd.DataFrame(rows)[DAILY_FEATURES_COLS]
+
+    pool_parts = [p for p in (history_pool, out) if p is not None and len(p)]
+    full_pool = pd.concat(pool_parts, ignore_index=True) if pool_parts else out
+    scored = composite.compute_composite_scores(full_pool, asof, pool_days=pool_days, log=log)
+    if len(scored):
+        scored = scored.drop_duplicates(subset="ticker", keep="last").set_index("ticker")
+        for col in DIMENSION_SCORE_COLS + SCORE_COLS:
+            out[col] = out["ticker"].map(scored[col]).to_numpy()
+
+    return out
+
+
+def load_recent_daily_features(daily_dir: Path, asof: pd.Timestamp, pool_days: int) -> pd.DataFrame:
+    """直近 pool_days-1 営業日ぶん（asof より前）の日次特徴量スナップショットを読み込み
+    連結する（DESIGN.md §6.1 / T-301）。当日ぶんは compute_daily_features 側で作るので
+    ここでは含めない。daily_dir に save_daily_features が書いた features_YYYY-MM-DD.csv.gz
+    が並んでいる前提。
+
+    ブール列（gate 列・is_shallow/is_deep・二値特徴量）は CSV 往復で "True"/"False" の
+    文字列や、欠損混在時は object dtype になり得るため、明示的に bool/NA へ変換する
+    （素朴に bool(value) すると NaN や "False" 文字列が真になる不具合を避けるため）。
+    """
+    daily_dir = Path(daily_dir)
+    asof = pd.Timestamp(asof)
+    if pool_days <= 1 or not daily_dir.exists():
+        return pd.DataFrame(columns=DAILY_FEATURES_COLS)
+
+    dated: List[tuple] = []
+    for f in sorted(daily_dir.glob("features_*.csv.gz")):
+        name = f.name
+        if not (name.startswith("features_") and name.endswith(".csv.gz")):
+            continue
+        date_str = name[len("features_"):-len(".csv.gz")]
+        try:
+            d = pd.Timestamp(date_str)
+        except ValueError:
+            continue
+        if d < asof:
+            dated.append((d, f))
+    dated.sort(key=lambda x: x[0])
+    recent = dated[-(pool_days - 1):]
+
+    frames = []
+    for _d, f in recent:
+        df = pd.read_csv(f, parse_dates=DATE_COLS)
+        for col in BOOL_COLS:
+            if col in df.columns:
+                df[col] = df[col].map(_coerce_bool).astype("boolean")
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=DAILY_FEATURES_COLS)
+    return pd.concat(frames, ignore_index=True)
+
+
+def _coerce_bool(v) -> object:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        if v == "True":
+            return True
+        if v == "False":
+            return False
+    return pd.NA
 
 
 def save_daily_features(df: pd.DataFrame, daily_dir: Path, asof: pd.Timestamp) -> Path:

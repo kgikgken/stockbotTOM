@@ -32,7 +32,12 @@ from .data.jpx_lists import (
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
-from .pipeline import DAILY_FEATURES_COLS, compute_daily_features, save_daily_features
+from .pipeline import (
+    DAILY_FEATURES_COLS,
+    compute_daily_features,
+    load_recent_daily_features,
+    save_daily_features,
+)
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -265,10 +270,11 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
 
 
 def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -> pd.DataFrame:
-    """全採点銘柄（状態が形成中/反発開始/ブレイク）の特徴量・状態・地合いを計算し
-    daily/features_YYYY-MM-DD.csv.gz に保存する（T-206）。
+    """全採点銘柄（状態が形成中/反発開始/ブレイク）の特徴量・状態・地合い・プール正規化
+    スコア（次元スコア・総合スコア V1/V2/V3、DESIGN.md §6、T-301）を計算し
+    daily/features_YYYY-MM-DD.csv.gz に保存する（T-206/T-301）。
 
-    次元スコア・総合スコア列（T-301/T-302 で実装）はスキーマ上確保するが値は NaN。
+    d3_template（T-302）は未実装のため常に NaN（次元合成では欠損 0.5 として扱われる）。
     """
     cfg.ensure_dirs()
     store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
@@ -283,9 +289,12 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
     if p.exists():
         earnings_schedule = load_earnings_schedule(p)
 
+    asof = idx_df["Close"].index[-1]
+    history_pool = load_recent_daily_features(cfg.daily_dir, asof, cfg.pool_days)
     tickers = universe[universe["passes"]]["ticker"].tolist()
     df = compute_daily_features(ohlcv, tickers, idx_df["Close"], cfg.k, cfg.label_n,
-                                earnings_schedule=earnings_schedule, log=log)
+                                earnings_schedule=earnings_schedule,
+                                history_pool=history_pool, pool_days=cfg.pool_days, log=log)
     path = save_daily_features(df, cfg.daily_dir, _now())
     log(f"[features] ユニバース通過 {len(tickers)} 銘柄中 {len(df)} 件を {path.name} に保存")
     return df
