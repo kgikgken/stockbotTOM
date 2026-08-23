@@ -7,6 +7,7 @@
   python -m stockbot.cli backfill    # 検証用の長期履歴取得（HISTORY_DAYS=2600 等）。中断再開可
   python -m stockbot.cli references  # 決算発表予定日・上場廃止銘柄一覧の更新のみ
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
+  python -m stockbot.cli features    # 保存済みデータから日次特徴量を再計算・保存
 
 環境変数: SPEC/README 参照。SCREEN_DRYRUN=1 で合成データ・ネットワーク不要。
 """
@@ -24,12 +25,14 @@ from .data.adjust import check_all
 from .data.jpx_lists import (
     fetch_delistings,
     fetch_earnings_schedule,
+    load_earnings_schedule,
     load_listed_with_fallback,
     normalize_listed,
 )
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
+from .pipeline import DAILY_FEATURES_COLS, compute_daily_features, save_daily_features
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -261,10 +264,38 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
     return u
 
 
+def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -> pd.DataFrame:
+    """全採点銘柄（状態が形成中/反発開始/ブレイク）の特徴量・状態・地合いを計算し
+    daily/features_YYYY-MM-DD.csv.gz に保存する（T-206）。
+
+    次元スコア・総合スコア列（T-301/T-302 で実装）はスキーマ上確保するが値は NaN。
+    """
+    cfg.ensure_dirs()
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    stored = from_long(store.load())
+    idx_df = stored.get(IDX_TICKER)
+    if idx_df is None or len(idx_df) == 0:
+        log("[features] 指数データが無いためスキップ")
+        return pd.DataFrame(columns=DAILY_FEATURES_COLS)
+
+    earnings_schedule = None
+    p = cfg.reference_dir / "earnings_schedule.csv"
+    if p.exists():
+        earnings_schedule = load_earnings_schedule(p)
+
+    tickers = universe[universe["passes"]]["ticker"].tolist()
+    df = compute_daily_features(ohlcv, tickers, idx_df["Close"], cfg.k,
+                                earnings_schedule=earnings_schedule, log=log)
+    path = save_daily_features(df, cfg.daily_dir, _now())
+    log(f"[features] 採点対象 {len(tickers)} 銘柄中 {len(df)} 件を {path.name} に保存")
+    return df
+
+
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
-    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill", "references", "universe"])
+    ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
+                                       "references", "universe", "features"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -285,12 +316,21 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)
+        elif args.command == "features":
+            store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+            ohlcv = from_long(store.load())
+            u = load_latest_universe(cfg.universe_dir)
+            if u is None:
+                log("[features] ユニバースが無いためスキップ（先に universe を実行）")
+            else:
+                step_features(cfg, u, ohlcv, log)
         else:  # daily
             refresh = cfg.dryrun or _now().weekday() == 0 or not (cfg.reference_dir / "listed_latest.csv").exists()
             listed = step_listed(cfg, log) if refresh else _load_listed_cached(cfg, log)
             ohlcv, meta, issues = step_fetch(cfg, listed, log)
             step_index(cfg, log)
-            step_universe(cfg, listed, ohlcv, issues, log)
+            u = step_universe(cfg, listed, ohlcv, issues, log)
+            step_features(cfg, u, ohlcv, log)
         return 0
     except Exception as e:  # 失敗は赤にする（握り潰さない）
         import traceback
