@@ -53,11 +53,17 @@ def run_pipeline(open_: pd.Series, high: pd.Series, low: pd.Series, close: pd.Se
 
 
 def assert_value_equal(test: unittest.TestCase, cut_value, full_value, msg: str) -> None:
-    """特徴量1件ぶんの値を比較する（bool/NaN/浮動小数を使い分ける）。"""
+    """特徴量1件ぶんの値を比較する（bool/NaN/浮動小数を使い分ける）。
+
+    bool(float('nan')) は True になるため、bool 判定より先に NaN 判定をする
+    （full=True/cut=NaN のような食い違いを bool(NaN)=True で素通りさせない）。
+    """
+    full_na, cut_na = pd.isna(full_value), pd.isna(cut_value)
+    if full_na or cut_na:
+        test.assertEqual(cut_na, full_na, msg=f"{msg} (片方だけ NaN)")
+        return
     if isinstance(full_value, (bool, np.bool_)) or isinstance(cut_value, (bool, np.bool_)):
         test.assertEqual(bool(cut_value), bool(full_value), msg=msg)
-    elif pd.isna(full_value):
-        test.assertTrue(pd.isna(cut_value), msg=msg)
     else:
         test.assertAlmostEqual(float(cut_value), float(full_value), places=9, msg=msg)
 
@@ -71,8 +77,11 @@ class LookaheadConsistencyHarnessTest(unittest.TestCase):
         end = pd.Timestamp("2026-08-21")
         cls.ohlcv = make_synthetic(cls.tickers, n_bars=N_BARS, seed=0, end=end)
         cls.idx_close = make_synthetic_index(n_bars=N_BARS, seed=0, end=end)["Close"]
-        # SMA200 等が定義される範囲から均等に5点選ぶ
-        cls.t_points = sorted({int(x) for x in np.linspace(220, N_BARS - 1, T_POINTS_PER_TICKER)})
+        # SMA200 等が定義される範囲から均等に5点選ぶ。末尾ちょうどだと切り詰めが no-op に
+        # なり検査が無意味になるため、系列末尾より手前に上限を取る
+        cls.t_points = sorted({int(x) for x in np.linspace(220, N_BARS - 20, T_POINTS_PER_TICKER)})
+        for t in cls.t_points:
+            assert t < N_BARS - 1, f"t_points は系列末尾より手前でなければならない: t={t}"
 
     def test_all_registered_dimensions_are_recalc_consistent(self):
         checked_ids: set[str] = set()
@@ -115,19 +124,28 @@ class LookaheadConsistencyHarnessTest(unittest.TestCase):
         self.assertGreaterEqual(len(states_seen), 4, msg=f"states_seen={states_seen}")
 
     def test_harness_detects_a_deliberately_broken_recalc(self):
-        """ハーネス自身が壊れていないことの確認: わざと未来参照するダミー特徴量を混ぜて検出できるか。"""
+        """ハーネス自身が壊れていないことの確認: assert_value_equal が実際に不一致を検出するか。"""
         ticker = self.tickers[0]
         df = self.ohlcv[ticker]
         close = df["Close"]
-        t = self.t_points[0]  # 系列の最後尾でない T（末尾だと切り詰めが no-op になり検知できない）
+        t = self.t_points[0]
 
         # 「全期間の最終値」を返す未来参照ダミー特徴量。Tで切ると最終値が変わるはず
         full_leak = float(close.iloc[-1])
         cut_leak = float(close.iloc[: t + 1].iloc[-1])
-        # 系列の最後尾でない T を選んでいる限り、これらは一致しない（未来参照の実例）
         self.assertNotEqual(t, len(close) - 1)
         self.assertNotEqual(full_leak, cut_leak,
                             "このテスト自体が意味を持つには全期間値とT時点値が異なる必要がある")
+
+        # (a) 数値の不一致
+        with self.assertRaises(AssertionError):
+            assert_value_equal(self, cut_leak, full_leak, msg="case a")
+        # (b) full=数値 / cut=NaN
+        with self.assertRaises(AssertionError):
+            assert_value_equal(self, np.nan, full_leak, msg="case b")
+        # (c) full=True / cut=NaN（bool(nan)==True で素通りしないことの確認）
+        with self.assertRaises(AssertionError):
+            assert_value_equal(self, np.nan, True, msg="case c")
 
 
 if __name__ == "__main__":
