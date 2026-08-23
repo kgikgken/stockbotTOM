@@ -134,13 +134,17 @@ def compute_dimensions(
     alternated_swings: pd.DataFrame, pullback: dict, t_pos: int, k: int,
     idx_close: Optional[pd.Series] = None,
     earnings_schedule: Optional[pd.DataFrame] = None, ticker: Optional[str] = None,
+    regime: Optional[str] = None, breadth_75: Optional[float] = None,
+    breadth_200: Optional[float] = None,
 ) -> tuple[pd.DataFrame, dict]:
     """T（t_pos）時点の D1〜D8 特徴量を計算する（DESIGN.md §5）。
 
     pullback は features.pullback.pullback_state() の戻り値（同じ t_pos, k で計算した
     もの）をそのまま渡す。idx_close は TOPIX 等の指数終値（ticker と同じ位置規約で
     整列済み、D2 用）。earnings_schedule/ticker は jpx_lists.load_earnings_schedule() の
-    出力（D8 の earnings_days 用）。どちらも省略時は対応する特徴量が NaN になる。
+    出力（D8 の earnings_days 用）。regime/breadth_75/breadth_200 は
+    features.regime.regime_gauge()/compute_breadth() の出力（T-207、日次で1回だけ計算
+    してすべての銘柄に共通して渡す想定）。どれも省略時は対応する特徴量が NaN になる。
 
     戻り値: (features_df[id, dimension, direction, band_lo, band_hi, value], extra)。
     features_df の id 集合は FEATURE_IDS と常に一致する（欠損は value=NaN の行として残る）。
@@ -168,7 +172,7 @@ def compute_dimensions(
 
     atr_t = atr14_a[t_pos] if t_pos < len(atr14_a) else np.nan
 
-    values: dict[str, float] = {fid: np.nan for fid in FEATURE_IDS}
+    values: dict[str, object] = {fid: np.nan for fid in FEATURE_IDS}
     extra: dict = {}
 
     state = pullback.get("state")
@@ -425,7 +429,12 @@ def compute_dimensions(
             next_date = future["date"].min()
             values["earnings_days"] = int(np.busday_count(
                 np.datetime64(asof, "D"), np.datetime64(next_date, "D")))
-    # regime, breadth_75, breadth_200: T-207 未実装、常に NaN のまま
+    if regime is not None:
+        values["regime"] = regime
+    if breadth_75 is not None and not np.isnan(breadth_75):
+        values["breadth_75"] = breadth_75
+    if breadth_200 is not None and not np.isnan(breadth_200):
+        values["breadth_200"] = breadth_200
 
     rows = []
     for fid, dim, direction, band in FEATURE_METADATA:
