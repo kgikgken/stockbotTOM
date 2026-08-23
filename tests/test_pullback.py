@@ -166,6 +166,8 @@ class InvalidationConditionsTest(unittest.TestCase):
         self.assertEqual(r["state"], STATE_INVALID)
         self.assertGreater(r["depth_pct"], 0.25)
         self._assert_others_hold(r, "depth")
+        self.assertTrue(r["is_deep"])  # depth_pct(0.25超) > deep_depth(0.10)
+        self.assertFalse(r["is_shallow"])
 
     def test_close_below_sma200_alone(self):
         tail = np.array([215.0, 210.0, 205.0, 202.0])
@@ -193,6 +195,32 @@ class InvalidationConditionsTest(unittest.TestCase):
         self.assertEqual(r["h0"], h0)  # スパイクはまだ新しい H0 として確定していない
         self.assertLessEqual(float(high_s.iloc[T]), r["h0_high"])  # 完了ではない
         self._assert_others_hold(r, None)
+
+
+class ShallowDeepFlagsTest(unittest.TestCase):
+    """浅押し(is_shallow: depth_pct<0.03)・深押し(is_deep: depth_pct>0.10)フラグ（§4.4末尾）。"""
+
+    def test_is_shallow_when_depth_pct_below_3_percent(self):
+        warmup = np.linspace(154.0, 180.0, 220)
+        dip = np.array([180, 178, 176, 174, 176, 178, 180.0])
+        rise = np.linspace(dip[-1], 220.0, 15)[1:]
+        peak = np.array([227, 228, 229, 230, 229, 228, 227.0])  # H0直後の下落がごく浅い
+        close_full = np.concatenate([warmup, dip, rise, peak])
+        high_s, low_s, close_s = _series(close_full)
+        T = len(close_full) - 1  # h0(絶対位置244)の confirm_index(247) 当日
+        r = compute(high_s, low_s, close_s, T)
+        self.assertLess(r["depth_pct"], 0.03)
+        self.assertTrue(r["is_shallow"])
+        self.assertFalse(r["is_deep"])
+
+    def test_neither_flag_when_depth_pct_between_thresholds(self):
+        close_full, h0 = build_leg(200.0, 230.0, tail=np.array([220.0, 215.0]), warm_start=195.0)
+        high_s, low_s, close_s = _series(close_full)
+        T = len(close_full) - 1
+        r = compute(high_s, low_s, close_s, T)
+        self.assertTrue(0.03 <= r["depth_pct"] <= 0.10)
+        self.assertFalse(r["is_shallow"])
+        self.assertFalse(r["is_deep"])
 
 
 class StructuralEdgeCasesTest(unittest.TestCase):

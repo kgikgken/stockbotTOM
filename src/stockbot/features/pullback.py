@@ -136,13 +136,13 @@ def pullback_state(high: pd.Series, low: pd.Series, close: pd.Series,
 
     atr_h0 = float(atr14.iloc[h0])
     depth_pct = (h0_high - lp_value) / h0_high
-    depth_atr = (h0_high - lp_value) / atr_h0 if atr_h0 and not np.isnan(atr_h0) else np.nan
+    depth_atr = (h0_high - lp_value) / atr_h0 if np.isfinite(atr_h0) and atr_h0 > 0 else np.nan
     retrace = (h0_high - lp_value) / leg if leg else np.nan
     close_t = float(c_arr[t_pos])
     denom = h0_high - lp_value
-    position = (close_t - lp_value) / denom if denom else np.nan
+    position = (close_t - lp_value) / denom if np.isfinite(denom) and denom > 0 else np.nan
     sma5_t = sma5_arr[t_pos]
-    dev5 = (close_t / sma5_t - 1) if sma5_t and not np.isnan(sma5_t) else np.nan
+    dev5 = (close_t / sma5_t - 1) if np.isfinite(sma5_t) and sma5_t > 0 else np.nan
 
     if lp < t_pos - 1:
         r_window = h_arr[lp + 1: t_pos]
