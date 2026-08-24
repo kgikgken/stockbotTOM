@@ -50,13 +50,15 @@ jobs:
           restore-keys: |
             store-v2-
 
+      # replay.yml と同じ世代(v2)を参照する（v1 は指数の長期履歴が無いまま実行した
+      # 際の空リプレイ日ファイルで汚染されている。2026-08-24 の事故）
       - name: Restore replay output (read-only)
         uses: actions/cache/restore@v4
         with:
           path: data/replay
-          key: replay-v1-${{ github.run_id }}
+          key: replay-v2-${{ github.run_id }}
           restore-keys: |
-            replay-v1-
+            replay-v2-
 
       - name: Tests
         run: python -m unittest discover -s tests -t .

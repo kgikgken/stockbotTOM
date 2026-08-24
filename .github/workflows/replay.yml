@@ -50,13 +50,17 @@ jobs:
           restore-keys: |
             store-v2-
 
+      # v2: v1 は指数の長期履歴が無いまま実行した際の空リプレイ日ファイルが
+      # 溜まっており（2026-08-24、全日「指数データが無い」でスキップされていた事故）、
+      # 中断再開ロジックがそれを「済み」として拾ってしまう。世代を上げて汚染された
+      # キャッシュを引き継がないようにする
       - name: Restore replay output
         uses: actions/cache@v4
         with:
           path: data/replay
-          key: replay-v1-${{ github.run_id }}
+          key: replay-v2-${{ github.run_id }}
           restore-keys: |
-            replay-v1-
+            replay-v2-
 
       - name: Tests
         run: python -m unittest discover -s tests -t .
