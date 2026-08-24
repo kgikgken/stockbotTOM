@@ -37,6 +37,13 @@ VARIANTS = ["v1", "v2", "v3"]
 DEFAULT_H = 10  # DESIGN.md §10.2-1: 単変量の基準horizon。他の段も既定で揃える
 N_DRAWS_DEFAULT = 100  # DESIGN.md §10.2-4(a)
 
+# ic_summary() の戻り値のキー（列が1つも無い空のDataFrameを書き出すと0バイトのcsvになり
+# 読み込み側でエラーになるため、行が0件でも列だけは必ず持たせるのに使う）
+IC_SUMMARY_COLS = ["score", "h", "n_days", "ic_mean", "ic_t", "ic_p", "t_classification",
+                   "q1_mean_r", "q5_mean_r", "q5_minus_q1", "q1_success_rate", "q5_success_rate"]
+DISTRIBUTION_COLS = ["feature_id", "count", "mean", "std", "min", "p25", "p50", "p75", "max"]
+MISSING_RATE_COLS = ["feature_id", "n", "n_missing", "missing_rate"]
+
 
 # ------------------------------------------------------------------ 検定数ログ
 class TestCounter:
@@ -209,8 +216,8 @@ def sanity_tables(pool: pd.DataFrame, feature_ids: Optional[List[str]] = None) -
                               "min": desc.get("min", np.nan), "p25": desc.get("25%", np.nan),
                               "p50": desc.get("50%", np.nan), "p75": desc.get("75%", np.nan),
                               "max": desc.get("max", np.nan)})
-    distribution = pd.DataFrame(dist_rows)
-    missing_rate = pd.DataFrame(missing_rows)
+    distribution = pd.DataFrame(dist_rows, columns=DISTRIBUTION_COLS)
+    missing_rate = pd.DataFrame(missing_rows, columns=MISSING_RATE_COLS)
 
     if len(numeric_ids) >= 2:
         corr = _spearman_matrix(pool[numeric_ids].astype(float))
@@ -335,7 +342,7 @@ def dimension_summary_table(pool: pd.DataFrame, h: int = DEFAULT_H,
         rows.append(ic_summary(pool, col, h=h))
         if test_counter is not None:
             test_counter.record("dimension_ic", dim)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=IC_SUMMARY_COLS)
 
 
 def composite_summary_table(pool: pd.DataFrame, h: int = DEFAULT_H,
@@ -349,7 +356,7 @@ def composite_summary_table(pool: pd.DataFrame, h: int = DEFAULT_H,
         rows.append(ic_summary(pool, col, h=h))
         if test_counter is not None:
             test_counter.record("composite_ic", v)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=IC_SUMMARY_COLS)
 
 
 def composite_decile_curve(pool: pd.DataFrame, variant: str, h: int = DEFAULT_H) -> pd.DataFrame:
@@ -388,10 +395,10 @@ def composite_by_cut(pool: pd.DataFrame, variant: str, cut: str, h: int = DEFAUL
     cut に該当する情報が無ければ（例: listed 未指定で market）空の表を返す。
     """
     col = f"score_{variant}"
+    by_cut_cols = ["variant", "cut", "group", "n_rows"] + IC_SUMMARY_COLS
     cut_series = _cut_series(pool, cut, listed=listed)
     if col not in pool.columns or cut_series is None:
-        return pd.DataFrame(columns=["variant", "cut", "group", "n_days"] + list(
-            ic_summary(pd.DataFrame({col: [], f"r_{h}": [], "label": []}), col, h=h).keys()))
+        return pd.DataFrame(columns=by_cut_cols)
 
     rows = []
     grouped = pool.assign(_cut=cut_series).groupby("_cut", observed=True)
@@ -405,7 +412,7 @@ def composite_by_cut(pool: pd.DataFrame, variant: str, cut: str, h: int = DEFAUL
         rows.append(summary_row)
         if test_counter is not None:
             test_counter.record("composite_by_cut", f"{variant}:{cut}:{group_name}")
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=by_cut_cols)
 
 
 def all_cuts_tables(pool: pd.DataFrame, h: int = DEFAULT_H, listed: Optional[pd.DataFrame] = None,
