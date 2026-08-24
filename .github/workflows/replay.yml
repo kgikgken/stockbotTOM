@@ -1,0 +1,78 @@
+name: validation-replay
+
+# T-402: 主評価窓・頑健性窓のリプレイを実行する。全期間を1回のジョブ（6時間上限）で
+# 終えられないため、start/end を年単位程度に区切って複数回トリガーする想定
+# （中断再開できる設計。data/replay に既にある日はスキップする）。
+# ホールドアウト（2026-02〜2026-08）は既定で除外される（include_holdout を渡さない）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "YYYY-MM-DD"
+        required: true
+      end:
+        description: "YYYY-MM-DD"
+        required: true
+
+permissions:
+  contents: read
+
+# data-daily/backfill と同じグループにして、store キャッシュの読み取り中に
+# 書き込みが走らないようにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      - name: Restore replay output
+        uses: actions/cache@v4
+        with:
+          path: data/replay
+          key: replay-v1-${{ github.run_id }}
+          restore-keys: |
+            replay-v1-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Replay
+        env:
+          K: "3"
+          LABEL_N: "15"
+          POOL_DAYS: "20"
+          MIN_HISTORY_BARS: "250"
+        run: |
+          python -m stockbot.validation.replay \
+            --start "${{ github.event.inputs.start }}" \
+            --end "${{ github.event.inputs.end }}"
+
+      - name: Upload progress summary
+        if: always()
+        run: |
+          echo "saved day files: $(ls data/replay/*.csv.gz 2>/dev/null | wc -l)"
