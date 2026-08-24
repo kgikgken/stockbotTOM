@@ -11,6 +11,13 @@ BH 法の q 値、DESIGN.md §10.2 の分類基準そのままの帯ラベル等
 replay.REPLAY_COLS）。ベースライン (a)(b) は打ち切らない全期間 OHLCV
 （validation.replay.run_replay に渡したものと同じ）も必要。
 
+CLAUDE.md 絶対規則（ホールドアウトを明示フラグ無しで見ない）: ベースライン(a)
+（baseline_a_random_sma200）と(b)（nishimura_trades）は T+h 形式で ohlcv を
+先読みするため、呼び出し側が誤って全期間（ホールドアウト含む）の ohlcv を渡しても
+内部でホールドアウト開始日より前に打ち切ってから使う（validation.replay の
+_truncate_before_holdout と同じ防御。import 方向の都合で小さく複製している
+―― calibration.py が本モジュールをインポートするため、逆方向の import は循環になる）。
+
 統計量は numpy/pandas だけで計算する（scipy 等の新規依存を増やさない）。
 有意性検定の p 値は正規近似（大標本近似。日次サンプル数が数百〜のため十分実用的）。
 相関は Spearman（§6.2 のプール正規化がランクベースであることと整合させる）。
@@ -25,7 +32,7 @@ import numpy as np
 import pandas as pd
 
 from ..features import dimensions, indicators
-from .replay import MIN_HISTORY_BARS, _date_position, replay_universe_tickers
+from .replay import HOLDOUT_WINDOW, MIN_HISTORY_BARS, _date_position, replay_universe_tickers
 from . import labels as labels_mod
 
 # DESIGN.md §5: D8 は採点しない（direction=None）ので単変量・分布の対象からも外す
@@ -175,6 +182,18 @@ def classify_t(t: float) -> str:
     if t >= 2:
         return "保留"
     return "棄却"
+
+
+def _truncate_before_holdout(ohlcv: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    """validation.replay._truncate_before_holdout と同じ防御（循環importを避けるため
+    小さく複製）。CLAUDE.md 絶対規則によりホールドアウトを明示フラグ無しで見ない。"""
+    out = {}
+    for ticker, df in ohlcv.items():
+        if df is None or len(df) == 0:
+            out[ticker] = df
+            continue
+        out[ticker] = df[df.index < HOLDOUT_WINDOW[0]]
+    return out
 
 
 def depth_band(depth_pct: pd.Series) -> pd.Series:
@@ -444,6 +463,7 @@ def baseline_a_random_sma200(
     候補集合はその日のユニバース（履歴本数のみで決める簡易定義、DESIGN.md §10.1）の
     うち Close[T]>=SMA200[T] の銘柄。抽出数はその日の pool 内の件数に合わせる。
     """
+    ohlcv = _truncate_before_holdout(ohlcv)
     rng = np.random.default_rng(seed)
     dates = sorted(pd.to_datetime(pool["date"]).unique()) if len(pool) else []
     per_day_means: List[float] = []
@@ -501,6 +521,7 @@ def nishimura_trades(ohlcv: Dict[str, pd.DataFrame], tickers: Iterable[str],
     翌日寄付き。max_hold 日以内に成立しなければ max_hold 日目の終値で強制手仕舞い
     （「最長15日」の解釈。翌日寄付きが定義されないため終値を使う）。
     """
+    ohlcv = _truncate_before_holdout(ohlcv)
     start, end = pd.Timestamp(start), pd.Timestamp(end)
     rows = []
     for ticker in tickers:

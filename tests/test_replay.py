@@ -158,6 +158,55 @@ class HoldoutFilterTest(unittest.TestCase):
         self.assertTrue(any("ホールドアウト" in m for m in logs))
 
 
+class TruncateBeforeHoldoutTest(unittest.TestCase):
+    def test_drops_rows_on_or_after_holdout_start(self):
+        idx = pd.bdate_range("2026-01-01", periods=60)
+        df = pd.DataFrame({"Close": np.arange(60.0)}, index=idx)
+        out = replay._truncate_before_holdout({"1301.T": df})
+        self.assertTrue((out["1301.T"].index < replay.HOLDOUT_WINDOW[0]).all())
+        self.assertLess(len(out["1301.T"]), len(df))
+
+    def test_none_or_empty_df_passes_through(self):
+        out = replay._truncate_before_holdout({"1301.T": None})
+        self.assertIsNone(out["1301.T"])
+
+
+class HoldoutDataLeakTest(unittest.TestCase):
+    """日付範囲のフィルタだけでは防げない先読み: ホールドアウト直前のTでも、
+    T+hラベルがホールドアウト側のバーを読んではいけない（CLAUDE.md 絶対規則）。"""
+
+    def test_near_boundary_label_does_not_leak_into_holdout(self):
+        date_t = pd.Timestamp("2026-01-28")  # HOLDOUT_WINDOW[0]=2026-02-01の直前
+        n_bars = 320
+        tickers = [f"{1301 + i * 37:04d}.T" for i in range(30)]
+        ohlcv_upto_t = make_synthetic(tickers, n_bars=n_bars, seed=0, end=date_t)
+        idx_upto_t = make_synthetic_index(n_bars, seed=0, end=date_t)
+        listed = _listed(tickers)
+        # dateTより先、ホールドアウトの奥まで伸びる「未来」データ（打ち切りが無ければ
+        # r_h の計算に使われてしまうはずのデータ）
+        ohlcv_full = {t: _extend(ohlcv_upto_t[t], 60, int(t[:4])) for t in tickers}
+
+        # 打ち切り無しで直接計算した場合（先読み保護が無ければ生じる値）を確認しておく
+        raw_result = replay.replay_one_day(date_t, ohlcv_full, idx_upto_t, listed,
+                                           k=3, label_n=15, pool_days=1, log=lambda *a: None)
+        if len(raw_result) == 0:
+            self.skipTest("合成データでこの日の採点対象が無かった")
+        self.assertTrue(raw_result["r_10"].notna().any(),
+                        "テスト設定自体が打ち切り無しでr_10を出せる状況になっていない")
+
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv_full, idx_upto_t, listed, tmp, date_t, date_t,
+                              k=3, label_n=15, pool_days=1, min_history_bars=250,
+                              include_holdout=False, log=lambda *a: None)
+            pool = replay.load_replay_table(tmp)
+
+        self.assertGreater(len(pool), 0)
+        # run_replay（ホールドアウト保護あり）は、同じ「未来データ付き」ohlcvを渡しても
+        # ホールドアウト側を読めないよう内部で打ち切るため、h=10以上はNaNになるはず
+        for h in (10, 15, 20, 30):
+            self.assertTrue(pool[f"r_{h}"].isna().all(), msg=f"r_{h} leaked past holdout")
+
+
 def _short_replay_inputs():
     n_bars = 280
     end = pd.Timestamp("2021-08-10")
