@@ -35,9 +35,22 @@ class FetchIndexTest(unittest.TestCase):
         self.assertEqual(used, "^TPX")
         self.assertGreaterEqual(len(df), 300)
 
-    def test_falls_back_when_primary_fails(self):
+    def test_falls_back_to_topix_etf_when_raw_index_fails(self):
+        # ^TPXが取れない場合、日経225ではなくTOPIX連動ETF(1306.T)を先に試す
+        # （実際に^TPXがyfinanceでほぼ常に取得不能なことを2026-08-24に確認済み）
         def downloader(chunk, period):
             if chunk == ["^TPX"]:
+                raise RuntimeError("boom")
+            return _frame(320)
+
+        df, used = fetch_index(400, now_jst=pd.Timestamp("2026-08-22 09:00", tz="Asia/Tokyo"),
+                               downloader=downloader, attempts=1, sleep=lambda s: None, log=lambda m: None)
+        self.assertEqual(used, "1306.T")
+        self.assertGreaterEqual(len(df), 300)
+
+    def test_falls_back_to_nikkei_when_both_topix_sources_fail(self):
+        def downloader(chunk, period):
+            if chunk in (["^TPX"], ["1306.T"]):
                 raise RuntimeError("boom")
             return _frame(320)
 
@@ -46,7 +59,7 @@ class FetchIndexTest(unittest.TestCase):
         self.assertEqual(used, "^N225")
         self.assertGreaterEqual(len(df), 300)
 
-    def test_empty_when_both_fail(self):
+    def test_empty_when_all_candidates_fail(self):
         def downloader(chunk, period):
             raise RuntimeError("boom")
 
@@ -144,6 +157,18 @@ class StepIndexMetaTest(unittest.TestCase):
             cli.step_index(cfg, log=lambda m: None)
         meta = self._meta(cfg)
         self.assertEqual(meta, {"ticker": "^N225", "label": "日経225", "is_fallback": True})
+
+    def test_topix_etf_proxy_is_not_flagged_as_fallback(self):
+        # 1306.T はTOPIXを追跡するETFで別指数への切り替えではないため、
+        # is_fallback=False とし、L1レポートに警告文を出させない
+        os.environ.pop("SCREEN_DRYRUN", None)
+        cfg = Settings.from_env()
+        df = make_synthetic_index(n_bars=120, end=pd.Timestamp("2026-08-21"))
+        with patch("stockbot.cli.fetch_index", return_value=(df, "1306.T")):
+            cli.step_index(cfg, log=lambda m: None)
+        meta = self._meta(cfg)
+        self.assertEqual(meta, {"ticker": "1306.T", "label": "TOPIX(ETF代替: 1306.T)",
+                                "is_fallback": False})
 
     def test_total_failure_does_not_overwrite_previous_meta(self):
         """前回成功時の記録を、今回が両方失敗（前回値のまま）で上書きしない。"""

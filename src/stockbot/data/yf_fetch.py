@@ -119,20 +119,31 @@ def extract_chunk(raw: Optional[pd.DataFrame], chunk: List[str], out: Dict[str, 
             short.add(t)
 
 
+# DESIGN.md §12「IDX は TOPIX、無ければ日経225」。^TPX は yfinance 上で実際には
+# ほぼ常に取得できない（2026-08-24 に確認）。1306.T（NEXT FUNDS TOPIX連動型ETF、
+# 2001年上場、2016年以降の分割実績なし確認済み）はTOPIXを忠実に追跡するため、
+# 生指数(^TPX)が取れない場合の第一候補にする。D2/地合いゲージはログ収益率の
+# 比較のみを使うため、指数そのものでなくETFの価格系列でも数式上の意味は変わらない。
+# 日経225はTOPIXと別物（構成・加重が違う）なので、あくまで最後の手段
+INDEX_CANDIDATES: Tuple[str, ...] = ("^TPX", "1306.T", "^N225")
+
+
 def fetch_index(history_days: int, now_jst: Optional[pd.Timestamp] = None,
-                close_hhmm: str = "15:30", primary: str = "^TPX", fallback: str = "^N225",
+                close_hhmm: str = "15:30", candidates: Tuple[str, ...] = INDEX_CANDIDATES,
                 attempts: int = 3, backoff: float = 3.0,
                 downloader: Optional[Downloader] = None,
                 sleep: Callable[[float], None] = time.sleep,
                 log: Callable[[str], None] = print) -> Tuple[pd.DataFrame, str]:
-    """指数（TOPIX、失敗時は日経225）の日足を取得する（DESIGN.md §12 / TASKS T-102）。
+    """指数（TOPIX、無理なら代替、それも無理なら日経225）の日足を取得する
+    （DESIGN.md §12 / TASKS T-102）。
 
-    戻り値: (DataFrame[COLS], 実際に取れた ticker)。両方失敗した場合は空 DataFrame と空文字列。
+    candidates は優先順に試すティッカーの列。戻り値: (DataFrame[COLS], 実際に取れた
+    ticker)。全て失敗した場合は空 DataFrame と空文字列。
     """
     now_jst = now_jst or pd.Timestamp.now(tz="Asia/Tokyo")
     dl = downloader or _yf_downloader
     period = f"{max(int(history_days), 60)}d"
-    for ticker in (primary, fallback):
+    for ticker in candidates:
         raw = None
         for a in range(attempts):
             try:
@@ -151,7 +162,7 @@ def fetch_index(history_days: int, now_jst: Optional[pd.Timestamp] = None,
             log(f"[index] source={ticker} 本数={len(df)}")
             return df, ticker
         log(f"[index] {ticker} 清掃後0本")
-    log("[index] TOPIX/日経225 とも取得失敗")
+    log(f"[index] 候補すべて取得失敗: {candidates}")
     return pd.DataFrame(columns=COLS), ""
 
 

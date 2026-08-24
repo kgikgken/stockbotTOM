@@ -125,7 +125,10 @@ def step_fetch(cfg: Settings, listed: pd.DataFrame, log=print) -> tuple[dict, di
     return from_long(merged), meta, issues
 
 
-INDEX_LABELS = {"^TPX": "TOPIX", "^N225": "日経225"}
+INDEX_LABELS = {"^TPX": "TOPIX", "1306.T": "TOPIX(ETF代替: 1306.T)", "^N225": "日経225"}
+# 1306.T はTOPIXを追跡するETFで別物の指数ではないため、フォールバック扱いにしない
+# （D2相対力・地合いゲージの基準はTOPIXのまま）。日経225だけが本当の代替
+INDEX_TRUE_FALLBACKS = {"^N225"}
 
 
 def step_index(cfg: Settings, log=print) -> pd.DataFrame:
@@ -154,7 +157,8 @@ def step_index(cfg: Settings, log=print) -> pd.DataFrame:
     # 前回成功時の記録を、今回が失敗（len(df)==0、上のreturnで既に抜けている）で
     # 上書きしないよう、成功時のみ書く（storeを「前回値のまま」にするのと同じ考え方）
     label = "合成(DRYRUN)" if cfg.dryrun else INDEX_LABELS.get(used, used or "不明")
-    meta = {"ticker": used, "label": label, "is_fallback": (not cfg.dryrun) and used != "^TPX"}
+    meta = {"ticker": used, "label": label,
+           "is_fallback": (not cfg.dryrun) and used in INDEX_TRUE_FALLBACKS}
     (cfg.store_dir / "index_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
     log(f"[index] source={used or 'synthetic'} 本数={len(df)} 新規={len(added)} 改訂={len(revisions)}")
     return df
