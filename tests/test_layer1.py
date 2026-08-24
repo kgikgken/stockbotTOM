@@ -257,6 +257,20 @@ class SanityTablesTest(unittest.TestCase):
         self.assertEqual(row["n_missing"], 2)
         self.assertAlmostEqual(row["missing_rate"], 0.5, places=9)
 
+    def test_empty_pool_still_has_named_columns_not_a_headerless_csv(self):
+        # 回帰テスト: 行が0件でも列名だけは必ず持つこと。そうでないと to_csv が
+        # 0バイトのファイルを書いてしまい、後段の read_csv が EmptyDataError で落ちる
+        # （report.build_l1_report が実データで踏んだ不具合）
+        out = layer1.sanity_tables(pd.DataFrame(), feature_ids=[])
+        self.assertEqual(list(out["distribution"].columns), layer1.DISTRIBUTION_COLS)
+        self.assertEqual(list(out["missing_rate"].columns), layer1.MISSING_RATE_COLS)
+        with TemporaryDirectory() as tmp:
+            paths = layer1.write_table(out["distribution"], tmp, "empty_distribution")
+            # 0バイトにならず、pandasがヘッダだけの表として読み戻せること
+            back = pd.read_csv(paths["csv"])
+            self.assertEqual(list(back.columns), layer1.DISTRIBUTION_COLS)
+            self.assertEqual(len(back), 0)
+
 
 class SurvivorshipNoteTest(unittest.TestCase):
     def test_computes_ratio(self):
