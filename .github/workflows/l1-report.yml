@@ -1,0 +1,97 @@
+name: validation-l1-report
+
+# T-403〜T-405: リプレイ結果（data/replay、validation-replay ワークフロー参照）から
+# L1集計・西村ルール較正・L1レポートを生成し、src/stockbot/validation/reports/ に
+# コミットする。リプレイが完了して（または十分な範囲まで進んで）から手動で実行する。
+
+on:
+  workflow_dispatch:
+    inputs:
+      window_label:
+        description: "レポートに書く対象期間のラベル"
+        default: "主評価窓 2021-08〜2026-02"
+      h:
+        description: "IC・分位曲線の基準horizon"
+        default: "10"
+      n_draws:
+        description: "ベースライン(a)の乱数抽出回数"
+        default: "100"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  l1-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      - name: Restore replay output (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/replay
+          key: replay-v1-${{ github.run_id }}
+          restore-keys: |
+            replay-v1-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Layer1
+        run: |
+          python -m stockbot.validation.layer1 \
+            --replay-dir data/replay --output-dir data/layer1 \
+            --h "${{ github.event.inputs.h }}" \
+            --n-draws "${{ github.event.inputs.n_draws }}"
+
+      - name: Calibration (T-404)
+        run: python -m stockbot.validation.calibration
+
+      - name: L1 report (T-405)
+        run: |
+          python -m stockbot.validation.report \
+            --layer1-dir data/layer1 \
+            --window-label "${{ github.event.inputs.window_label }}" \
+            --calibration-report src/stockbot/validation/reports/calibration_nishimura.md
+
+      - name: Commit reports
+        run: |
+          git config user.name "stockbot"
+          git config user.email "stockbot@users.noreply.github.com"
+          git add src/stockbot/validation/reports 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "l1-report: $(date -u +%F)"
+          if ! git push; then
+            git pull --rebase && git push
+          fi
+
+      - name: Upload layer1 tables as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer1-tables-${{ github.run_id }}
+          path: data/layer1
+          if-no-files-found: ignore
