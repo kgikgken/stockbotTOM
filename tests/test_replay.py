@@ -207,6 +207,66 @@ class HoldoutDataLeakTest(unittest.TestCase):
             self.assertTrue(pool[f"r_{h}"].isna().all(), msg=f"r_{h} leaked past holdout")
 
 
+class ChunkedReplayPoolContinuityTest(unittest.TestCase):
+    """DESIGN.md §6.1: 直近20営業日プールが、run_replay を期間で区切って複数回に
+    分けて実行しても途切れないこと（年ごとの分割実行を想定した確認依頼への対応）。
+
+    「2021-08〜2026-02 を一括で実行した結果」と「年ごとに分割実行して結合した結果」の
+    score_v1 が一致することを、3ヶ月を2分割した短い期間で確認する。
+    """
+
+    def test_split_execution_matches_single_run(self):
+        n_bars = 260
+        window_start = pd.Timestamp("2022-01-03")
+        split = pd.Timestamp("2022-01-31")  # 区切りの境界（この日で前半が終わる）
+        window_end = pd.Timestamp("2022-03-01")
+        tickers = [f"{1301 + i * 37:04d}.T" for i in range(20)]
+
+        ohlcv_upto = make_synthetic(tickers, n_bars=n_bars, seed=0, end=window_end)
+        idx_ohlcv = make_synthetic_index(n_bars, seed=0, end=window_end)
+        listed = _listed(tickers)
+        ohlcv_full = {t: _extend(ohlcv_upto[t], 30, int(t[:4])) for t in tickers}
+
+        common_kwargs = dict(k=3, label_n=15, pool_days=10, min_history_bars=250,
+                             log=lambda *a: None)
+
+        with TemporaryDirectory() as tmp_combined, TemporaryDirectory() as tmp_split:
+            # 一括実行
+            replay.run_replay(ohlcv_full, idx_ohlcv, listed, tmp_combined,
+                              window_start, window_end, **common_kwargs)
+            pool_combined = replay.load_replay_table(tmp_combined)
+
+            # 分割実行（同じ output_dir に前半・後半を続けて書く。CIで年ごとに
+            # トリガーする運用を模している）
+            replay.run_replay(ohlcv_full, idx_ohlcv, listed, tmp_split,
+                              window_start, split, **common_kwargs)
+            next_day = split + pd.tseries.offsets.BDay(1)
+            replay.run_replay(ohlcv_full, idx_ohlcv, listed, tmp_split,
+                              next_day, window_end, **common_kwargs)
+            pool_split = replay.load_replay_table(tmp_split)
+
+        self.assertGreater(len(pool_combined), 0)
+        a = pool_combined.sort_values(["date", "ticker"]).reset_index(drop=True)
+        b = pool_split.sort_values(["date", "ticker"]).reset_index(drop=True)
+        self.assertEqual(len(a), len(b))
+        self.assertEqual(list(a["ticker"]), list(b["ticker"]))
+        self.assertEqual(list(a["date"]), list(b["date"]))
+
+        # CSVへの保存・再読み込みを挟む分、float64のビット単位の完全一致にはならない
+        # （pandas の to_csv/read_csv は既定で丸め誤差を持つ。T-301 の
+        # load_recent_daily_features も同じ制約を持つ既存の性質で、このテストが
+        # 検出したいのは「プールが境界で丸ごと空になる」ような大きな不一致）
+        diff = (a["score_v1"] - b["score_v1"]).abs()
+        self.assertLess(diff.max(), 1.0, msg="score_v1 が一括実行と分割実行で大きく食い違う")
+        # 境界直後の日だけを見ても同様（ここがプール断絶の影響を最も受けやすい）
+        near_boundary = a[pd.to_datetime(a["date"]).between(split, split + pd.Timedelta(days=10))]
+        if len(near_boundary):
+            idx = near_boundary.index
+            boundary_diff = (a.loc[idx, "score_v1"] - b.loc[idx, "score_v1"]).abs()
+            self.assertLess(boundary_diff.max(), 1.0,
+                            msg="区切り直後のscore_v1が一括実行と食い違う（プール断絶の疑い）")
+
+
 def _short_replay_inputs():
     n_bars = 280
     end = pd.Timestamp("2021-08-10")
@@ -257,6 +317,35 @@ class LoadReplayTableTest(unittest.TestCase):
             table = replay.load_replay_table(Path(tmp) / "does_not_exist")
             self.assertEqual(list(table.columns), replay.REPLAY_COLS)
             self.assertEqual(len(table), 0)
+
+
+class LoadRecentReplayDaysTest(unittest.TestCase):
+    """区切り実行の境界でプールが途切れないようにする _load_recent_replay_days。"""
+
+    def test_loads_only_days_strictly_before_cutoff(self):
+        ohlcv, idx_ohlcv, listed = _short_replay_inputs()
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp,
+                              pd.Timestamp("2021-08-02"), pd.Timestamp("2021-08-10"),
+                              k=3, label_n=15, pool_days=5, min_history_bars=50, log=lambda *a: None)
+            saved_dates = sorted(f.name for f in Path(tmp).glob("replay_*.csv.gz"))
+            self.assertGreater(len(saved_dates), 3)
+
+            recent = replay._load_recent_replay_days(tmp, pd.Timestamp("2021-08-10"), pool_days=3)
+            self.assertEqual(len(recent), 2)  # pool_days-1
+            for df in recent:
+                self.assertEqual(list(df.columns), replay.DAILY_FEATURES_COLS)
+                self.assertTrue((pd.to_datetime(df["date"]) < pd.Timestamp("2021-08-10")).all())
+
+    def test_pool_days_one_returns_empty(self):
+        recent = replay._load_recent_replay_days("/does/not/matter", pd.Timestamp("2021-08-10"),
+                                                  pool_days=1)
+        self.assertEqual(recent, [])
+
+    def test_missing_dir_returns_empty(self):
+        recent = replay._load_recent_replay_days("/does/not/exist/at/all",
+                                                  pd.Timestamp("2021-08-10"), pool_days=5)
+        self.assertEqual(recent, [])
 
 
 if __name__ == "__main__":
