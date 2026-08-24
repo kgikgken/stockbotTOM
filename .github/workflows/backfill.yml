@@ -59,6 +59,13 @@ jobs:
           FETCH_DEADLINE_SEC: "19800"
         run: python -m stockbot.cli backfill
 
+      # 診断専用（TASKS.md のタスクではない）。取得済み店舗データを A/B/C
+      # （10年分あり／新規上場で正常に短い／要調査）に分類してログに出す。
+      # スコアリング・パイプラインには影響しない
+      - name: Coverage report
+        if: always()
+        run: python scripts/backfill_coverage_report.py
+
       - name: Commit daily snapshots
         if: always()
         run: |
@@ -78,4 +85,5 @@ jobs:
           path: |
             data/store/backfill_meta.json
             data/store/split_issues.csv
+            backfill_coverage.csv
           if-no-files-found: ignore
