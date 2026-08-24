@@ -1,0 +1,32 @@
+name: probe-index-tickers
+
+# 診断専用（TASKS.mdのタスクではない）。TOPIX(^TPX)が実際に取得できるか、
+# 代替ティッカーで取れるものがあるかを確認するワンショット。data/store 等には
+# 触れないため、data-daily の concurrency グループとは無関係に並行実行できる。
+# 用が済み次第このワークフローファイルごと削除する想定
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Probe index tickers
+        run: python scripts/probe_index_tickers.py
