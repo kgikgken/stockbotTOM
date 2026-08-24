@@ -75,3 +75,39 @@
 - `python -m stockbot.cli references` で `data/reference/earnings_schedule.csv` /
   `data/reference/delistings.csv` を更新する。`SCREEN_DRYRUN=1` ではネットワークを
   叩かず何もしない（DRYRUN で参照データの新規性は検証しない）。
+
+## 4. 指数データ（D2相対力・地合いゲージ §8.1 用、TOPIX/日経225代替）
+
+対応: `src/stockbot/data/yf_fetch.py` の `fetch_index()` / `INDEX_CANDIDATES`。
+DESIGN.md §12「IDX は TOPIX、無ければ日経225」の実装経路を記録する。
+
+### 候補チェーン（2026-08-24 に実インターネット環境で確認）
+
+`("^TPX", "1306.T", "^N225")` を順に試す。
+
+| ティッカー | 内容 | 結果 |
+|---|---|---|
+| `^TPX` | TOPIX（生指数） | yfinance 上でほぼ常に取得不能（"possibly delisted; no price data found"）。`^TOPX` も同様に不可 |
+| `1306.T` | NEXT FUNDS TOPIX連動型上場投信（野村アセットマネジメント、2001年上場） | 取得可能。TOPIXを忠実に追跡する。2016-02〜2026-08の期間で分割イベント0件を確認済み（`scripts/probe_index_tickers.py` で確認、分割リスクなし） |
+| `^N225` | 日経225 | 取得可能。TOPIXとは構成銘柄・加重方式が異なる別の指数。1306.Tも取得できない場合の最後の手段 |
+
+`1348.T`（MAXISトピックス上場投信）・`1475.T`（iシェアーズ・コアTOPIX ETF）も同様に取得可能・分割イベント0件を確認済みだが、1306.Tが最も上場が古く流動性が高いため第一候補にした。
+
+`cli.py step_index` が実際に使ったティッカーを `data/store/index_meta.json` に記録し
+（`{"ticker", "label", "is_fallback"}`）、`validation.report`（T-405）が L1レポート冒頭に
+明記する。`is_fallback` は日経225の場合のみ True（1306.TはTOPIX扱いのままフォールバック
+警告を出さない、TOPIXを追跡する別物ではないため）。
+
+### 既知の制約: 1306.Tの分配金による小さな時点ノイズ
+
+`fetch_index`/`fetch_ohlcv` はいずれも `auto_adjust=False` で取得する（配当・分配未調整、
+SPEC §4）。個別銘柄の配当落ちと生のTOPIXの配当落ちは同じ仕組み（未調整の生値）なので
+対称的だが、1306.Tは投資信託として分配金を**年1〜2回まとめて**分配するため、その
+分配落ち日には1306.Tの価格だけが一時的に下振れする（生のTOPIXは個別銘柄の配当落ちが
+年間を通じて分散的に反映されるため、同じタイミングでの単発的な下落は生じない）。
+
+結果として、分配落ち日をまたぐ60日/120日窓（`d2_rs60`/`d2_rs120`、DESIGN.md §5）では
+指数側だけが一時的に下振れし、その窓で計算される**全銘柄のD2が一律わずかに上振れ**する。
+同一日内の銘柄間の順位付け（スコアリングの横断面比較）には影響しないが、異なる期間を
+またぐ比較（L1のIC・分位曲線などの期間集計、DESIGN.md §10.2）には小さなノイズ源になり
+うる。分配日の実績は `data/store` の `__IDX__` 系列（`Dividends` 列）から確認できる。
