@@ -1,0 +1,81 @@
+name: data-backfill
+
+# T-103/M4-L1（T-402〜T-405）: 検証用の長期履歴（既定 HISTORY_DAYS=2600、約10年）を
+# 取得する。data-daily（data.yml）と同じ store キャッシュを拡張する（別コマンドだが
+# 同じ data/store を使う）。1回の実行では終わらないことが前提の設計（T-103）で、
+# 本数基準（int(HISTORY_DAYS*0.9)）で「取得済み」をスキップして再開するため、
+# 完了するまで手動で何度も再実行する。
+
+on:
+  workflow_dispatch:
+    inputs:
+      history_days:
+        description: "取得する履歴日数"
+        default: "2600"
+
+permissions:
+  contents: write
+
+# data-daily と同じグループにして、store キャッシュへの同時書き込みを避ける
+# （どちらかが先に終わるまで待たせる。cancel-in-progress: false で取りこぼさない）
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      # 保存データ(store)は git にコミットしない。Actions cache で日をまたいで引き継ぐ
+      # （data-daily と同じキー空間。どちらが最後に保存したキャッシュも次回に引き継がれる）。
+      - name: Restore store
+        uses: actions/cache@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Backfill
+        env:
+          HISTORY_DAYS: ${{ github.event.inputs.history_days || '2600' }}
+          FETCH_DEADLINE_SEC: "19800"
+        run: python -m stockbot.cli backfill
+
+      - name: Commit daily snapshots
+        if: always()
+        run: |
+          git config user.name "stockbot"
+          git config user.email "stockbot@users.noreply.github.com"
+          git add data/daily 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "backfill: $(date -u +%F)"
+          if ! git push; then
+            git pull --rebase && git push
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-${{ github.run_id }}
+          path: |
+            data/store/backfill_meta.json
+            data/store/split_issues.csv
+          if-no-files-found: ignore
