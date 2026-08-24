@@ -1,12 +1,17 @@
 """指数データ取得・保存（T-102）。ネットワーク不要。"""
+import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 from . import _path  # noqa: F401
+from stockbot import cli
+from stockbot.config import Settings
 from stockbot.data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from stockbot.data.synthetic import make_synthetic, make_synthetic_index
 from stockbot.data.yf_fetch import fetch_index
@@ -89,6 +94,71 @@ class IndexStoreRoundtripTest(unittest.TestCase):
                 self.assertTrue(pd.isna(cut_val))
             else:
                 self.assertAlmostEqual(full_val, cut_val, places=10)
+
+
+class StepIndexMetaTest(unittest.TestCase):
+    """cli.step_index が store/index_meta.json に実際に使ったティッカーを記録すること
+    （TOPIXが取得できず日経225にフォールバックした場合、L1レポート(T-405)に
+    明記するために validation.report が参照する）。"""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self._env_names = ("SCREEN_DRYRUN", "DATA_DIR", "HISTORY_DAYS")
+        self._saved = {k: os.environ.get(k) for k in self._env_names}
+        os.environ["DATA_DIR"] = self._tmp.name
+        os.environ["HISTORY_DAYS"] = "120"
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self._tmp.cleanup()
+
+    def _meta(self, cfg):
+        return json.loads((cfg.store_dir / "index_meta.json").read_text(encoding="utf-8"))
+
+    def test_dryrun_is_labeled_synthetic_and_not_fallback(self):
+        os.environ["SCREEN_DRYRUN"] = "1"
+        cfg = Settings.from_env()
+        cli.step_index(cfg, log=lambda m: None)
+        meta = self._meta(cfg)
+        self.assertEqual(meta["label"], "合成(DRYRUN)")
+        self.assertFalse(meta["is_fallback"])
+
+    def test_primary_topix_success_is_not_fallback(self):
+        os.environ.pop("SCREEN_DRYRUN", None)
+        cfg = Settings.from_env()
+        df = make_synthetic_index(n_bars=120, end=pd.Timestamp("2026-08-21"))
+        with patch("stockbot.cli.fetch_index", return_value=(df, "^TPX")):
+            cli.step_index(cfg, log=lambda m: None)
+        meta = self._meta(cfg)
+        self.assertEqual(meta, {"ticker": "^TPX", "label": "TOPIX", "is_fallback": False})
+
+    def test_fallback_to_nikkei_is_recorded(self):
+        os.environ.pop("SCREEN_DRYRUN", None)
+        cfg = Settings.from_env()
+        df = make_synthetic_index(n_bars=120, end=pd.Timestamp("2026-08-21"))
+        with patch("stockbot.cli.fetch_index", return_value=(df, "^N225")):
+            cli.step_index(cfg, log=lambda m: None)
+        meta = self._meta(cfg)
+        self.assertEqual(meta, {"ticker": "^N225", "label": "日経225", "is_fallback": True})
+
+    def test_total_failure_does_not_overwrite_previous_meta(self):
+        """前回成功時の記録を、今回が両方失敗（前回値のまま）で上書きしない。"""
+        os.environ.pop("SCREEN_DRYRUN", None)
+        cfg = Settings.from_env()
+        df = make_synthetic_index(n_bars=120, end=pd.Timestamp("2026-08-21"))
+        with patch("stockbot.cli.fetch_index", return_value=(df, "^TPX")):
+            cli.step_index(cfg, log=lambda m: None)
+        before = self._meta(cfg)
+
+        empty = pd.DataFrame(columns=df.columns)
+        with patch("stockbot.cli.fetch_index", return_value=(empty, "")):
+            cli.step_index(cfg, log=lambda m: None)
+        after = self._meta(cfg)
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

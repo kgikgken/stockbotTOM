@@ -125,10 +125,16 @@ def step_fetch(cfg: Settings, listed: pd.DataFrame, log=print) -> tuple[dict, di
     return from_long(merged), meta, issues
 
 
+INDEX_LABELS = {"^TPX": "TOPIX", "^N225": "日経225"}
+
+
 def step_index(cfg: Settings, log=print) -> pd.DataFrame:
     """指数（TOPIX、失敗時は日経225）を取得し、store に ticker=IDX_TICKER として保存する（T-102）。
 
     D2（相対力）と地合いゲージ（DESIGN.md §8.1）が後で参照する。DRYRUN は合成。
+    実際にどちらのティッカーが使われたかは store/index_meta.json に記録する
+    （TOPIXが取れず日経225にフォールバックした場合、validation.report がL1レポートに
+    明記するために参照する）。
     """
     cfg.ensure_dirs()
     now = _now()
@@ -145,6 +151,11 @@ def step_index(cfg: Settings, log=print) -> pd.DataFrame:
     store.save(merged)
     store.write_daily_increments(added)
     store.append_revisions(revisions, now)
+    # 前回成功時の記録を、今回が失敗（len(df)==0、上のreturnで既に抜けている）で
+    # 上書きしないよう、成功時のみ書く（storeを「前回値のまま」にするのと同じ考え方）
+    label = "合成(DRYRUN)" if cfg.dryrun else INDEX_LABELS.get(used, used or "不明")
+    meta = {"ticker": used, "label": label, "is_fallback": (not cfg.dryrun) and used != "^TPX"}
+    (cfg.store_dir / "index_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
     log(f"[index] source={used or 'synthetic'} 本数={len(df)} 新規={len(added)} 改訂={len(revisions)}")
     return df
 
