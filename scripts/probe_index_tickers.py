@@ -13,6 +13,10 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 CANDIDATES = ["^TPX", "^TOPX", "1306.T", "1348.T", "1475.T", "998405.T", "^N225"]
+# 1306.T等はETFなので実際の分割履歴があるか確認する（生の指数と違い、ETFは分割が
+# あると auto_adjust=False の系列に断層が入る。fetch_index は split-adjust を
+# 行わないため、分割があれば採用前に対処が要る）
+SPLIT_CHECK_TICKERS = ["1306.T", "1348.T", "1475.T"]
 
 
 def main() -> None:
@@ -35,6 +39,27 @@ def main() -> None:
             close_col = close_col.iloc[:, 0]
         last_close = float(close_col.iloc[-1])
         print(f"[probe] {ticker}: 行数={len(df)} 最終日={last} 終値={last_close}")
+
+    print("--- 分割履歴確認（過去2600日、actions=True） ---")
+    for ticker in SPLIT_CHECK_TICKERS:
+        try:
+            df = yf.download(ticker, period="2600d", progress=False, auto_adjust=False, actions=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[probe-split] {ticker}: EXCEPTION {e!r}")
+            continue
+        if df is None or len(df) == 0:
+            print(f"[probe-split] {ticker}: 0行（取得失敗）")
+            continue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        if "Stock Splits" not in df.columns:
+            print(f"[probe-split] {ticker}: 行数={len(df)} Stock Splits列なし")
+            continue
+        splits = df[df["Stock Splits"].fillna(0) != 0]
+        print(f"[probe-split] {ticker}: 行数={len(df)} 先頭={df.index[0].date()} "
+              f"分割イベント数={len(splits)}")
+        for d, row in splits.iterrows():
+            print(f"[probe-split]   {d.date()}: {row['Stock Splits']}")
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ def build_l1_report(
     window_label: str = "",
     calibration_report_path: Optional[Path] = None,
     holdout_used: bool = False,
+    index_source_label: Optional[str] = None,
 ) -> Path:
     """T-403 の出力（layer1_output_dir 以下の csv）を1つの markdown にまとめる。
 
@@ -46,6 +47,10 @@ def build_l1_report(
     設計も検討したが、呼び出し側の意図を毎回明記させるため引数自体は残しつつ、
     実態としてこのリポジトリのどの呼び出し経路もホールドアウトを読む手段を持たない
     ―― True を渡すこと自体が誤りである）。
+
+    index_source_label: D2（相対力）・地合いゲージ（DESIGN.md §8.1）が実際に使った
+    指数（cli.py step_index が書く store/index_meta.json 由来、TOPIXが取れず
+    日経225にフォールバックした場合はその旨を含む）。渡されなければ省略する。
     """
     layer1_output_dir = Path(layer1_output_dir)
     output_path = Path(output_path)
@@ -59,6 +64,8 @@ def build_l1_report(
     lines.append("")
     lines.append(f"- 検定数: {n_tests}")
     lines.append(f"- ホールドアウト使用: {'あり' if holdout_used else 'なし'}")
+    if index_source_label:
+        lines.append(f"- 指数: {index_source_label}")
     if window_label:
         lines.append(f"- 対象期間: {window_label}")
     lines.append("")
@@ -128,15 +135,47 @@ def main(argv: Optional[list] = None) -> int:
                     help="既定: src/stockbot/validation/reports/l1_report.md")
     ap.add_argument("--window-label", default="")
     ap.add_argument("--calibration-report", default=None)
+    ap.add_argument("--index-meta", default=None,
+                    help="cli.py index が書く store/index_meta.json のパス"
+                         "（省略時は Settings.from_env() の store_dir 配下を自動参照。"
+                         "見つからなければレポートに指数の行を出さない）")
     args = ap.parse_args(argv)
 
     default_path = Path(__file__).resolve().parent / "reports" / "l1_report.md"
     output_path = Path(args.output) if args.output else default_path
     calib_path = Path(args.calibration_report) if args.calibration_report else None
     build_l1_report(args.layer1_dir, output_path, window_label=args.window_label,
-                    calibration_report_path=calib_path, holdout_used=False)
+                    calibration_report_path=calib_path, holdout_used=False,
+                    index_source_label=_load_index_source_label(args.index_meta))
     print(f"[report] {output_path} に出力")
     return 0
+
+
+def _load_index_source_label(index_meta_arg: Optional[str]) -> Optional[str]:
+    """store/index_meta.json（cli.py step_index が書く）から指数の説明文を作る。
+    見つからなければ None（レポートには行を出さない）。
+    """
+    import json
+
+    meta_path = Path(index_meta_arg) if index_meta_arg else None
+    if meta_path is None:
+        try:
+            from ..config import Settings
+            meta_path = Settings.from_env().store_dir / "index_meta.json"
+        except Exception:
+            return None
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    label = meta.get("label") or meta.get("ticker") or ""
+    if not label:
+        return None
+    if meta.get("is_fallback"):
+        return f"{label}（TOPIX取得失敗のためフォールバック。D2相対力・地合いゲージは{label}基準）"
+    return label
 
 
 if __name__ == "__main__":

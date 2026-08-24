@@ -117,6 +117,49 @@ class BuildL1ReportUnitTest(unittest.TestCase):
             text = report_path.read_text()
             self.assertIn("calibration_nishimura.md", text)
 
+    def test_index_source_label_is_stated_when_given(self):
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "l1"
+            self._write_minimal_layer1_output(out_dir)
+            report_path = Path(tmp) / "reports" / "l1_report.md"
+            report.build_l1_report(
+                out_dir, report_path,
+                index_source_label="日経225（TOPIX取得失敗のためフォールバック。"
+                                   "D2相対力・地合いゲージは日経225基準）")
+            text = report_path.read_text()
+            self.assertIn("指数: 日経225（TOPIX取得失敗のためフォールバック", text)
+
+    def test_index_source_label_omitted_when_not_given(self):
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "l1"
+            self._write_minimal_layer1_output(out_dir)
+            report_path = Path(tmp) / "reports" / "l1_report.md"
+            report.build_l1_report(out_dir, report_path)
+            text = report_path.read_text()
+            self.assertNotIn("- 指数:", text)
+
+
+class LoadIndexSourceLabelTest(unittest.TestCase):
+    """store/index_meta.json（cli.py step_index が書く）からレポート用の説明文を作る。"""
+
+    def test_missing_file_returns_none(self):
+        with TemporaryDirectory() as tmp:
+            self.assertIsNone(report._load_index_source_label(str(Path(tmp) / "does_not_exist.json")))
+
+    def test_fallback_meta_mentions_topix_failure(self):
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / "index_meta.json"
+            p.write_text('{"ticker": "^N225", "label": "日経225", "is_fallback": true}', encoding="utf-8")
+            label = report._load_index_source_label(str(p))
+            self.assertIn("日経225", label)
+            self.assertIn("TOPIX取得失敗", label)
+
+    def test_primary_meta_is_plain_label(self):
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / "index_meta.json"
+            p.write_text('{"ticker": "^TPX", "label": "TOPIX", "is_fallback": false}', encoding="utf-8")
+            self.assertEqual(report._load_index_source_label(str(p)), "TOPIX")
+
 
 class EndToEndReportTest(unittest.TestCase):
     """run_layer1 の実出力 → build_l1_report が壊れずに一気通貫で動くことを確認。"""
