@@ -216,7 +216,11 @@ class ChunkedReplayPoolContinuityTest(unittest.TestCase):
     """
 
     def test_split_execution_matches_single_run(self):
-        n_bars = 260
+        # min_history_bars=250 かつ window_start が window_end の約42営業日前なので、
+        # n_bars はそれより十分大きくないと window_start 付近でユニバースが空になり
+        # （経過履歴不足）、EmptyDayRateGuardTest の閾値に引っかかって窓全体の検証に
+        # ならない。300以上の余裕を持たせる
+        n_bars = 320
         window_start = pd.Timestamp("2022-01-03")
         split = pd.Timestamp("2022-01-31")  # 区切りの境界（この日で前半が終わる）
         window_end = pd.Timestamp("2022-03-01")
@@ -298,6 +302,33 @@ class ResumeTest(unittest.TestCase):
 
             self.assertEqual(mtimes_before, mtimes_after, "再開時に既存日を書き直していないこと")
             self.assertTrue(any("再開スキップ" in m for m in logs))
+
+
+class EmptyDayRateGuardTest(unittest.TestCase):
+    """2026-08-24 の事故（指数の長期履歴が無く全営業日が空のまま run_replay が成功
+    終了していた）の再発防止。空(採点対象0件)の日が MAX_EMPTY_DAY_RATE を超えたら
+    run_replay は RuntimeError を送出しなければならない。"""
+
+    def test_normal_run_does_not_raise(self):
+        ohlcv, idx_ohlcv, listed = _short_replay_inputs()
+        start, stop = pd.Timestamp("2021-08-02"), pd.Timestamp("2021-08-10")
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp, start, stop,
+                              k=3, label_n=15, pool_days=5, min_history_bars=50, log=lambda *a: None)
+            table = replay.load_replay_table(tmp)
+            self.assertGreater(len(table), 0, "合成データなら空の日ばかりにはならないはず")
+
+    def test_mostly_missing_index_data_raises(self):
+        ohlcv, idx_ohlcv, listed = _short_replay_inputs()
+        # 指数データを先頭数本だけに切り詰める(= backfillでindexの長期履歴を取り忘れた事故を再現)
+        idx_short = idx_ohlcv.iloc[:3]
+        start, stop = pd.Timestamp("2021-08-02"), pd.Timestamp("2021-08-10")
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                replay.run_replay(ohlcv, idx_short, listed, tmp, start, stop,
+                                  k=3, label_n=15, pool_days=5, min_history_bars=50,
+                                  log=lambda *a: None)
+            self.assertIn("異常終了", str(ctx.exception))
 
 
 class LoadReplayTableTest(unittest.TestCase):
