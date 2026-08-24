@@ -184,6 +184,64 @@ class BaselineTest(unittest.TestCase):
         self.assertAlmostEqual(out["success_rate"], 2 / 3, places=9)
 
 
+class HoldoutProtectionTest(unittest.TestCase):
+    """CLAUDE.md 絶対規則: ホールドアウトを明示フラグ無しで見ない
+    （呼び出し側が誤って全期間ohlcvを渡しても、baseline(a)/(b)の内部で守られること）。"""
+
+    def test_nishimura_trades_ignores_data_after_holdout_start(self):
+        up = list(np.linspace(70.0, 100.0, 80))
+        dip = [96.0, 90.0]
+        recover = [92.0, 101.0, 102.0]
+        tail_before = [102.0] * 5
+        tail_into_holdout = [999.0] * 30  # 先読みされたら結果が変わるはずの極端な値
+        closes = up + dip + recover + tail_before + tail_into_holdout
+        start_date = layer1.HOLDOUT_WINDOW[0] - pd.Timedelta(days=120)
+        idx = pd.bdate_range(start_date, periods=len(closes))
+        self.assertGreater(idx[-1], layer1.HOLDOUT_WINDOW[0])  # 系列がホールドアウトへ食い込む前提
+
+        close = pd.Series(closes, index=idx)
+        df = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                           "Close": close}, index=idx)
+        entry_end = layer1.HOLDOUT_WINDOW[0] - pd.Timedelta(days=1)
+
+        with_extra = layer1.nishimura_trades({"1301.T": df}, ["1301.T"], idx[0], entry_end, max_hold=15)
+        truncated_df = df[df.index < layer1.HOLDOUT_WINDOW[0]]
+        without_extra = layer1.nishimura_trades({"1301.T": truncated_df}, ["1301.T"], idx[0], entry_end,
+                                                 max_hold=15)
+        pd.testing.assert_frame_equal(with_extra.reset_index(drop=True),
+                                      without_extra.reset_index(drop=True))
+
+    def test_baseline_a_random_sma200_ignores_data_after_holdout_start(self):
+        date_t = layer1.HOLDOUT_WINDOW[0] - pd.Timedelta(days=5)
+        n_bars = 300
+        tickers = [f"{1301 + i * 37:04d}.T" for i in range(10)]
+        ohlcv_upto_t = make_synthetic(tickers, n_bars=n_bars, seed=0, end=date_t)
+        ohlcv_full = {}
+        rng_seed = 0
+        for t in tickers:
+            base = ohlcv_upto_t[t]
+            rng = np.random.default_rng(int(t[:4]))
+            n_extra = 60
+            idx_extra = pd.bdate_range(base.index[-1] + pd.Timedelta(days=1), periods=n_extra)
+            last_close = float(base["Close"].iloc[-1])
+            close = last_close * np.exp(np.cumsum(rng.normal(0, 0.02, n_extra)))
+            ext = pd.DataFrame({"Open": close, "High": close * 1.01, "Low": close * 0.99,
+                                "Close": close, "Volume": 1e6, "Dividends": 0.0,
+                                "Stock Splits": 0.0}, index=idx_extra)
+            ohlcv_full[t] = pd.concat([base, ext])
+        self.assertGreater(ohlcv_full[tickers[0]].index[-1], layer1.HOLDOUT_WINDOW[0])
+
+        listed = pd.DataFrame({"ticker": tickers, "is_equity": True})
+        pool = pd.DataFrame({"date": [date_t] * 3, "ticker": tickers[:3]})
+
+        with_extra = layer1.baseline_a_random_sma200(ohlcv_full, listed, pool, h=10,
+                                                      n_draws=5, seed=0, min_history_bars=250)
+        ohlcv_truncated = {t: df[df.index < layer1.HOLDOUT_WINDOW[0]] for t, df in ohlcv_full.items()}
+        without_extra = layer1.baseline_a_random_sma200(ohlcv_truncated, listed, pool, h=10,
+                                                         n_draws=5, seed=0, min_history_bars=250)
+        self.assertEqual(with_extra, without_extra)
+
+
 class NishimuraTradesTest(unittest.TestCase):
     """DESIGN.md §10.2-4(b): エントリー/手仕舞い条件の手計算。"""
 

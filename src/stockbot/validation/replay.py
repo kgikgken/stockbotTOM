@@ -159,6 +159,25 @@ def load_replay_table(output_dir: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def _truncate_before_holdout(ohlcv: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    """CLAUDE.md 絶対規則: ホールドアウト（2026-02〜2026-08）を明示フラグ無しで見ない。
+
+    _filter_holdout は「どの T を評価するか」を絞るだけで、T+h 形式のラベル
+    （validation.labels、T-401）が近傍日（例: T=2026-01-28 で h=30 なら T+30 は
+    2026-03 頃）を評価する際にホールドアウト側のバーを読んでしまうのは防げない。
+    ohlcv 自体を物理的にホールドアウト開始日より前で打ち切ることで、日付範囲の
+    フィルタに関わらず読めないようにする（境界に近い T はラベルが NaN/未決になる
+    だけで、これは正しい挙動 —— データが無いのと同じ扱いになる）。
+    """
+    out = {}
+    for ticker, df in ohlcv.items():
+        if df is None or len(df) == 0:
+            out[ticker] = df
+            continue
+        out[ticker] = df[df.index < HOLDOUT_WINDOW[0]]
+    return out
+
+
 def _filter_holdout(dates: pd.DatetimeIndex, include_holdout: bool, log=print) -> pd.DatetimeIndex:
     if include_holdout:
         return dates
@@ -192,9 +211,16 @@ def run_replay(
     include_holdout=False（既定）のとき、start〜end がホールドアウト
     （HOLDOUT_WINDOW）に一部でもかかっていれば、その部分の営業日を除いて再生する
     （CLAUDE.md の絶対規則: ホールドアウトは明示フラグ無しで生成しない）。
+    さらに ohlcv/idx_ohlcv 自体をホールドアウト開始日より前で打ち切ってから使う
+    （_truncate_before_holdout）。日付範囲のフィルタだけでは、ホールドアウト直前の
+    T のラベル（T+h が h 次第でホールドアウトに入り込む）を防げないため。
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not include_holdout:
+        ohlcv = _truncate_before_holdout(ohlcv)
+        idx_ohlcv = idx_ohlcv[idx_ohlcv.index < HOLDOUT_WINDOW[0]]
 
     dates = pd.bdate_range(start, end)
     dates = _filter_holdout(dates, include_holdout, log=log)
