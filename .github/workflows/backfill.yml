@@ -53,6 +53,17 @@ jobs:
       - name: Tests
         run: python -m unittest discover -s tests -t .
 
+      # 指数(TOPIX/日経225)は cli.py backfill では取得されない（対象は上場株式のみ）。
+      # data-daily の index ステップは既定 HISTORY_DAYS=400 のため、backfill 相当の
+      # 長期履歴が無いと replay の全営業日が「指数データが無い」でスキップされてしまう
+      # （2026-08-24 に実際に発生。全日スキップでも run_replay は成功終了していた）。
+      # upsert は既存データを消さず追加するだけなので、ここで一度長期分を足せば
+      # 以降の data-daily（400日）実行でも保持される
+      - name: Backfill index
+        env:
+          HISTORY_DAYS: ${{ github.event.inputs.history_days || '2600' }}
+        run: python -m stockbot.cli index
+
       - name: Backfill
         env:
           HISTORY_DAYS: ${{ github.event.inputs.history_days || '2600' }}

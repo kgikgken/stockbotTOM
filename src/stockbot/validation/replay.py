@@ -32,6 +32,10 @@ MAIN_WINDOW = (pd.Timestamp("2021-08-01"), pd.Timestamp("2026-02-01"))
 ROBUSTNESS_WINDOW = (pd.Timestamp("2016-08-01"), pd.Timestamp("2026-02-01"))
 HOLDOUT_WINDOW = (pd.Timestamp("2026-02-01"), pd.Timestamp("2026-08-01"))
 MIN_HISTORY_BARS = 250  # DESIGN.md §10.1（config.Settings.min_history_bars と同じ既定値）
+MAX_EMPTY_DAY_RATE = 0.5  # 運用上の安全弁（スコアリングのパラメータではない）。指数データや
+# ユニバースが無くて空のまま処理された日の割合がこれを超えたら run_replay を異常終了させる。
+# 2026-08-24 に、指数の長期履歴が backfill されておらず対象期間の全日が空のまま
+# 「成功」終了していた事故があった（何も処理していないのに緑になるのが最も危険）
 
 LABEL_COLS = [f"r_{h}" for h in labels_mod.H_LIST] + ["label", "hit_day", "mfe", "mae", "censored_at"]
 REPLAY_COLS = DAILY_FEATURES_COLS + LABEL_COLS
@@ -269,13 +273,15 @@ def run_replay(
     # start より前に既に output_dir にある日を先に読み込んでおく
     pool_history_days: List[pd.DataFrame] = _load_recent_replay_days(output_dir, dates[0], pool_days)
     t_start = time.monotonic()
-    n_done = n_skipped = 0
+    n_done = n_skipped = n_empty = 0
 
     for i, date_t in enumerate(dates):
         out_path = _replay_path(output_dir, date_t)
         if out_path.exists():
             n_skipped += 1
             day_df = _read_replay_day(out_path)
+            if len(day_df) == 0:
+                n_empty += 1
             pool_history_days.append(day_df[DAILY_FEATURES_COLS])
             pool_history_days = pool_history_days[-(pool_days - 1):] if pool_days > 1 else []
             continue
@@ -286,6 +292,8 @@ def run_replay(
                                 min_history_bars, earnings_schedule, history_pool, log=log)
         day_df.to_csv(out_path, index=False, compression="gzip")
         n_done += 1
+        if len(day_df) == 0:
+            n_empty += 1
 
         pool_history_days.append(day_df[DAILY_FEATURES_COLS])
         pool_history_days = pool_history_days[-(pool_days - 1):] if pool_days > 1 else []
@@ -293,10 +301,19 @@ def run_replay(
         elapsed = time.monotonic() - t_start
         if n_done % 20 == 0 or i == len(dates) - 1:
             log(f"[replay] {date_t.date()} 完了 ({i + 1}/{len(dates)} 営業日, "
-                f"新規 {n_done} / 再開スキップ {n_skipped}, 経過 {elapsed:.0f}秒)")
+                f"新規 {n_done} / 再開スキップ {n_skipped} / 空 {n_empty}, 経過 {elapsed:.0f}秒)")
 
-    log(f"[replay] 完了。新規 {n_done} 日 / 再開スキップ {n_skipped} 日 "
+    log(f"[replay] 完了。新規 {n_done} 日 / 再開スキップ {n_skipped} 日 / 空(データ無し) {n_empty} 日 "
         f"/ 合計経過 {time.monotonic() - t_start:.0f}秒")
+
+    empty_rate = n_empty / len(dates) if len(dates) else 0.0
+    if empty_rate > MAX_EMPTY_DAY_RATE:
+        raise RuntimeError(
+            f"[replay] 異常終了: 対象 {len(dates)} 営業日のうち {n_empty} 日 "
+            f"({empty_rate:.0%}) が空(指数データまたはユニバースが無い等で採点対象0件)。"
+            f"閾値 {MAX_EMPTY_DAY_RATE:.0%} を超えたため失敗として終了する。"
+            "store の指数データ範囲や listed_latest.csv、ユニバースの本数基準を確認すること"
+        )
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -339,11 +356,15 @@ def main(argv: Optional[list] = None) -> int:
         earnings_schedule = load_earnings_schedule(p)
 
     output_dir = Path(args.output_dir) if args.output_dir else cfg.data_dir / "replay"
-    run_replay(ohlcv, idx_ohlcv, listed, output_dir,
-              pd.Timestamp(args.start), pd.Timestamp(args.end),
-              cfg.k, cfg.label_n, cfg.pool_days, cfg.min_history_bars,
-              earnings_schedule=earnings_schedule, include_holdout=args.include_holdout,
-              log=print)
+    try:
+        run_replay(ohlcv, idx_ohlcv, listed, output_dir,
+                  pd.Timestamp(args.start), pd.Timestamp(args.end),
+                  cfg.k, cfg.label_n, cfg.pool_days, cfg.min_history_bars,
+                  earnings_schedule=earnings_schedule, include_holdout=args.include_holdout,
+                  log=print)
+    except RuntimeError as e:
+        print(str(e))
+        return 1
     return 0
 
 
