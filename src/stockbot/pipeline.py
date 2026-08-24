@@ -116,9 +116,18 @@ def compute_daily_features(
             continue
         n_gate_pass += 1
 
+        # dimensions.compute_dimensions は idx_close が close と「同じ位置規約で整列済み」
+        # （同じ長さ・同じ i が同じ日付）であることを前提にしている（D2の t_pos 参照）。
+        # 銘柄ごとに実際に取得できた営業日集合が指数と完全には一致しない場合があり
+        # （取得タイミングの違い等）、position の単純な流用は日付の取り違えや
+        # IndexError を起こす（2026-08-24、10年replayの実データで発生）。日付で
+        # reindex して精度を保証する（指数側に無い日は NaN → D2はその日だけ欠損になる。
+        # これは正しい挙動で、誤った値やクラッシュより望ましい）
+        idx_close_aligned = idx_close.reindex(close.index)
+
         feats, _extra = dimensions.compute_dimensions(
             open_, high, low, close, volume, dividends, alternated, pb, t_pos, k,
-            idx_close=idx_close, earnings_schedule=earnings_schedule, ticker=ticker,
+            idx_close=idx_close_aligned, earnings_schedule=earnings_schedule, ticker=ticker,
             regime=gauge["level"], breadth_75=breadth_75, breadth_200=breadth_200,
         )
 
