@@ -80,3 +80,4 @@ jobs:
         if: always()
         run: |
           echo "saved day files: $(ls data/replay/*.csv.gz 2>/dev/null | wc -l)"
+          python scripts/replay_run_summary.py --replay-dir data/replay
