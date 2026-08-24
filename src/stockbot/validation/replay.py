@@ -148,6 +148,36 @@ def _read_replay_day(path: Path) -> pd.DataFrame:
     return df
 
 
+def _load_recent_replay_days(output_dir: Path, before_date: pd.Timestamp,
+                             pool_days: int) -> List[pd.DataFrame]:
+    """output_dir に既に保存済みの replay_*.csv.gz のうち、before_date より前の直近
+    pool_days-1 日ぶんを読み込む（DESIGN.md §6.1 のプールを区切り実行の境界でも
+    途切れさせないため。pipeline.load_recent_daily_features と同じ考え方）。
+
+    年ごとなど期間を区切って run_replay を複数回に分けて実行する場合、前の区切りが
+    書いた日次ファイルは同じ output_dir に残っている前提（validation-replay ワーク
+    フローの Actions cache 等）。無ければ空リスト（従来通り、プールが無い状態から
+    始まる）。
+    """
+    output_dir = Path(output_dir)
+    if pool_days <= 1 or not output_dir.exists():
+        return []
+    before_date = pd.Timestamp(before_date)
+    dated: List[tuple] = []
+    for f in output_dir.glob("replay_*.csv.gz"):
+        name = f.name
+        date_str = name[len("replay_"):-len(".csv.gz")]
+        try:
+            d = pd.Timestamp(date_str)
+        except ValueError:
+            continue
+        if d < before_date:
+            dated.append((d, f))
+    dated.sort(key=lambda x: x[0])
+    recent = dated[-(pool_days - 1):]
+    return [_read_replay_day(f)[DAILY_FEATURES_COLS] for _d, f in recent]
+
+
 def load_replay_table(output_dir: Path) -> pd.DataFrame:
     """output_dir に保存済みの replay_*.csv.gz を全て読み込み1つの表にまとめる。"""
     output_dir = Path(output_dir)
@@ -208,6 +238,13 @@ def run_replay(
     スキップした日の内容をプール（history_pool、DESIGN.md §6.1）の再構築に使う
     （直近 pool_days-1 日ぶんが必要なため）。
 
+    年ごとなど期間を区切って複数回に分けて実行する場合も、プールが区切りの境界で
+    途切れないよう、start より前に output_dir に既にある直近 pool_days-1 日ぶんを
+    起動時に読み込んでおく（_load_recent_replay_days。pipeline.load_recent_daily_features
+    と同じ考え方）。前の区切りの出力が同じ output_dir に残っていることが前提
+    （validation-replay ワークフローでは Actions cache で引き継ぐ）。出力するのは
+    あくまで start〜end のぶんだけで、この事前読み込み分を書き直すことはない。
+
     include_holdout=False（既定）のとき、start〜end がホールドアウト
     （HOLDOUT_WINDOW）に一部でもかかっていれば、その部分の営業日を除いて再生する
     （CLAUDE.md の絶対規則: ホールドアウトは明示フラグ無しで生成しない）。
@@ -228,7 +265,9 @@ def run_replay(
         log("[replay] 再生対象の営業日が無い")
         return
 
-    pool_history_days: List[pd.DataFrame] = []  # 直近 pool_days-1 日ぶん（新しい順ではなく古い順）
+    # 直近 pool_days-1 日ぶん（古い順）。区切り実行の境界を越えてプールが続くよう、
+    # start より前に既に output_dir にある日を先に読み込んでおく
+    pool_history_days: List[pd.DataFrame] = _load_recent_replay_days(output_dir, dates[0], pool_days)
     t_start = time.monotonic()
     n_done = n_skipped = 0
 
