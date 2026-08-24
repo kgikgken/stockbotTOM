@@ -40,6 +40,11 @@ def check_splits(df: pd.DataFrame, ticker: str = "", tol: float = 0.08,
     if df is None or len(df) < 2 * window + 2:
         return df, issues
     df = df.copy()
+    if "Volume" in df.columns:
+        # yfinance の実データは Volume が int64 で返る。分割調整で比率倍すると小数になり、
+        # pandas 3.x では int64 列への代入が LossySetitemError になる（未調整分割の
+        # 出来高修正で実データに対してのみ発生する。float64 化して回避する）
+        df["Volume"] = df["Volume"].astype(float)
     close = df["Close"].to_numpy(dtype=float)
     vol = df["Volume"].to_numpy(dtype=float)
     splits = df["Stock Splits"].to_numpy(dtype=float) if "Stock Splits" in df.columns else np.zeros(len(df))

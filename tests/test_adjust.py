@@ -43,6 +43,17 @@ class SplitCheckTest(unittest.TestCase):
         self.assertIn("suspected_unrecorded_split", kinds)
         self.assertTrue(np.allclose(fixed["Close"], df["Close"]))
 
+    def test_int64_volume_does_not_raise_lossy_setitem_error(self):
+        # 回帰テスト: yfinance の実データは Volume が int64 で返る。未調整分割の出来高
+        # 修正（比率倍）で LossySetitemError になっていた不具合（backfill ワークフローの
+        # 実データ取得で実際に踏んだ）。テスト用の合成 Volume は float なので、この
+        # dtype を明示的に int64 にしてから通す
+        df = _series(adjusted=False, record=True)
+        df["Volume"] = df["Volume"].astype("int64")
+        fixed, issues = check_splits(df, "X")  # 例外を出さずに完走すること
+        self.assertEqual([i["kind"] for i in issues], ["unadjusted_split"])
+        self.assertAlmostEqual(fixed["Volume"].iloc[0], 1e5, delta=1)
+
 
 if __name__ == "__main__":
     unittest.main()
