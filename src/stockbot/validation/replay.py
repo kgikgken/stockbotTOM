@@ -36,6 +36,15 @@ MAX_EMPTY_DAY_RATE = 0.5  # 運用上の安全弁（スコアリングのパラ�
 # ユニバースが無くて空のまま処理された日の割合がこれを超えたら run_replay を異常終了させる。
 # 2026-08-24 に、指数の長期履歴が backfill されておらず対象期間の全日が空のまま
 # 「成功」終了していた事故があった（何も処理していないのに緑になるのが最も危険）
+#
+# 空の日には2種類の全く異なる原因があり、ガードは前者だけで判定する（2026-08-26 追加）。
+# - EMPTY_REASON_NO_DATA: 指数データまたはユニバース（履歴 min_history_bars 本以上の
+#   銘柄）が1件も無い。データ取得の不備を示す（本来のガードの対象）
+# - EMPTY_REASON_NO_CANDIDATES: 指数・ユニバースは揃っているが、ゲート（特に G2:
+#   Close>=SMA200）や状態条件で全銘柄が落ちた。地合い急落時（例: 2020-02〜06）に
+#   正しく起こりうる市場の実態であり、データの不備ではない。ガードの対象にしない
+EMPTY_REASON_NO_DATA = "no_data"
+EMPTY_REASON_NO_CANDIDATES = "no_candidates"
 
 LABEL_COLS = [f"r_{h}" for h in labels_mod.H_LIST] + ["label", "hit_day", "mfe", "mae", "censored_at"]
 REPLAY_COLS = DAILY_FEATURES_COLS + LABEL_COLS
@@ -100,7 +109,9 @@ def replay_one_day(
     idx_pos = _date_position(idx_ohlcv_full.index, date_t)
     if idx_pos is None or not universe_tickers:
         log(f"[replay] {date_t.date()}: 指数データまたはユニバースが無いためスキップ")
-        return pd.DataFrame(columns=REPLAY_COLS)
+        empty = pd.DataFrame(columns=REPLAY_COLS)
+        empty.attrs["empty_reason"] = EMPTY_REASON_NO_DATA
+        return empty
     idx_close_trunc = idx_ohlcv_full["Close"].iloc[: idx_pos + 1]
 
     ohlcv_trunc: Dict[str, pd.DataFrame] = {}
@@ -114,7 +125,11 @@ def replay_one_day(
         pool_days=pool_days, log=log,
     )
     if len(features_df) == 0:
-        return features_df
+        # 指数・ユニバースは揃っているが、ゲートや状態条件で全銘柄が落ちた
+        # （地合い急落時に正しく起こりうる。データの不備ではない）
+        empty = pd.DataFrame(columns=REPLAY_COLS)
+        empty.attrs["empty_reason"] = EMPTY_REASON_NO_CANDIDATES
+        return empty
 
     # ラベル（T-401）: ユニバース等加重ベンチマークは打ち切らない全期間データで計算する
     benchmarks_raw = labels_mod.universe_benchmark_returns(
@@ -140,6 +155,31 @@ def replay_one_day(
 
 def _replay_path(output_dir: Path, date_t: pd.Timestamp) -> Path:
     return Path(output_dir) / f"replay_{pd.Timestamp(date_t).strftime('%Y-%m-%d')}.csv.gz"
+
+
+def _empty_reason_meta_path(output_dir: Path, date_t: pd.Timestamp) -> Path:
+    return Path(output_dir) / f"replay_meta_{pd.Timestamp(date_t).strftime('%Y-%m-%d')}.json"
+
+
+def _write_empty_reason(output_dir: Path, date_t: pd.Timestamp, reason: str) -> None:
+    """空(0行)の日の原因をサイドカー JSON に残す（中断再開後もガードの判定基準を
+    再現できるようにするため。.attrs は CSV に永続化されないので別ファイルに書く）。"""
+    import json
+    _empty_reason_meta_path(output_dir, date_t).write_text(
+        json.dumps({"empty_reason": reason}), encoding="utf-8")
+
+
+def _read_empty_reason(output_dir: Path, date_t: pd.Timestamp) -> str:
+    """保存済みのサイドカーが無い場合は EMPTY_REASON_NO_DATA を返す（安全側のデフォルト。
+    このガードが導入される前に生成された空ファイルを再開したケースを含む）。"""
+    import json
+    p = _empty_reason_meta_path(output_dir, date_t)
+    if not p.exists():
+        return EMPTY_REASON_NO_DATA
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get("empty_reason", EMPTY_REASON_NO_DATA)
+    except (ValueError, OSError):
+        return EMPTY_REASON_NO_DATA
 
 
 def _read_replay_day(path: Path) -> pd.DataFrame:
@@ -233,6 +273,7 @@ def run_replay(
     min_history_bars: int = MIN_HISTORY_BARS,
     earnings_schedule: Optional[pd.DataFrame] = None,
     include_holdout: bool = False,
+    stats_start: Optional[pd.Timestamp] = None,
     log=print,
 ) -> None:
     """start〜end の営業日ごとに1日ぶんの再生を行い、output_dir に
@@ -255,6 +296,13 @@ def run_replay(
     さらに ohlcv/idx_ohlcv 自体をホールドアウト開始日より前で打ち切ってから使う
     （_truncate_before_holdout）。日付範囲のフィルタだけでは、ホールドアウト直前の
     T のラベル（T+h が h 次第でホールドアウトに入り込む）を防げないため。
+
+    stats_start（DESIGN.md §10.1 開始日の規則）を渡すと、start〜stats_start 未満の
+    日は「warmup」列に True を付けて出力する（G3 の 252 本ルックバックと §6.3 の
+    プール 20 日ウォームアップのために start を stats_start より前から回す運用を
+    想定。プール継続には使うが、集計からは除外する日という意味）。stats_start 以降
+    は warmup=False。None（既定）なら warmup 列は付けない（主評価窓など、この区別が
+    不要な既存の呼び出しに影響しない）。
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -273,7 +321,8 @@ def run_replay(
     # start より前に既に output_dir にある日を先に読み込んでおく
     pool_history_days: List[pd.DataFrame] = _load_recent_replay_days(output_dir, dates[0], pool_days)
     t_start = time.monotonic()
-    n_done = n_skipped = n_empty = 0
+    n_done = n_skipped = 0
+    n_empty_no_data = n_empty_no_candidates = 0
 
     for i, date_t in enumerate(dates):
         out_path = _replay_path(output_dir, date_t)
@@ -281,7 +330,11 @@ def run_replay(
             n_skipped += 1
             day_df = _read_replay_day(out_path)
             if len(day_df) == 0:
-                n_empty += 1
+                reason = _read_empty_reason(output_dir, date_t)
+                if reason == EMPTY_REASON_NO_CANDIDATES:
+                    n_empty_no_candidates += 1
+                else:
+                    n_empty_no_data += 1
             pool_history_days.append(day_df[DAILY_FEATURES_COLS])
             pool_history_days = pool_history_days[-(pool_days - 1):] if pool_days > 1 else []
             continue
@@ -290,10 +343,18 @@ def run_replay(
                         if pool_history_days else None)
         day_df = replay_one_day(date_t, ohlcv, idx_ohlcv, listed, k, label_n, pool_days,
                                 min_history_bars, earnings_schedule, history_pool, log=log)
+        if stats_start is not None:
+            day_df = day_df.copy()
+            day_df["warmup"] = bool(date_t < pd.Timestamp(stats_start))
         day_df.to_csv(out_path, index=False, compression="gzip")
         n_done += 1
         if len(day_df) == 0:
-            n_empty += 1
+            reason = day_df.attrs.get("empty_reason", EMPTY_REASON_NO_DATA)
+            _write_empty_reason(output_dir, date_t, reason)
+            if reason == EMPTY_REASON_NO_CANDIDATES:
+                n_empty_no_candidates += 1
+            else:
+                n_empty_no_data += 1
 
         pool_history_days.append(day_df[DAILY_FEATURES_COLS])
         pool_history_days = pool_history_days[-(pool_days - 1):] if pool_days > 1 else []
@@ -301,18 +362,23 @@ def run_replay(
         elapsed = time.monotonic() - t_start
         if n_done % 20 == 0 or i == len(dates) - 1:
             log(f"[replay] {date_t.date()} 完了 ({i + 1}/{len(dates)} 営業日, "
-                f"新規 {n_done} / 再開スキップ {n_skipped} / 空 {n_empty}, 経過 {elapsed:.0f}秒)")
+                f"新規 {n_done} / 再開スキップ {n_skipped} / "
+                f"空(データ無し) {n_empty_no_data} / 空(候補0件) {n_empty_no_candidates}, "
+                f"経過 {elapsed:.0f}秒)")
 
-    log(f"[replay] 完了。新規 {n_done} 日 / 再開スキップ {n_skipped} 日 / 空(データ無し) {n_empty} 日 "
+    log(f"[replay] 完了。新規 {n_done} 日 / 再開スキップ {n_skipped} 日 / "
+        f"空(データ無し) {n_empty_no_data} 日 / 空(候補0件・ゲート等) {n_empty_no_candidates} 日 "
         f"/ 合計経過 {time.monotonic() - t_start:.0f}秒")
 
-    empty_rate = n_empty / len(dates) if len(dates) else 0.0
+    empty_rate = n_empty_no_data / len(dates) if len(dates) else 0.0
     if empty_rate > MAX_EMPTY_DAY_RATE:
         raise RuntimeError(
-            f"[replay] 異常終了: 対象 {len(dates)} 営業日のうち {n_empty} 日 "
+            f"[replay] 異常終了: 対象 {len(dates)} 営業日のうち {n_empty_no_data} 日 "
             f"({empty_rate:.0%}) が空(指数データまたはユニバースが無い等で採点対象0件)。"
             f"閾値 {MAX_EMPTY_DAY_RATE:.0%} を超えたため失敗として終了する。"
-            "store の指数データ範囲や listed_latest.csv、ユニバースの本数基準を確認すること"
+            "store の指数データ範囲や listed_latest.csv、ユニバースの本数基準を確認すること。"
+            f"（別途、ゲート等で候補0件だった日が {n_empty_no_candidates} 日あるが、"
+            "これはデータの不備ではないためこの判定には含めていない）"
         )
 
 
@@ -334,6 +400,11 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--include-holdout", action="store_true",
                     help="ホールドアウト期間も生成する（通常は指定しない。CLAUDE.md 絶対規則）")
     ap.add_argument("--output-dir", default=None, help="既定: <DATA_DIR>/replay")
+    ap.add_argument("--stats-start", default=None,
+                    help="YYYY-MM-DD。DESIGN.md §10.1 開始日の規則。start はこれより前"
+                         "（G3 の 252 本ルックバック＋§6.3 プール 20 日ウォームアップの"
+                         "ため）から回し、stats_start 未満の日は warmup=True で出力する"
+                         "（集計除外用。省略時は warmup 列を付けない）")
     args = ap.parse_args(argv)
 
     cfg = Settings.from_env()
@@ -361,6 +432,7 @@ def main(argv: Optional[list] = None) -> int:
                   pd.Timestamp(args.start), pd.Timestamp(args.end),
                   cfg.k, cfg.label_n, cfg.pool_days, cfg.min_history_bars,
                   earnings_schedule=earnings_schedule, include_holdout=args.include_holdout,
+                  stats_start=pd.Timestamp(args.stats_start) if args.stats_start else None,
                   log=print)
     except RuntimeError as e:
         print(str(e))
