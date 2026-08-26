@@ -1,4 +1,5 @@
 """歴史的再生（DESIGN.md §10.1・§10.5 / TASKS.md T-402）のテスト。"""
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -281,6 +282,24 @@ def _short_replay_inputs():
     return ohlcv, idx_ohlcv, listed
 
 
+def _crash_tail(df: pd.DataFrame, n_crash: int) -> pd.DataFrame:
+    """末尾 n_crash 本を急落させ、Close が SMA200 を大きく割り込むようにする
+    （G2: Close>=SMA200 が全銘柄で落ちる地合い急変を模したテスト用ヘルパー）。
+    O/H/L/Close を同じ係数で一律にスケールするので、日中の高安関係は保たれる。"""
+    df = df.copy()
+    factor = np.exp(np.linspace(-0.1, -0.9, n_crash))
+    for col in ("Open", "High", "Low", "Close"):
+        loc = df.columns.get_loc(col)
+        df.iloc[-n_crash:, loc] = df.iloc[-n_crash:][col].to_numpy() * factor
+    return df
+
+
+def _crashed_replay_inputs(n_crash=15):
+    ohlcv, idx_ohlcv, listed = _short_replay_inputs()
+    crashed = {t: _crash_tail(df, n_crash) for t, df in ohlcv.items()}
+    return crashed, idx_ohlcv, listed
+
+
 class ResumeTest(unittest.TestCase):
     """受け入れ: 中断再開できる（既に保存済みの日は再計算しない）。"""
 
@@ -329,6 +348,113 @@ class EmptyDayRateGuardTest(unittest.TestCase):
                                   k=3, label_n=15, pool_days=5, min_history_bars=50,
                                   log=lambda *a: None)
             self.assertIn("異常終了", str(ctx.exception))
+
+
+class EmptyReasonClassificationTest(unittest.TestCase):
+    """空(0行)の日には「データが無い」（EMPTY_REASON_NO_DATA）と「ゲート等で
+    候補が0件」（EMPTY_REASON_NO_CANDIDATES）の2種類があり、MAX_EMPTY_DAY_RATE
+    ガードは前者だけで判定しなければならない。2020-02〜06 のような地合い急落時に
+    G2（Close>=SMA200）で全銘柄が落ちるのは正しい挙動であり、データの不備ではない
+    （2026-08-26 の実行条件確認への対応）。"""
+
+    def test_all_gate_failures_do_not_raise_even_at_100_percent(self):
+        ohlcv, idx_ohlcv, listed = _crashed_replay_inputs(n_crash=15)
+        dates = pd.bdate_range(end=pd.Timestamp("2021-08-10"), periods=8)
+        with TemporaryDirectory() as tmp:
+            # 全日が「候補0件」でも例外を投げないことそのものが検証内容
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp, dates[0], dates[-1],
+                              k=3, label_n=15, pool_days=5, min_history_bars=50,
+                              log=lambda *a: None)
+            table = replay.load_replay_table(tmp)
+            self.assertEqual(len(table), 0, "全銘柄がG2で落ちるはずなので採点対象は0件")
+
+    def test_meta_sidecar_marks_gate_failures_as_no_candidates(self):
+        ohlcv, idx_ohlcv, listed = _crashed_replay_inputs(n_crash=15)
+        dates = pd.bdate_range(end=pd.Timestamp("2021-08-10"), periods=8)
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp, dates[0], dates[-1],
+                              k=3, label_n=15, pool_days=5, min_history_bars=50,
+                              log=lambda *a: None)
+            metas = list(Path(tmp).glob("replay_meta_*.json"))
+            self.assertGreater(len(metas), 0, "候補0件の日のサイドカーが書かれているはず")
+            for p in metas:
+                self.assertEqual(json.loads(p.read_text())["empty_reason"],
+                                 replay.EMPTY_REASON_NO_CANDIDATES)
+
+    def test_meta_sidecar_survives_resume_without_raising(self):
+        """中断再開（同じ範囲を再実行）しても「候補0件」の分類が保たれ、
+        ガードの判定が変わらないこと（.attrs はCSVに残らないため、サイドカーを
+        正しく読み戻せているかがここで初めて試される）。"""
+        ohlcv, idx_ohlcv, listed = _crashed_replay_inputs(n_crash=15)
+        dates = pd.bdate_range(end=pd.Timestamp("2021-08-10"), periods=8)
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp, dates[0], dates[-1],
+                              k=3, label_n=15, pool_days=5, min_history_bars=50,
+                              log=lambda *a: None)
+            logs = []
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp, dates[0], dates[-1],
+                              k=3, label_n=15, pool_days=5, min_history_bars=50,
+                              log=logs.append)
+            self.assertTrue(any("再開スキップ" in m for m in logs))
+
+    def test_a_minority_of_true_no_data_days_mixed_with_gate_failures_does_not_raise(self):
+        """8日中1日だけ指数データが欠落（12.5%、閾値0.5未満）、残り7日はゲート落ちに
+        よる空日。指数欠損の比率だけで判定すれば例外にならないはず。"""
+        ohlcv, idx_ohlcv, listed = _crashed_replay_inputs(n_crash=15)
+        dates = pd.bdate_range(end=pd.Timestamp("2021-08-10"), periods=8)
+        idx_gapped = idx_ohlcv.drop(index=[dates[0]])
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv, idx_gapped, listed, tmp, dates[0], dates[-1],
+                              k=3, label_n=15, pool_days=5, min_history_bars=50,
+                              log=lambda *a: None)
+
+    def test_a_majority_of_true_no_data_days_still_raises_when_mixed(self):
+        """8日中5日（62.5%、閾値0.5超）で指数データが欠落していれば、残りがゲート落ち
+        による空日であっても、指数欠損の比率だけで正しくガードが発火すること。"""
+        ohlcv, idx_ohlcv, listed = _crashed_replay_inputs(n_crash=15)
+        dates = pd.bdate_range(end=pd.Timestamp("2021-08-10"), periods=8)
+        idx_gapped = idx_ohlcv.drop(index=list(dates[:5]))
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                replay.run_replay(ohlcv, idx_gapped, listed, tmp, dates[0], dates[-1],
+                                  k=3, label_n=15, pool_days=5, min_history_bars=50,
+                                  log=lambda *a: None)
+            self.assertIn("異常終了", str(ctx.exception))
+
+
+class WarmupTaggingTest(unittest.TestCase):
+    """DESIGN.md §10.1「開始日の規則（R1.1で追加）」: stats_start より前
+    （G3の252本ルックバック＋§6.3プールの20日ウォームアップの期間）は
+    warmup=True で出力し、集計から除外できるようにする。"""
+
+    def test_rows_before_stats_start_are_flagged(self):
+        ohlcv, idx_ohlcv, listed = _short_replay_inputs()
+        dates = pd.bdate_range(end=pd.Timestamp("2021-08-10"), periods=6)
+        stats_start = dates[3]
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp, dates[0], dates[-1],
+                              k=3, label_n=15, pool_days=5, min_history_bars=50,
+                              stats_start=stats_start, log=lambda *a: None)
+            table = replay.load_replay_table(tmp)
+            self.assertIn("warmup", table.columns)
+            table_dates = pd.to_datetime(table["date"])
+            before = table[table_dates < stats_start]
+            on_or_after = table[table_dates >= stats_start]
+            self.assertGreater(len(before) + len(on_or_after), 0)
+            if len(before):
+                self.assertTrue(bool(before["warmup"].all()))
+            if len(on_or_after):
+                self.assertFalse(bool(on_or_after["warmup"].any()))
+
+    def test_no_stats_start_means_no_warmup_column(self):
+        ohlcv, idx_ohlcv, listed = _short_replay_inputs()
+        with TemporaryDirectory() as tmp:
+            replay.run_replay(ohlcv, idx_ohlcv, listed, tmp,
+                              pd.Timestamp("2021-08-02"), pd.Timestamp("2021-08-04"),
+                              k=3, label_n=15, pool_days=5, min_history_bars=50,
+                              log=lambda *a: None)
+            table = replay.load_replay_table(tmp)
+            self.assertNotIn("warmup", table.columns)
 
 
 class LoadReplayTableTest(unittest.TestCase):
