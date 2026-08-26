@@ -9,6 +9,9 @@ data/store/
 # T-402/T-403 の中間出力（銘柄×日の再生結果・L1集計の生表）も同様に git に入れない
 # （Actions cache のみ）。最終成果物の src/stockbot/validation/reports/ だけコミットする
 data/replay/
+# 頑健性窓（DESIGN.md §10.1）専用の別アーティファクト。主評価窓のdata/replayとは
+# 物理的に分離する（2026-08-26 実行条件の指示: 出力は主評価窓と別アーティファクトに）
+data/replay_robustness/
 data/layer1/
 # DRYRUN の出力先（config.py: dryrun 時の既定 DATA_DIR）。本番 data/ とは物理的に分離する
 data-dryrun/

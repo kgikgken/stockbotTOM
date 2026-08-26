@@ -1,0 +1,111 @@
+name: validation-replay-robustness
+
+# T-402: 頑健性窓（DESIGN.md §10.1 開始日規則〜2021-07-31）専用のreplay実行。
+# 主評価窓（replay.yml、data/replay、キャッシュキー replay-v2-）には一切触れない、
+# 完全に別のアーティファクト（2026-08-26 実行条件の指示: 出力は主評価窓と別
+# アーティファクトに。既存replayに触れない）。
+#
+# start には G3 計算可能日（252本目。§6.3 プールの20日ウォームアップを含む。
+# scripts/compute_robustness_start.py で実測する）を渡し、stats_start には
+# §10.1 の規則で算出した実際の集計対象開始日を渡す。stats_start 未満の日は
+# warmup=True で出力され、後段の集計（T-403）から除外される。
+#
+# 半年〜1年程度の単位で区切ってトリガーする想定（中断再開できる。data/replay_robustness
+# に既にある日はスキップする）。ホールドアウト（2026-02〜2026-08）は既定で除外される。
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "YYYY-MM-DD（G3計算可能日から。compute_robustness_start.py参照）"
+        required: true
+      end:
+        description: "YYYY-MM-DD（2021-07-31まで）"
+        required: true
+      stats_start:
+        description: "YYYY-MM-DD。DESIGN.md §10.1 開始日の規則で算出した集計対象開始日"
+        required: true
+
+permissions:
+  contents: read
+
+# store キャッシュの読み取り中に書き込みが走らないよう data-daily と同じグループにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      # 主評価窓（replay.yml）とは完全に別のキー空間・別ディレクトリ
+      - name: Restore replay output (robustness window, separate artifact)
+        uses: actions/cache@v4
+        with:
+          path: data/replay_robustness
+          key: replay-robustness-v1-${{ github.run_id }}
+          restore-keys: |
+            replay-robustness-v1-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Replay (robustness window)
+        env:
+          K: "3"
+          LABEL_N: "15"
+          POOL_DAYS: "20"
+          MIN_HISTORY_BARS: "250"
+        run: |
+          python -m stockbot.validation.replay \
+            --start "${{ github.event.inputs.start }}" \
+            --end "${{ github.event.inputs.end }}" \
+            --output-dir data/replay_robustness \
+            --stats-start "${{ github.event.inputs.stats_start }}"
+
+      - name: Robustness window summary
+        if: always()
+        run: |
+          echo "saved day files: $(ls data/replay_robustness/*.csv.gz 2>/dev/null | wc -l)"
+          python scripts/replay_run_summary.py --replay-dir data/replay_robustness
+
+      # 主評価窓の362,461行には一切書き込まない読み取り専用の参照（比較レポート用）。
+      # 存在しない/読めない場合も replay 自体は失敗させない
+      - name: Restore main window replay (read-only, for comparison only)
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: data/replay
+          key: replay-v2-${{ github.run_id }}
+          restore-keys: |
+            replay-v2-
+
+      - name: Main window summary (comparison reference)
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "=== 主評価窓（参考・比較用。読み取りのみ） ==="
+          python scripts/replay_run_summary.py --replay-dir data/replay
