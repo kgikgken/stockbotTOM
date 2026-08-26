@@ -1,0 +1,45 @@
+name: probe-robustness-start
+
+# 診断専用（TASKS.md のタスクではない）。DESIGN.md §10.1「開始日の規則（R1.1 で追加）」に
+# 従って頑健性窓の実際の開始日と、その日のユニバース通過銘柄数を実測する。store には
+# 触れない（restore のみ）。用が済み次第このワークフローファイルごと削除する想定
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# store キャッシュの読み取り中に書き込みが走らないよう data-daily と同じグループにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      - name: Compute robustness window start date
+        run: python scripts/compute_robustness_start.py
