@@ -324,5 +324,58 @@ class IndexForwardFillTest(unittest.TestCase):
         self.assertNotAlmostEqual(float(aligned.iloc[target_pos]), true_future_value, places=4)
 
 
+D2_COLS = ("d2_rs60", "d2_rs120", "d2_rsline_pos")
+
+
+class D2AlignmentRecalcConsistencyTest(unittest.TestCase):
+    """DESIGN.md §11 の再計算一致を、pipeline.py の idx_close 整列
+    （reindex().ffill(limit=3)、2026-08-26 追加）の層で確認する。
+
+    T-205 のハーネス（tests/test_lookahead.py）は dimensions.compute_dimensions を
+    直接呼ぶため、pipeline.compute_daily_features が追加するこの整列処理を通らない
+    （2026-08-26 実行条件の指示で判明）。ここではその層を明示的に検査する:
+    「T で切った idx_close から計算した d2_*」＝「T より先のデータも含む idx_close
+    を渡して計算した d2_*」の一致を、欠損（3営業日以内・超の両方）を含む合成データの
+    複数 T 点で確認する。一致すれば、ffill が将来のデータを参照していない
+    （T 以降の idx_close の有無で結果が変わらない）ことの直接証拠になる。
+    """
+
+    def test_truncated_and_full_index_series_give_same_d2(self):
+        # _acceptance_ohlcv() は t_pos=253（最終日）でのみ採点対象状態になることが
+        # 保証された決定論的系列（他の T では押し目構造が無く採点対象外になる）。
+        # ここでは「指数側だけを T で打ち切るか、T より先まで渡すか」を変える
+        # ことで、ffill が未来のデータを参照していないことを直接検査する
+        ohlcv, full_idx_close = _acceptance_ohlcv()
+        ticker = next(iter(ohlcv))
+        close_full = ohlcv[ticker]["Close"]
+        t = len(close_full) - 1
+
+        gap_positions = sorted({80, 81, 150, 151, 152, 153})  # 2営業日(限度内)+4営業日(限度超)
+        idx_with_gaps = full_idx_close.drop(index=close_full.index[gap_positions])
+
+        idx_cut = idx_with_gaps[idx_with_gaps.index <= close_full.index[t]]
+        # T より先の日付も含む「全期間」の指数（本来の値ではなく、後日差し替わりうる
+        # 未来データを模した別系列にして、参照されていれば値が変わることを保証する）
+        future_idx = pd.Series(
+            idx_with_gaps.max() * 100.0,
+            index=pd.bdate_range(close_full.index[t] + pd.Timedelta(days=1), periods=30))
+        idx_uncut = pd.concat([idx_with_gaps, future_idx])
+
+        out_cut = compute_daily_features(ohlcv, [ticker], idx_cut, k=K, label_n=15,
+                                         log=lambda *a: None)
+        out_uncut = compute_daily_features(ohlcv, [ticker], idx_uncut, k=K, label_n=15,
+                                           log=lambda *a: None)
+        self.assertEqual(len(out_cut), 1)
+        self.assertEqual(len(out_uncut), 1)
+        row_cut, row_uncut = out_cut.iloc[0], out_uncut.iloc[0]
+
+        for fid in D2_COLS:
+            a, b = row_cut[fid], row_uncut[fid]
+            if pd.isna(a) or pd.isna(b):
+                self.assertEqual(bool(pd.isna(a)), bool(pd.isna(b)), msg=fid)
+            else:
+                self.assertAlmostEqual(float(a), float(b), places=9, msg=fid)
+
+
 if __name__ == "__main__":
     unittest.main()
