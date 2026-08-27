@@ -1,8 +1,13 @@
+import os
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
 from . import _path  # noqa: F401
+from stockbot import cli
+from stockbot.config import Settings
 from stockbot.data.jpx_lists import norm_ticker, normalize_listed
 from stockbot.data.synthetic import make_synthetic, synthetic_listed
 from stockbot.universe.build import build_universe, liquidity_stats
@@ -57,6 +62,72 @@ class UniverseTest(unittest.TestCase):
         self.assertFalse(bool(row0["ok_history"]))
         self.assertFalse(bool(row1["ok_adv"]))
         self.assertEqual(int(u["passes"].sum()), 8)
+
+
+class ManualExclusionWiringTest(unittest.TestCase):
+    """データ品質による手動除外リスト（2026-08-27 追加）が step_universe に反映されること。
+    9900.T（先出し分割適用でadjust.pyの自動検出をすり抜けたケース）への対応。"""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self._env_names = ("SCREEN_DRYRUN", "DATA_DIR")
+        self._saved = {k: os.environ.get(k) for k in self._env_names}
+        os.environ["SCREEN_DRYRUN"] = "1"
+        os.environ["DATA_DIR"] = self._tmp.name
+        self.cfg = Settings.from_env()
+        self.cfg.ensure_dirs()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self._tmp.cleanup()
+
+    def test_ticker_in_manual_exclusions_file_fails_universe(self):
+        listed = synthetic_listed(10)
+        excluded_ticker = listed["ticker"].iloc[0]
+        ohlcv = make_synthetic(listed["ticker"].tolist(), n_bars=300, seed=1)
+
+        (self.cfg.reference_dir / "manual_exclusions.csv").write_text(
+            f"ticker,until,reason\n{excluded_ticker},2099-01-01,test exclusion\n",
+            encoding="utf-8")
+
+        u = cli.step_universe(self.cfg, listed, ohlcv=ohlcv, issues=None, log=lambda m: None)
+        row = u[u["ticker"] == excluded_ticker].iloc[0]
+        self.assertFalse(bool(row["ok_split"]))
+        self.assertFalse(bool(row["passes"]))
+
+    def test_expired_manual_exclusion_does_not_affect_universe(self):
+        listed = synthetic_listed(10)
+        ticker = listed["ticker"].iloc[0]
+        ohlcv = make_synthetic(listed["ticker"].tolist(), n_bars=300, seed=1)
+
+        (self.cfg.reference_dir / "manual_exclusions.csv").write_text(
+            f"ticker,until,reason\n{ticker},2000-01-01,expired\n", encoding="utf-8")
+
+        u = cli.step_universe(self.cfg, listed, ohlcv=ohlcv, issues=None, log=lambda m: None)
+        row = u[u["ticker"] == ticker].iloc[0]
+        self.assertTrue(bool(row["ok_split"]))
+
+    def test_manual_exclusion_merges_with_automatic_suspected_split_issues(self):
+        listed = synthetic_listed(10)
+        manual_ticker = listed["ticker"].iloc[0]
+        auto_ticker = listed["ticker"].iloc[1]
+        ohlcv = make_synthetic(listed["ticker"].tolist(), n_bars=300, seed=1)
+
+        (self.cfg.reference_dir / "manual_exclusions.csv").write_text(
+            f"ticker,until,reason\n{manual_ticker},2099-01-01,test exclusion\n", encoding="utf-8")
+        issues = pd.DataFrame({
+            "ticker": [auto_ticker], "date": [pd.Timestamp("2026-08-01")],
+            "kind": ["suspected_unrecorded_split"], "ratio": [2.0],
+            "observed": [2.0], "action": ["flag_only"],
+        })
+
+        u = cli.step_universe(self.cfg, listed, ohlcv=ohlcv, issues=issues, log=lambda m: None)
+        self.assertFalse(bool(u[u["ticker"] == manual_ticker].iloc[0]["ok_split"]))
+        self.assertFalse(bool(u[u["ticker"] == auto_ticker].iloc[0]["ok_split"]))
 
 
 if __name__ == "__main__":
