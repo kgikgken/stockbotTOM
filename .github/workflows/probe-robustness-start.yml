@@ -62,3 +62,10 @@ jobs:
       - name: Inspect 9900.T around the suspected 2025-01-08 boundary
         if: always()
         run: python scripts/inspect_ticker_revision.py --ticker 9900.T --around-date 2025-01-08 --window-days 45
+
+      # 2026-08-27 追加: JPXの分割公表済み・効力発生前リスト（toushi-radar.com調べ）
+      # のうち9900.T以外の直近効力発生（8/31〜9/1）4銘柄を含め、revisions.csv.gz
+      # の全履歴（直近3日に限らない）を対象にきれいな比率の改訂が無いか再点検する
+      - name: Full-history scan for pending-split-adjustment tickers (not limited to recent revisions)
+        if: always()
+        run: python scripts/scan_pending_split_adjustments.py --recent-days 36500
