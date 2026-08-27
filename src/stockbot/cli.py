@@ -27,6 +27,7 @@ from .data.jpx_lists import (
     fetch_earnings_schedule,
     load_earnings_schedule,
     load_listed_with_fallback,
+    load_manual_exclusions,
     normalize_listed,
 )
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
@@ -272,6 +273,10 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
     exclude: list[str] = []
     if issues is not None and len(issues):
         exclude = issues[issues["kind"] == "suspected_unrecorded_split"]["ticker"].unique().tolist()
+    manual = load_manual_exclusions(cfg.reference_dir / "manual_exclusions.csv", _now())
+    if manual:
+        log(f"[universe] 手動除外リスト（データ品質）: {manual}")
+        exclude = sorted(set(exclude) | set(manual))
     stats = liquidity_stats(ohlcv, cfg.adv_window)
     u = build_universe(listed, stats, cfg.min_adv_jpy, cfg.min_price, cfg.min_history_bars,
                        exclude, asof=_now(), max_staleness_days=cfg.max_staleness_days)

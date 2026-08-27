@@ -2,6 +2,8 @@
 ネットワークには依存しない（getter を差し替えて注入する）。"""
 import io
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
@@ -12,6 +14,7 @@ from stockbot.data.jpx_lists import (
     _fmt_code,
     fetch_delistings,
     fetch_earnings_schedule,
+    load_manual_exclusions,
 )
 
 # ------------------------------------------------------------------ fixtures
@@ -207,6 +210,47 @@ class FetchEarningsScheduleTest(unittest.TestCase):
         df = fetch_earnings_schedule("https://example.test/earnings/index.html",
                                      getter=getter, log=lambda m: None)
         self.assertEqual(len(df), 0)
+
+
+class LoadManualExclusionsTest(unittest.TestCase):
+    """データ品質による手動除外リスト（2026-08-27 追加、9900.T 先出し分割対応）。
+    adjust.py の自動検出をすり抜けたケースを until 日付付きで一時的に除外する。"""
+
+    def test_active_exclusion_within_until_date(self):
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / "manual_exclusions.csv"
+            p.write_text("ticker,until,reason\n9900.T,2026-08-31,split pre-applied\n",
+                         encoding="utf-8")
+            result = load_manual_exclusions(p, pd.Timestamp("2026-08-27"))
+            self.assertEqual(result, ["9900.T"])
+
+    def test_exclusion_expires_after_until_date(self):
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / "manual_exclusions.csv"
+            p.write_text("ticker,until,reason\n9900.T,2026-08-31,split pre-applied\n",
+                         encoding="utf-8")
+            result = load_manual_exclusions(p, pd.Timestamp("2026-09-01"))
+            self.assertEqual(result, [], "untilを過ぎたら自動的に除外を終了するはず")
+
+    def test_until_date_itself_is_still_active(self):
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / "manual_exclusions.csv"
+            p.write_text("ticker,until,reason\n9900.T,2026-08-31,split pre-applied\n",
+                         encoding="utf-8")
+            result = load_manual_exclusions(p, pd.Timestamp("2026-08-31"))
+            self.assertEqual(result, ["9900.T"])
+
+    def test_missing_file_returns_empty(self):
+        result = load_manual_exclusions(Path("/does/not/exist.csv"), pd.Timestamp("2026-08-27"))
+        self.assertEqual(result, [])
+
+    def test_ticker_normalized_to_dot_t_suffix(self):
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / "manual_exclusions.csv"
+            p.write_text("ticker,until,reason\n9900,2026-08-31,split pre-applied\n",
+                         encoding="utf-8")
+            result = load_manual_exclusions(p, pd.Timestamp("2026-08-27"))
+            self.assertEqual(result, ["9900.T"])
 
 
 if __name__ == "__main__":

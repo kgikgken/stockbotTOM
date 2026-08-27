@@ -287,6 +287,32 @@ def load_delistings(path: Path) -> pd.DataFrame:
     return df[cols]
 
 
+def load_manual_exclusions(path: Path, asof: pd.Timestamp) -> list[str]:
+    """reference/manual_exclusions.csv (ticker,until,reason) を読み、asof 時点で
+    有効な（until >= asof の）除外銘柄一覧を返す。無ければ空リスト。
+
+    adjust.py の suspected_unrecorded_split（自動検出）を補う、既知のデータ品質
+    問題の手動除外リスト（2026-08-27 追加）。例: 分割の効力発生前に yfinance が
+    価格を先出し適用したが、fetch_ohlcv の取得窓（HISTORY_DAYS）が発生源の日付を
+    含まないため check_splits の連続バー比較では検出できない銘柄。until を過ぎたら
+    自動的に除外を終了する（手動でファイルを編集し続けなくてよい）。
+    """
+    p = Path(path)
+    if not p.exists():
+        return []
+    df = pd.read_csv(p, dtype=str).fillna("")
+    if len(df) == 0:
+        return []
+    df["ticker"] = df["ticker"].map(norm_ticker)
+    df["until"] = pd.to_datetime(df["until"], errors="coerce").dt.normalize()
+    asof = pd.Timestamp(asof)
+    if asof.tz is not None:
+        asof = asof.tz_localize(None)
+    asof = asof.normalize()
+    active = df[df["until"].notna() & (df["until"] >= asof)]
+    return sorted(active["ticker"].unique().tolist())
+
+
 def next_earnings_days(schedule: pd.DataFrame, asof: pd.Timestamp, ticker: str) -> Optional[int]:
     """asof 以降で最も近い決算発表日までの暦日数。無ければ None。"""
     if schedule is None or len(schedule) == 0:
