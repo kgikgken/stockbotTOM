@@ -121,9 +121,14 @@ def compute_daily_features(
         # 銘柄ごとに実際に取得できた営業日集合が指数と完全には一致しない場合があり
         # （取得タイミングの違い等）、position の単純な流用は日付の取り違えや
         # IndexError を起こす（2026-08-24、10年replayの実データで発生）。日付で
-        # reindex して精度を保証する（指数側に無い日は NaN → D2はその日だけ欠損になる。
-        # これは正しい挙動で、誤った値やクラッシュより望ましい）
-        idx_close_aligned = idx_close.reindex(close.index)
+        # reindex して精度を保証する（指数側に無い日は NaN → D2はその日だけ欠損になる）。
+        # 欠損は最大3営業日まで前方補完する（2026-08-26 追加）。ffillは常に過去の値
+        # だけを使うため未来参照にはならない。頑健性窓（2016〜2021）は指数データに
+        # 散発的な1〜3営業日の欠落があり（主評価窓は0件）、放置するとDESIGN.md §6.1の
+        # 規約により該当日のF10〜F12（d2_rs60/d2_rs120/d2_rsline_pos）が欠損→通過扱いに
+        # なり、窓によって異なるフィルタを測ることになる。3営業日を超える欠損は前方
+        # 補完せずNaNのまま残す（それ以上は「同じ値が続いている」とみなす根拠が弱い）
+        idx_close_aligned = idx_close.reindex(close.index).ffill(limit=3)
 
         feats, _extra = dimensions.compute_dimensions(
             open_, high, low, close, volume, dividends, alternated, pb, t_pos, k,
