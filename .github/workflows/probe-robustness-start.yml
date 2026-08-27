@@ -18,7 +18,7 @@ concurrency:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -43,3 +43,25 @@ jobs:
 
       - name: Compute robustness window start date
         run: python scripts/compute_robustness_start.py
+
+      # 主評価窓・頑健性窓のいずれも変更しない、読み取りのみ
+      - name: Restore main window replay (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/replay
+          key: replay-v2-${{ github.run_id }}
+          restore-keys: |
+            replay-v2-
+
+      # 2026-08-26 実行条件の指示: 「指数の欠落が窓内0件だからno-op」は推論であり
+      # 証明ではない。d2_rs120等のルックバックが窓の外まで遡るケースを見落とすため、
+      # 実際に store から再計算して既存replayと完全一致するかを確認する
+      - name: Verify main window D2 recompute is a no-op after PR #36
+        continue-on-error: true
+        run: python scripts/verify_d2_recompute.py --replay-dir data/replay
+
+      # 指数の欠落として検出された日が、実際の取引日か東証休場日(カレンダー由来の
+      # 誤検出)かを確認する
+      - name: Check whether index gap dates are real trading days or exchange holidays
+        if: always()
+        run: python scripts/check_index_gap_dates.py
