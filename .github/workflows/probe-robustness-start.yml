@@ -53,34 +53,12 @@ jobs:
           restore-keys: |
             replay-v2-
 
-      # 2026-08-26 実行条件の指示: 「指数の欠落が窓内0件だからno-op」は推論であり
-      # 証明ではない。d2_rs120等のルックバックが窓の外まで遡るケースを見落とすため、
-      # 実際に store から再計算して既存replayと完全一致するかを確認する
-      - name: Verify main window D2 recompute is a no-op after PR #36
-        continue-on-error: true
-        run: python scripts/verify_d2_recompute.py --replay-dir data/replay
-
-      # 指数の欠落として検出された日が、実際の取引日か東証休場日(カレンダー由来の
-      # 誤検出)かを確認する
-      - name: Check whether index gap dates are real trading days or exchange holidays
+      # 2026-08-27 追加: no-op検証で不一致が出た9900.Tの境界確認。不一致が
+      # 2025-02-20〜03-21（60/120日参照）と2025-08-25〜09-18（200日SMA・G3の
+      # 252日参照）の2帯に分かれているのは、いずれも先出し適用の境界（2025-01-08
+      # 前後とみられる）をルックバック窓がまたぐタイミングと一致する。一律スケール
+      # なら比率系特徴量は不変で構造系に不一致は出ないはずなので、構造系が壊れて
+      # いる事実自体が「一律ではない（段差がある）」ことの証拠。実データで確認する
+      - name: Inspect 9900.T around the suspected 2025-01-08 boundary
         if: always()
-        run: python scripts/check_index_gap_dates.py
-
-      # 2026-08-27 追加: no-op検証で唯一不一致が出た9900.Tの原因調査
-      # (d2_rs60/rs120/rsline_posの差がほぼ一律ln(2)に近く、2025-02-20〜03-13に集中。
-      # 分割調整のrevisionを疑う。ffillとは無関係の可能性が高い)
-      - name: Inspect 9900.T around the mismatch dates (D2 no-op investigation)
-        if: always()
-        run: python scripts/inspect_ticker_revision.py --ticker 9900.T --around-date 2025-02-20 --window-days 40
-
-      # 2026-08-27 実行条件の指示: no-op検証をD2の3列から全列に拡大。
-      # 9900.Tは全行、他銘柄は1行サンプリング（全件だと約3.5時間かかるため）
-      - name: Verify full structural recompute (D1-D8, gates, structure) is a no-op
-        if: always()
-        continue-on-error: true
-        run: python scripts/verify_full_recompute.py --replay-dir data/replay --focus-ticker 9900.T
-
-      # 2026-08-27 実行条件の指示: 分割予定公表・効力発生前の銘柄を全store点検
-      - name: Scan store for other pending-split-adjustment tickers
-        if: always()
-        run: python scripts/scan_pending_split_adjustments.py --recent-days 3
+        run: python scripts/inspect_ticker_revision.py --ticker 9900.T --around-date 2025-01-08 --window-days 45
