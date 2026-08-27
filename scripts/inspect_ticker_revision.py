@@ -38,15 +38,19 @@ def main() -> int:
     print(window[["Close", "Stock Splits"]].to_string())
 
     if store.revisions_path.exists():
-        rev = pd.read_csv(store.revisions_path, parse_dates=["date"])
-        rev_t = rev[rev["ticker"] == args.ticker]
-        rev_t_window = rev_t[(rev_t["date"] >= lo - pd.Timedelta(days=400))
-                             & (rev_t["date"] <= hi)]
-        print(f"\n=== {args.ticker} の改訂履歴（revisions.csv.gz、前後400日+窓） ===")
-        if len(rev_t_window):
-            print(rev_t_window.to_string())
+        rev = pd.read_csv(store.revisions_path)
+        if len(rev) == 0:
+            print("\nrevisions.csv.gz は空（改訂履歴なし）")
         else:
-            print("該当する改訂履歴なし")
+            rev["date"] = pd.to_datetime(rev["date"])
+            rev_t = rev[rev["ticker"] == args.ticker]
+            rev_t_window = rev_t[(rev_t["date"] >= lo - pd.Timedelta(days=400))
+                                 & (rev_t["date"] <= hi)]
+            print(f"\n=== {args.ticker} の改訂履歴（revisions.csv.gz、前後400日+窓） ===")
+            if len(rev_t_window):
+                print(rev_t_window.to_string())
+            else:
+                print("該当する改訂履歴なし")
     else:
         print("\nrevisions.csv.gz が無い")
 
