@@ -72,3 +72,15 @@ jobs:
       - name: Inspect 9900.T around the mismatch dates (D2 no-op investigation)
         if: always()
         run: python scripts/inspect_ticker_revision.py --ticker 9900.T --around-date 2025-02-20 --window-days 40
+
+      # 2026-08-27 実行条件の指示: no-op検証をD2の3列から全列に拡大。
+      # 9900.Tは全行、他銘柄は1行サンプリング（全件だと約3.5時間かかるため）
+      - name: Verify full structural recompute (D1-D8, gates, structure) is a no-op
+        if: always()
+        continue-on-error: true
+        run: python scripts/verify_full_recompute.py --replay-dir data/replay --focus-ticker 9900.T
+
+      # 2026-08-27 実行条件の指示: 分割予定公表・効力発生前の銘柄を全store点検
+      - name: Scan store for other pending-split-adjustment tickers
+        if: always()
+        run: python scripts/scan_pending_split_adjustments.py --recent-days 3
