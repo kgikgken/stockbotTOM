@@ -242,7 +242,8 @@ class IndexAlignmentTest(unittest.TestCase):
 
         close = ohlcv[ticker]["Close"]
         t_pos = len(close) - 1
-        aligned = short_idx_close.reindex(close.index)  # 期待値: 日付で整列した値
+        # 期待値: 日付整列した上で最大3営業日の前方補完をかけた値（2026-08-26 追加）
+        aligned = short_idx_close.reindex(close.index).ffill(limit=3)
         for n, fid in ((60, "d2_rs60"), (120, "d2_rs120")):
             i0, i1 = aligned.iloc[t_pos - n], aligned.iloc[t_pos]
             if pd.isna(i0) or pd.isna(i1):
@@ -251,6 +252,76 @@ class IndexAlignmentTest(unittest.TestCase):
                 c0, c1 = close.iloc[t_pos - n], close.iloc[t_pos]
                 expected = float(np.log(c1 / c0) - np.log(i1 / i0))
                 self.assertAlmostEqual(row[fid], expected, places=8, msg=fid)
+
+
+class IndexForwardFillTest(unittest.TestCase):
+    """2026-08-26 実行条件の指示への対応: 指数(idx_close)の日付整列後の欠損は、
+    最大3営業日まで前方補完する（頑健性窓の指数データに散発的な1〜3営業日の
+    欠落があり、放置すると DESIGN.md §6.1 の規約により該当日の F10〜F12
+    （d2_rs60/d2_rs120/d2_rsline_pos）が欠損→通過扱いになり、主評価窓（欠落0件）
+    とは別のフィルタを測ることになるため）。ffill は定義上、過去の値のみを使う
+    ので未来参照にはならない。"""
+
+    def test_gap_within_limit_is_filled_from_last_known_value(self):
+        ohlcv, full_idx_close = _acceptance_ohlcv()
+        ticker = next(iter(ohlcv))
+        close = ohlcv[ticker]["Close"]
+        t_pos = len(close) - 1
+
+        # d2_rs60 が参照する t_pos-60 を含む2営業日連続の欠落（3営業日以内）
+        gap_dates = close.index[t_pos - 61: t_pos - 59]
+        idx_with_gap = full_idx_close.drop(index=gap_dates)
+
+        out = compute_daily_features(ohlcv, [ticker], idx_with_gap, k=K, label_n=15,
+                                     log=lambda *a: None)
+        row = out.iloc[0]
+
+        aligned = idx_with_gap.reindex(close.index).ffill(limit=3)
+        self.assertFalse(bool(aligned.iloc[t_pos - 61: t_pos - 59].isna().any()),
+                         "3営業日以内のギャップは前方補完で埋まるはず")
+        for n, fid in ((60, "d2_rs60"), (120, "d2_rs120")):
+            i0, i1 = aligned.iloc[t_pos - n], aligned.iloc[t_pos]
+            c0, c1 = close.iloc[t_pos - n], close.iloc[t_pos]
+            expected = float(np.log(c1 / c0) - np.log(i1 / i0))
+            self.assertAlmostEqual(row[fid], expected, places=8, msg=fid)
+            self.assertFalse(pd.isna(row[fid]), msg=fid)
+
+    def test_gap_beyond_limit_remains_missing(self):
+        ohlcv, full_idx_close = _acceptance_ohlcv()
+        ticker = next(iter(ohlcv))
+        close = ohlcv[ticker]["Close"]
+        t_pos = len(close) - 1
+
+        # t_pos-60 を含む5営業日連続の欠落（3営業日の上限を超える）
+        gap_dates = close.index[t_pos - 64: t_pos - 59]
+        idx_with_gap = full_idx_close.drop(index=gap_dates)
+
+        out = compute_daily_features(ohlcv, [ticker], idx_with_gap, k=K, label_n=15,
+                                     log=lambda *a: None)
+        row = out.iloc[0]
+
+        aligned = idx_with_gap.reindex(close.index).ffill(limit=3)
+        self.assertTrue(pd.isna(aligned.iloc[t_pos - 60]),
+                        "5営業日連続ギャップの末尾はffill(limit=3)でも埋まらないはず")
+        self.assertTrue(pd.isna(row["d2_rs60"]))
+
+    def test_forward_fill_never_uses_future_index_values(self):
+        """ffillは定義上「直前の既知値」しか使わないが、補完値が未来の値の
+        コピーになっていないことを明示的に確認する回帰テスト。"""
+        ohlcv, full_idx_close = _acceptance_ohlcv()
+        ticker = next(iter(ohlcv))
+        close = ohlcv[ticker]["Close"]
+        t_pos = len(close) - 1
+        target_pos = t_pos - 60
+
+        gap_dates = close.index[target_pos - 1: target_pos + 1]
+        idx_with_gap = full_idx_close.drop(index=gap_dates)
+        last_known_value = float(full_idx_close.loc[close.index[target_pos - 2]])
+        true_future_value = float(full_idx_close.loc[close.index[target_pos]])
+
+        aligned = idx_with_gap.reindex(close.index).ffill(limit=3)
+        self.assertAlmostEqual(float(aligned.iloc[target_pos]), last_known_value, places=8)
+        self.assertNotAlmostEqual(float(aligned.iloc[target_pos]), true_future_value, places=4)
 
 
 if __name__ == "__main__":
