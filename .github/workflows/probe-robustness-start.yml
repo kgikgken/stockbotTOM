@@ -65,3 +65,10 @@ jobs:
       - name: Check whether index gap dates are real trading days or exchange holidays
         if: always()
         run: python scripts/check_index_gap_dates.py
+
+      # 2026-08-27 追加: no-op検証で唯一不一致が出た9900.Tの原因調査
+      # (d2_rs60/rs120/rsline_posの差がほぼ一律ln(2)に近く、2025-02-20〜03-13に集中。
+      # 分割調整のrevisionを疑う。ffillとは無関係の可能性が高い)
+      - name: Inspect 9900.T around the mismatch dates (D2 no-op investigation)
+        if: always()
+        run: python scripts/inspect_ticker_revision.py --ticker 9900.T --around-date 2025-02-20 --window-days 40
