@@ -42,7 +42,7 @@ def main() -> int:
         if len(rev) == 0:
             print("\nrevisions.csv.gz は空（改訂履歴なし）")
         else:
-            rev["date"] = pd.to_datetime(rev["date"])
+            rev["date"] = pd.to_datetime(rev["date"], format="mixed")
             rev_t = rev[rev["ticker"] == args.ticker]
             rev_t_window = rev_t[(rev_t["date"] >= lo - pd.Timedelta(days=400))
                                  & (rev_t["date"] <= hi)]
