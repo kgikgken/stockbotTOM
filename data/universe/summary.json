@@ -1,15 +1,15 @@
 {
  "equities": 3711,
  "with_data": 3697,
- "passes": 1352,
- "fail_adv": 2317,
- "fail_price": 194,
+ "passes": 1342,
+ "fail_adv": 2325,
+ "fail_price": 195,
  "fail_history": 45,
- "fail_split": 0,
+ "fail_split": 1,
  "fail_fresh": 2,
  "by_market": {
-  "プライム（内国株式）": 1177,
-  "スタンダード（内国株式）": 101,
+  "プライム（内国株式）": 1169,
+  "スタンダード（内国株式）": 99,
   "グロース（内国株式）": 74
  }
 }
