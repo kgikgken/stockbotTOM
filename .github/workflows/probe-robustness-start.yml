@@ -70,18 +70,23 @@ jobs:
       # robustness_liquidity_diagnostics.py（ΔF計算を含む）はこのワークフローからは
       # 呼ばない。全窓完成後にT-403の最終集計として別途実行する
 
-      # 決定的検証（2026-08-28指示）: 9900.Tの構造系特徴量を今日のstoreに対して
-      # 再計算し、既存replayの170行と完全一致するかを確認する。一致すれば
-      # 「効力発生が権利落ち日(2026-08-27)に一律適用された」ことになり両スケールは
-      # 等価、除外解除の判断材料になる。不一致が残るなら別の問題が残っている
-      - name: 9900.T全列再計算（決定的検証。storeが今日更新されていれば有効）
+      # 2026-08-28実測: 9900.Tの全列再計算（170行中41行不一致、一致せず）と
+      # check_splits全銘柄・全期間スキャン（10銘柄・12件検出）は完了。
+      # 「一律スケールなら一致するはず」という予測は外れた（2回連続。record: 予測は
+      # せず実測のみ報告する）。原因はprobe(yfinance直取得)とstore(日次差分マージ)
+      # の違いと考えられる（store側は日次history_days=400本の窓でしかマージされず、
+      # 窓の外の過去バーは未調整のまま残る）。以後は継続的な健全性チェックとして
+      # 残す（毎回re-runする必要は無いが、低コストなので残す）
+      - name: 9900.T全列再計算（継続監視用）
         if: always()
         run: python scripts/verify_full_recompute.py --replay-dir data/replay --focus-ticker 9900.T
 
-      # check_splits を全銘柄・store の完全マージ済み系列に対して実行する
-      # （revisions.csv.gzベースの走査は観測3日・2銘柄しかカバーしておらず
-      # 「全履歴走査」として成立していなかったため、系列内の段差そのものを見る
-      # 方式に切り替える）
-      - name: check_splits を全銘柄・全期間で実行
+      - name: check_splits を全銘柄・全期間で実行（継続監視用）
         if: always()
         run: python scripts/check_splits_full_history.py
+
+      # 2026-08-28指示: storeの9900.T、2025-01-07/01-08のCloseを直接確認する
+      # （probe=yfinance直取得とstore=日次差分マージの違いを実データで切り分ける）
+      - name: 9900.Tのstore内Close値を2025-01-08境界前後で確認
+        if: always()
+        run: python scripts/inspect_ticker_revision.py --ticker 9900.T --around-date 2025-01-08 --window-days 10

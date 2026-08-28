@@ -472,6 +472,14 @@ class ExcludeDataQualityTickersTest(unittest.TestCase):
         out = layer1.exclude_data_quality_tickers(pool)
         self.assertEqual(len(out), 1)
 
+    def test_default_list_matches_check_splits_full_history_findings(self):
+        # T-402(2026-08-28): check_splits_full_history.py の実測(10銘柄)と
+        # 一致していることを固定する(機械的規則、個別判断はしない)
+        self.assertEqual(layer1.DATA_QUALITY_EXCLUDED_TICKERS, frozenset({
+            "1364.T", "3477.T", "4316.T", "5103.T", "6731.T",
+            "6834.T", "7649.T", "7877.T", "7983.T", "9900.T",
+        }))
+
 
 class SurvivorshipNoteTest(unittest.TestCase):
     def test_computes_ratio(self):
