@@ -632,12 +632,20 @@ F_CONDITIONS: List[tuple] = [
 ]
 F_POOL_DAYS = composite.POOL_DAYS  # DESIGN.md §6.3 と同じプール（20営業日）を使う
 
-# T-402: サガミホールディングス(9900.T)。分割（基準日2026-08-30、効力発生日2026-08-31、
-# 1→2株）をyfinanceが効力発生前に一部の過去バー（2025-01-08以降）へ先出し適用しており、
-# storeの当該銘柄の価格系列に段差がある（inspect_ticker_revision.pyで実データ確認済み）。
-# 再生成はデータを悪化させるため行わず、データ品質によりL1集計から除外する
-# （TASKS.md T-402。170/362,461行=0.05%、検定数は増えない）。
-DATA_QUALITY_EXCLUDED_TICKERS = frozenset({"9900.T"})
+# T-402（2026-08-28、機械的規則。個別銘柄ごとの判断はしない）: check_splits を
+# store の完全マージ済み系列（単発fetchの窓に限らない）に対して全銘柄・全期間で
+# 実行した結果（scripts/check_splits_full_history.py）、Splitsイベント記録なしの
+# 段差（suspected_unrecorded_split）が見つかった10銘柄。原因は共通の構造的問題:
+# 日次fetchの取得窓（history_days、既定400本）は日々スライドするため、分割
+# イベントがその窓の内側に入ると窓内だけが調整され、窓の外（storeの当該銘柄の
+# 過去バー）は未調整のまま残り段差が生じる（窓が動く以上、繰り返し起こり得る）。
+# 3700銘柄中10銘柄・0.27%。両窓（主評価窓・頑健性窓）とホールドアウトの集計
+# すべてから除外する（ホールドアウトはT-413未実装のため、この定数を事前登録
+# しておく。適用時の変更禁止）。データ品質による除外のため検定数は増えない
+DATA_QUALITY_EXCLUDED_TICKERS = frozenset({
+    "1364.T", "3477.T", "4316.T", "5103.T", "6731.T",
+    "6834.T", "7649.T", "7877.T", "7983.T", "9900.T",
+})
 
 
 def exclude_data_quality_tickers(pool: pd.DataFrame,
