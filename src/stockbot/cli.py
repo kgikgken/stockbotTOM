@@ -265,6 +265,54 @@ def step_backfill(cfg: Settings, log=print) -> dict:
     return meta
 
 
+def step_refetch_recent_splits(cfg: Settings, log=print, fetch_fn=fetch_ohlcv) -> dict:
+    """T-402の恒久的な保守作業: storeの直近history_days本以内にStock Splitsイベント
+    が記録されている全銘柄を、history_full_daysぶん全履歴再取得してstoreを整合
+    させる（`daily`/`backfill`とは別コマンド、定期的または手動で実行する想定）。
+
+    日次fetch（history_days、既定400本）の窓内で分割が起きると、窓の中だけが
+    調整され窓より過去のstore側は未調整のまま残り段差が生じる（9900.Tほか9銘柄
+    で確認、TASKS.md T-402）。`_refetch_new_splits_full_history`は新規検出時に
+    その場で対応するが、それより前に発生した分割は対象外。本関数はstoreの現在
+    状態を直接スキャンして能動的に洗い出す。
+    """
+    cfg.ensure_dirs()
+    now = _now()
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
+    ohlcv = from_long(store.load())
+    ohlcv.pop(IDX_TICKER, None)
+
+    targets = []
+    for ticker, df in ohlcv.items():
+        if df is None or len(df) == 0 or "Stock Splits" not in df.columns:
+            continue
+        recent = df.tail(cfg.history_days)
+        if (recent["Stock Splits"].fillna(0) != 0).any():
+            targets.append(ticker)
+    targets = sorted(targets)
+    log(f"[refetch-recent-splits] 直近{cfg.history_days}本以内にSplitsイベントがある銘柄: "
+        f"{len(targets)}件 {targets}")
+
+    if not targets:
+        return {"tickers": [], "n_issues": 0}
+
+    if cfg.dryrun:
+        full_ohlcv = make_synthetic(targets, n_bars=cfg.history_full_days, end=now.tz_localize(None))
+    else:
+        full_ohlcv, _meta = fetch_fn(targets, cfg.history_full_days, cfg.fetch_deadline_sec,
+                                     now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
+    full_ohlcv, issues = check_all(full_ohlcv)
+
+    merged, added, revisions = store.upsert(to_long(full_ohlcv))
+    store.save(merged)
+    store.write_daily_increments(added)
+    store.append_revisions(revisions, now)
+    log(f"[refetch-recent-splits] 完了: {len(targets)}銘柄 / 新規行 {len(added)} / "
+        f"改訂 {len(revisions)} / issue {len(issues)}件")
+    return {"tickers": targets, "n_issues": int(len(issues)), "added": int(len(added)),
+           "revisions": int(len(revisions))}
+
+
 def step_references(cfg: Settings, log=print) -> None:
     """決算発表予定日・上場廃止銘柄一覧を JPX から取得し reference/ を更新する（T-104）。
 
@@ -352,7 +400,8 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
-                                       "references", "universe", "features"])
+                                       "references", "universe", "features",
+                                       "refetch-recent-splits"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -368,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
             step_index(cfg, log)
         elif args.command == "backfill":
             step_backfill(cfg, log)
+        elif args.command == "refetch-recent-splits":
+            step_refetch_recent_splits(cfg, log)
         elif args.command == "references":
             step_references(cfg, log)
         elif args.command == "universe":

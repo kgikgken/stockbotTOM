@@ -1,6 +1,8 @@
 """新規Splitsイベント検出時の全履歴再取得（T-402）。ネットワーク不要
 （fetch_fn を差し替えて検証する）。"""
+import os
 import unittest
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
@@ -8,10 +10,11 @@ import pandas as pd
 from . import _path  # noqa: F401
 from stockbot import cli
 from stockbot.config import Settings
+from stockbot.data.store import OhlcvStore, to_long
 
 
-def _df(n=10, base=1000.0):
-    idx = pd.bdate_range("2024-01-01", periods=n)
+def _df(n=10, base=1000.0, end=None):
+    idx = pd.bdate_range(end=end, periods=n) if end is not None else pd.bdate_range("2024-01-01", periods=n)
     p = np.full(n, base)
     return pd.DataFrame({"Open": p, "High": p, "Low": p, "Close": p, "Volume": 1e5,
                          "Dividends": 0.0, "Stock Splits": 0.0}, index=idx)
@@ -88,6 +91,72 @@ class RefetchNewSplitsFullHistoryTest(unittest.TestCase):
             ohlcv, issues, self.cfg, self.now, log=lambda *a: None, fetch_fn=fake_fetch)
         self.assertEqual(len(calls), 0)
         self.assertIs(out_ohlcv, ohlcv)
+
+
+class RefetchRecentSplitsFullHistoryTest(unittest.TestCase):
+    """T-402の恒久保守: store の直近history_days本以内にStock Splitsイベントが
+    ある全銘柄を能動的に洗い出して全履歴再取得する（新規検出時のその場対応
+    _refetch_new_splits_full_history とは別経路）。"""
+
+    END = pd.Timestamp("2026-08-27")
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self._env_names = ("SCREEN_DRYRUN", "DATA_DIR", "HISTORY_DAYS", "HISTORY_FULL_DAYS")
+        self._saved = {k: os.environ.get(k) for k in self._env_names}
+        os.environ["SCREEN_DRYRUN"] = "0"
+        os.environ["DATA_DIR"] = self._tmp.name
+        os.environ["HISTORY_DAYS"] = "20"
+        os.environ["HISTORY_FULL_DAYS"] = "60"
+        self.cfg = Settings.from_env()
+        self.now = pd.Timestamp("2026-08-27 16:00", tz="Asia/Tokyo")
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self._tmp.cleanup()
+
+    def _seed(self, ohlcv: dict) -> None:
+        store = OhlcvStore(self.cfg.store_dir, self.cfg.daily_dir)
+        merged, _added, _rev = store.upsert(to_long(ohlcv))
+        store.save(merged)
+
+    def test_targets_only_tickers_with_recent_splits_event(self):
+        # history_days=20: 直近20本以内にSplitsがあるのは9900.Tだけ
+        recent_split = _df(n=30, base=900.0, end=self.END)
+        recent_split.iloc[-5, recent_split.columns.get_loc("Stock Splits")] = 2.0
+        old_split = _df(n=30, base=1500.0, end=self.END)
+        old_split.iloc[0, old_split.columns.get_loc("Stock Splits")] = 3.0  # 20本より前
+        no_split = _df(n=30, base=500.0, end=self.END)
+        self._seed({"9900.T": recent_split, "OLD.T": old_split, "1301.T": no_split})
+
+        calls = []
+
+        def fake_fetch(tickers, history_days, deadline_sec, now_jst=None, close_hhmm=None, log=print):
+            calls.append((sorted(tickers), history_days))
+            full = {t: _df(n=60, base=800.0, end=self.END) for t in tickers}
+            return full, {"data_total": len(tickers), "data_ok": len(tickers)}
+
+        result = cli.step_refetch_recent_splits(self.cfg, log=lambda *a: None, fetch_fn=fake_fetch)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], (["9900.T"], 60))
+        self.assertEqual(result["tickers"], ["9900.T"])
+
+    def test_no_op_when_no_recent_splits(self):
+        self._seed({"1301.T": _df(n=30, base=500.0, end=self.END)})
+        calls = []
+
+        def fake_fetch(*a, **kw):
+            calls.append(True)
+            return {}, {}
+
+        result = cli.step_refetch_recent_splits(self.cfg, log=lambda *a: None, fetch_fn=fake_fetch)
+        self.assertEqual(len(calls), 0)
+        self.assertEqual(result["tickers"], [])
 
 
 if __name__ == "__main__":
