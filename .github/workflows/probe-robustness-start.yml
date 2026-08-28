@@ -72,3 +72,16 @@ jobs:
             --main-replay-dir data/replay \
             --robustness-replay-dir data/replay_robustness \
             --h 10 --min-rows-per-day 30 --adv-threshold 200000000
+
+      # 「前回の5項目」の未報告分への対応（2026-08-27）
+      # (1) revisions.csv.gz が実際にどの期間をカバーしているか（全履歴走査の限界を確認）
+      - name: revisions.csv.gz coverage (all tickers)
+        if: always()
+        run: python scripts/revisions_coverage.py
+
+      # (2) 9900.Tの単発フル履歴再取得。storeのマージ結果ではなく、いま単発で
+      # 取得した場合にも同じ場所に段差が出るかを切り分ける（ネットワークが要るため
+      # 実インターネット環境=GitHub Actions上でのみ実行可能）
+      - name: 9900.T single-shot full-history refetch probe (store 変更なし)
+        if: always()
+        run: python scripts/probe_9900_full_refetch.py
