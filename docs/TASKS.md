@@ -275,6 +275,33 @@ L1 の判定が出るまで M3b（表示・テンプレート校正）と M5（�
     (c) − (a) と (c) − (a′) の両方に日次差分の NW t を付ける（点推定だけでは不十分）
   - **ΔF の計算**: `ΔF_t = mean(r_h | F 通過, 日 t) − mean(r_h | 全押し目状態, 日 t)` の
     時系列平均と NW t。F1〜F14 の leave-one-out も同じ形式で出す（採否の判断はしない）
+    - **F1〜F14 の判定・ΔF_t 集計本体を実装（完了、2026-08-28、PR未マージ時点でこの
+      コミットに含む）**: `validation/layer1.py` に `pool_percentile_series`
+      （§6.3 のプール内百分位。scoring.composite の`_percentile_up`と同じ定義、
+      直近 F_POOL_DAYS=20 営業日・過去方向のみでルックアヘッド無し）・`f_pass_mask`
+      （§6.1 の F1〜F14 をそのまま実装。欠損は判定不能=通過扱い、`f_missing_count`
+      を持つ）・`delta_f_series`/`delta_f_summary`（NW t は既存の`newey_west_mean_t`
+      を再利用、ラグ=h）を追加。テスト: `tests/test_layer1.py`
+      `PoolPercentileSeriesTest`（手計算一致・窓外の日を含まない・ルックアヘッド無し
+      の3点）・`FPassMaskTest`（上端/下端除外・欠損は除外しないことを確認）・
+      `DeltaFSeriesTest`（手計算一致・行数閾値による日除外）。leave-one-out・
+      MFE/MAE 表・全h集計は未実装のまま（この節の残タスク）
+    - **9900.T のデータ品質除外をコードで実装（完了）**: `layer1.exclude_data_quality_tickers`
+      （`DATA_QUALITY_EXCLUDED_TICKERS = {"9900.T"}`）。これまで本番配信側
+      （`manual_exclusions.csv`）にのみ実装されていた除外を、L1 集計側にも反映した
+    - **押し目状態の行数が閾値未満の日をΔF集計から除外する基準を事前登録
+      （2026-08-27、結果を見る前に設計責任者が指定）**: `delta_f_series`/
+      `delta_f_summary` の `min_rows_per_day` 引数（既定 None=フィルタ無し、
+      診断実行では 30 を使用）。理由: ΔF_t は日次横断平均の時系列平均であり、
+      2銘柄しかない退化した日と300銘柄超の日が同じ重みで時系列平均に入ると、
+      空日ガードをすり抜けた「幻の1〜2行」の日が結果を歪め得るため。両窓の
+      日次中央値が約330件であることから、この閾値は実質的に幻の日だけを
+      落とすルールであり、通常営業日を誤って除外する副作用は無い見込み
+    - **ADV（20日平均売買代金）診断を追加（完了）**: `scripts/robustness_liquidity_diagnostics.py`
+      （診断専用・store/replay 変更なし）。pool の各行についてその日までの直近
+      20営業日の Close*Volume 平均を因果的に計算し、窓別分布と ADV≥2億円
+      部分集合での ΔF を報告する（判定には使わない診断。2026-08-27 チャンク4
+      結果を受けた事前登録）
   - **MFE/MAE の表**: 分位別・F 通過別・状態別・深さ帯別に MFE/ATR と MAE/ATR の平均を出す
     （§9.2 で主指標に格上げされたため必須）
   - **全 h の集計**: h ∈ {3,5,10,15,20,30} すべてについて単変量・ΔF・MFE/MAE を出す

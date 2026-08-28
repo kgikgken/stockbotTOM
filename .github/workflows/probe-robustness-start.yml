@@ -53,19 +53,22 @@ jobs:
           restore-keys: |
             replay-v2-
 
-      # 2026-08-27 追加: no-op検証で不一致が出た9900.Tの境界確認。不一致が
-      # 2025-02-20〜03-21（60/120日参照）と2025-08-25〜09-18（200日SMA・G3の
-      # 252日参照）の2帯に分かれているのは、いずれも先出し適用の境界（2025-01-08
-      # 前後とみられる）をルックバック窓がまたぐタイミングと一致する。一律スケール
-      # なら比率系特徴量は不変で構造系に不一致は出ないはずなので、構造系が壊れて
-      # いる事実自体が「一律ではない（段差がある）」ことの証拠。実データで確認する
-      - name: Inspect 9900.T around the suspected 2025-01-08 boundary
-        if: always()
-        run: python scripts/inspect_ticker_revision.py --ticker 9900.T --around-date 2025-01-08 --window-days 45
+      # 頑健性窓のreplay（チャンク実行中のものも含め、そのときcacheにある最新分）を
+      # 読み取り専用で復元する。replay-robustness.yml と同じキー
+      - name: Restore robustness window replay (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/replay_robustness
+          key: replay-robustness-v1-${{ github.run_id }}
+          restore-keys: |
+            replay-robustness-v1-
 
-      # 2026-08-27 追加: JPXの分割公表済み・効力発生前リスト（toushi-radar.com調べ）
-      # のうち9900.T以外の直近効力発生（8/31〜9/1）4銘柄を含め、revisions.csv.gz
-      # の全履歴（直近3日に限らない）を対象にきれいな比率の改訂が無いか再点検する
-      - name: Full-history scan for pending-split-adjustment tickers (not limited to recent revisions)
+      # 2026-08-27 チャンク4結果への追加指示: 窓別ADV分布・ADV>=2億円部分集合の
+      # ΔF診断・押し目状態行数<30日の除外・9900.Tのデータ品質除外を反映した集計
+      - name: Robustness/main window liquidity diagnostics and ΔF (data-quality exclusion applied)
         if: always()
-        run: python scripts/scan_pending_split_adjustments.py --recent-days 36500
+        run: |
+          python scripts/robustness_liquidity_diagnostics.py \
+            --main-replay-dir data/replay \
+            --robustness-replay-dir data/replay_robustness \
+            --h 10 --min-rows-per-day 30 --adv-threshold 200000000
