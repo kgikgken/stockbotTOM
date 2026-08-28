@@ -263,6 +263,40 @@ def _filter_holdout(dates: pd.DatetimeIndex, include_holdout: bool, log=print) -
     return kept
 
 
+MIN_TRADING_DAY_COVERAGE = 0.5  # T-402: 非取引日判定のしきい値（運用上の安全弁。§12の対象外）
+
+
+def _real_trading_days(dates: pd.DatetimeIndex, ohlcv: Dict[str, pd.DataFrame],
+                       min_frac: float = MIN_TRADING_DAY_COVERAGE, log=print) -> pd.DatetimeIndex:
+    """pd.bdate_range が生成する Mon-Fri のカレンダー日から、実際の取引日でない日を
+    除く（T-402: 2018-07-16=海の日でも、ごく少数の銘柄にデータの乱れがあると
+    「幻の候補」が1〜2件だけ立つ日が生じることが判明。外部の祝日カレンダーは
+    持ち込まず、その日にデータを持つ銘柄の割合が全体の min_frac 未満の日を
+    非取引日とみなす、データ駆動の判定）。
+
+    実際の取引日は通常ユニバースの大半（実測で約8割）にデータがあり、非取引日に
+    紛れ込む幻のデータは数銘柄に限られるため、0.5 という閾値には両者を明確に
+    分ける十分な余裕がある。
+    """
+    if len(ohlcv) == 0 or len(dates) == 0:
+        return dates
+    counts = pd.Series(0, index=dates, dtype=int)
+    for df in ohlcv.values():
+        if df is None or len(df) == 0:
+            continue
+        hits = df.index.intersection(dates)
+        if len(hits):
+            counts.loc[hits] += 1
+    frac = counts / len(ohlcv)
+    kept = dates[(frac >= min_frac).to_numpy()]
+    dropped = len(dates) - len(kept)
+    if dropped:
+        dropped_dates = dates[(frac < min_frac).to_numpy()]
+        log(f"[replay] 非取引日と判定して {dropped} 日を日付軸から除外: "
+            f"{[d.date().isoformat() for d in dropped_dates]}")
+    return kept
+
+
 def run_replay(
     ohlcv: Dict[str, pd.DataFrame],
     idx_ohlcv: pd.DataFrame,
@@ -313,6 +347,7 @@ def run_replay(
 
     dates = pd.bdate_range(start, end)
     dates = _filter_holdout(dates, include_holdout, log=log)
+    dates = _real_trading_days(dates, ohlcv, log=log)
     if len(dates) == 0:
         log("[replay] 再生対象の営業日が無い")
         return
