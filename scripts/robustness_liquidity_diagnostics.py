@@ -3,8 +3,18 @@
 2026-08-27 チャンク4結果を受けた追加指示への対応:
   - 窓別の20日平均売買代金(ADV)分布を報告
   - ADV>=2億円部分集合でのΔFを診断として算出（判定には使わない。事前登録のみ）
-  - ΔFの時系列平均から押し目状態の行数が閾値未満の日を除外し、除外日数を報告
   - 9900.Tをデータ品質により両窓の集計から除外（TASKS.md T-402）
+
+2026-08-28 撤回: 「押し目状態の行数が閾値未満の日をΔFの時系列平均から除外する」
+規則は撤回された。理由: 幻の行（非取引日の混入）だけでなく市場ストレス期の
+正当な低候補日も一緒に落としており、しかも両窓とも除外するとtが上がる方向に
+効いた（自分で入れた統計的除外ルールが結果を良くする方向に効くのは避けるべき
+形）。根本原因（非取引日の混入）は replay.py の日付軸側（_real_trading_days）
+で対応済みのため、この行数フィルタは不要になった。主指標はDESIGN §10.2の
+全日版。--min-rows-per-day は既定で無効（None）。ΔFの中間報告自体も、
+第2関門の検定汚染を避けるため全窓完成まで停止する（このスクリプトは
+probe-robustness-start.ymlからは呼ばれなくなった。全窓完成後にT-403の
+最終集計として手動で実行する想定）
 
 ADVは universe.build.liquidity_stats と同じ定義（Close*Volumeの直近20営業日平均）を、
 pool の各行 (ticker, date) についてその date までのデータだけを使って因果的に計算する
@@ -74,7 +84,7 @@ def empty_dates(replay_dir: Path) -> list:
 
 
 def run_window(name: str, replay_dir: Path, ohlcv: Dict[str, pd.DataFrame], h: int,
-               min_rows_per_day: int, adv_threshold: float, exclude_warmup: bool) -> dict:
+               min_rows_per_day: "int | None", adv_threshold: float, exclude_warmup: bool) -> dict:
     from stockbot.validation import layer1
     from stockbot.validation.replay import load_replay_table
 
@@ -94,18 +104,22 @@ def run_window(name: str, replay_dir: Path, ohlcv: Dict[str, pd.DataFrame], h: i
 
     n_days_total = int(pool["date"].nunique())
 
+    # 2026-08-28: 行数フィルタ(min_rows_per_day)は撤回済み。主指標は全日版（DESIGN §10.2）。
+    # 幻の行（非取引日の混入）は replay.py の日付軸側（_real_trading_days）で根本対応した
     delta_all = layer1.delta_f_summary(pool, h=h, min_rows_per_day=None)
-    delta_filtered = layer1.delta_f_summary(pool, h=h, min_rows_per_day=min_rows_per_day)
+    delta_filtered = (layer1.delta_f_summary(pool, h=h, min_rows_per_day=min_rows_per_day)
+                      if min_rows_per_day is not None else None)
 
     day_counts = pool.groupby("date").size()
-    excluded_days = sorted(str(pd.Timestamp(d).date())
-                           for d in day_counts[day_counts < min_rows_per_day].index)
+    excluded_days = (sorted(str(pd.Timestamp(d).date())
+                            for d in day_counts[day_counts < min_rows_per_day].index)
+                     if min_rows_per_day is not None else [])
 
     adv = _causal_adv20(pool, ohlcv)
     adv_dist = adv_distribution(adv, adv_threshold)
 
     adv_subset = pool[adv >= adv_threshold]
-    delta_adv_subset = (layer1.delta_f_summary(adv_subset, h=h, min_rows_per_day=min_rows_per_day)
+    delta_adv_subset = (layer1.delta_f_summary(adv_subset, h=h, min_rows_per_day=None)
                         if len(adv_subset) else {"note": "ADV>=threshold部分集合が空"})
 
     return {
@@ -134,7 +148,9 @@ def main(argv=None) -> int:
     ap.add_argument("--main-replay-dir", default=None)
     ap.add_argument("--robustness-replay-dir", default=None)
     ap.add_argument("--h", type=int, default=DEFAULT_H)
-    ap.add_argument("--min-rows-per-day", type=int, default=30)
+    ap.add_argument("--min-rows-per-day", type=int, default=None,
+                    help="2026-08-28撤回済み。診断目的で明示的に指定した場合のみ参考値として"
+                         "併記する（既定はフィルタ無し=全日版が主指標）")
     ap.add_argument("--adv-threshold", type=float, default=2e8)
     args = ap.parse_args(argv)
 

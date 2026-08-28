@@ -159,6 +159,43 @@ class HoldoutFilterTest(unittest.TestCase):
         self.assertTrue(any("ホールドアウト" in m for m in logs))
 
 
+class RealTradingDaysTest(unittest.TestCase):
+    """T-402: pd.bdate_range は祝日を除外しないため、休場日でも少数銘柄に
+    データの乱れがあると幻の候補日が生じる（2018-07-16=海の日で確認済み）。"""
+
+    def test_real_trading_day_kept_phantom_day_dropped(self):
+        dates = pd.bdate_range("2018-07-13", "2018-07-18")
+        real_day = pd.Timestamp("2018-07-13")
+        phantom_day = pd.Timestamp("2018-07-16")  # 海の日（月曜、休場）
+        ohlcv = {}
+        for i in range(10):
+            idx = dates.drop(phantom_day) if i >= 2 else dates  # 2/10銘柄だけ幻日にもデータを持つ
+            ohlcv[f"T{i}"] = pd.DataFrame({"Close": 1.0}, index=idx)
+        kept = replay._real_trading_days(dates, ohlcv, min_frac=0.5, log=lambda *a: None)
+        self.assertIn(real_day, kept)
+        self.assertNotIn(phantom_day, kept)
+
+    def test_logs_dropped_dates(self):
+        dates = pd.bdate_range("2018-07-13", "2018-07-17")
+        phantom_day = pd.Timestamp("2018-07-16")
+        ohlcv = {f"T{i}": pd.DataFrame({"Close": 1.0}, index=dates.drop(phantom_day)) for i in range(10)}
+        logs = []
+        replay._real_trading_days(dates, ohlcv, min_frac=0.5, log=logs.append)
+        self.assertTrue(any("2018-07-16" in m for m in logs))
+
+    def test_empty_ohlcv_returns_dates_unchanged(self):
+        dates = pd.bdate_range("2018-07-13", "2018-07-17")
+        kept = replay._real_trading_days(dates, {}, log=lambda *a: None)
+        self.assertTrue((kept == dates).all())
+
+    def test_threshold_boundary_is_inclusive(self):
+        dates = pd.DatetimeIndex([pd.Timestamp("2018-07-13")])
+        ohlcv = {"T0": pd.DataFrame({"Close": 1.0}, index=dates),
+                "T1": pd.DataFrame({"Close": 1.0}, index=pd.DatetimeIndex([]))}
+        kept = replay._real_trading_days(dates, ohlcv, min_frac=0.5, log=lambda *a: None)
+        self.assertEqual(len(kept), 1)  # frac=0.5、>= 0.5 は保持
+
+
 class TruncateBeforeHoldoutTest(unittest.TestCase):
     def test_drops_rows_on_or_after_holdout_start(self):
         idx = pd.bdate_range("2026-01-01", periods=60)

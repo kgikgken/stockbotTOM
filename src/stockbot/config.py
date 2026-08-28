@@ -49,6 +49,7 @@ class Settings:
 
     # ---- 取得 ----
     history_days: int                # ライブ取得の履歴日数（yfinance の period に使う）
+    history_full_days: int           # 新規Splitsイベント検出時の全履歴再取得日数（T-402）
     fetch_deadline_sec: int          # 取得に使ってよい上限秒数
     fetch_scope: str                 # auto | all | universe
     dryrun: bool                     # SCREEN_DRYRUN=1 で合成データ
@@ -91,6 +92,7 @@ class Settings:
             data_dir=Path(os.getenv("DATA_DIR", default_data_dir)),
             universe_seed_csv=Path(os.getenv("UNIVERSE_SEED_CSV", "universe_jpx.csv")),
             history_days=_i("HISTORY_DAYS", 400),
+            history_full_days=_i("HISTORY_FULL_DAYS", 2600),
             fetch_deadline_sec=_i("FETCH_DEADLINE_SEC", 5400),
             fetch_scope=os.getenv("FETCH_SCOPE", "auto").strip().lower(),
             dryrun=dryrun,

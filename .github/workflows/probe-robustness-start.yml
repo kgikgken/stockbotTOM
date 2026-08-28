@@ -63,25 +63,25 @@ jobs:
           restore-keys: |
             replay-robustness-v1-
 
-      # 2026-08-27 チャンク4結果への追加指示: 窓別ADV分布・ADV>=2億円部分集合の
-      # ΔF診断・押し目状態行数<30日の除外・9900.Tのデータ品質除外を反映した集計
-      - name: Robustness/main window liquidity diagnostics and ΔF (data-quality exclusion applied)
-        if: always()
-        run: |
-          python scripts/robustness_liquidity_diagnostics.py \
-            --main-replay-dir data/replay \
-            --robustness-replay-dir data/replay_robustness \
-            --h 10 --min-rows-per-day 30 --adv-threshold 200000000
+      # 2026-08-27 指示: ΔFの中間報告は停止（第2関門は全窓完成後の1回判定。
+      # 部分集計を見ながら進めると続行/停止判断が検定として汚染される）。
+      # チャンクごとの報告はヘルス指標（欠損率・ガード・行数・空日、
+      # replay-robustness.yml の summary ステップで既に出している）のみに留める。
+      # robustness_liquidity_diagnostics.py（ΔF計算を含む）はこのワークフローからは
+      # 呼ばない。全窓完成後にT-403の最終集計として別途実行する
 
-      # 「前回の5項目」の未報告分への対応（2026-08-27）
-      # (1) revisions.csv.gz が実際にどの期間をカバーしているか（全履歴走査の限界を確認）
-      - name: revisions.csv.gz coverage (all tickers)
+      # 決定的検証（2026-08-28指示）: 9900.Tの構造系特徴量を今日のstoreに対して
+      # 再計算し、既存replayの170行と完全一致するかを確認する。一致すれば
+      # 「効力発生が権利落ち日(2026-08-27)に一律適用された」ことになり両スケールは
+      # 等価、除外解除の判断材料になる。不一致が残るなら別の問題が残っている
+      - name: 9900.T全列再計算（決定的検証。storeが今日更新されていれば有効）
         if: always()
-        run: python scripts/revisions_coverage.py
+        run: python scripts/verify_full_recompute.py --replay-dir data/replay --focus-ticker 9900.T
 
-      # (2) 9900.Tの単発フル履歴再取得。storeのマージ結果ではなく、いま単発で
-      # 取得した場合にも同じ場所に段差が出るかを切り分ける（ネットワークが要るため
-      # 実インターネット環境=GitHub Actions上でのみ実行可能）
-      - name: 9900.T single-shot full-history refetch probe (store 変更なし)
+      # check_splits を全銘柄・store の完全マージ済み系列に対して実行する
+      # （revisions.csv.gzベースの走査は観測3日・2銘柄しかカバーしておらず
+      # 「全履歴走査」として成立していなかったため、系列内の段差そのものを見る
+      # 方式に切り替える）
+      - name: check_splits を全銘柄・全期間で実行
         if: always()
-        run: python scripts/probe_9900_full_refetch.py
+        run: python scripts/check_splits_full_history.py
