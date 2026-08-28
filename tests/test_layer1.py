@@ -330,6 +330,149 @@ class SanityTablesTest(unittest.TestCase):
             self.assertEqual(len(back), 0)
 
 
+class PoolPercentileSeriesTest(unittest.TestCase):
+    """DESIGN.md §6.3 のプール内百分位（scoring.composite._percentile_up と同じ定義）。"""
+
+    def test_single_day_percentile_matches_hand_calc(self):
+        pool = pd.DataFrame({
+            "ticker": ["A", "B", "C"], "date": [pd.Timestamp("2024-01-01")] * 3,
+            "x": [10.0, 20.0, 30.0],
+        })
+        out = layer1.pool_percentile_series(pool, "x", pool_days=2)
+        np.testing.assert_allclose(out.to_numpy(), [1 / 3, 2 / 3, 1.0])
+
+    def test_second_day_window_includes_first_day(self):
+        pool = pd.DataFrame({
+            "ticker": ["A", "B", "C", "D", "E"],
+            "date": [pd.Timestamp("2024-01-01")] * 3 + [pd.Timestamp("2024-01-02")] * 2,
+            "x": [10.0, 20.0, 30.0, 5.0, 15.0],
+        })
+        out = layer1.pool_percentile_series(pool, "x", pool_days=2)
+        day2 = out.iloc[3:]
+        # window = day1(10,20,30) + day2(5,15) = sorted [5,10,15,20,30]
+        np.testing.assert_allclose(day2.to_numpy(), [1 / 5, 3 / 5])
+
+    def test_window_drops_days_older_than_pool_days(self):
+        pool = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "date": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")],
+            "x": [1000.0, 5.0, 10.0],
+        })
+        out = layer1.pool_percentile_series(pool, "x", pool_days=1)
+        # pool_days=1 なので day3 の窓は day3 だけ（day1 の 1000.0 は含まない）
+        self.assertAlmostEqual(out.iloc[2], 1.0, places=9)
+
+    def test_missing_value_gives_nan_percentile(self):
+        pool = pd.DataFrame({"ticker": ["A", "B"], "date": [pd.Timestamp("2024-01-01")] * 2,
+                             "x": [10.0, np.nan]})
+        out = layer1.pool_percentile_series(pool, "x", pool_days=1)
+        self.assertTrue(np.isnan(out.iloc[1]))
+
+    def test_no_lookahead_future_date_does_not_affect_earlier_percentile(self):
+        pool = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "date": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")],
+            "x": [10.0, 20.0, -9999.0],  # day3 は極端な値（先読みされたらday1の百分位が変わるはず）
+        })
+        out_with_future = layer1.pool_percentile_series(pool, "x", pool_days=5)
+        out_day1_only = layer1.pool_percentile_series(pool.iloc[:1], "x", pool_days=5)
+        self.assertAlmostEqual(out_with_future.iloc[0], out_day1_only.iloc[0], places=9)
+
+
+class FPassMaskTest(unittest.TestCase):
+    """DESIGN.md §6.1: F1〜F14。欠損は除外しない（判定不能=通過扱い）。"""
+
+    def test_upper_tail_exclusion_and_missing_features_do_not_exclude(self):
+        pool = pd.DataFrame({
+            "ticker": ["A", "B", "C"], "date": [pd.Timestamp("2024-01-01")] * 3,
+            "d3_depth_pct": [1.0, 2.0, 3.0],  # C の pctl=1.0 > 0.70 → F2 で除外
+        })
+        out = layer1.f_pass_mask(pool, pool_days=1)
+        self.assertTrue(bool(out.loc[0, "f_pass"]))
+        self.assertTrue(bool(out.loc[1, "f_pass"]))
+        self.assertFalse(bool(out.loc[2, "f_pass"]))
+        self.assertFalse(bool(out.loc[2, "F2"]))
+        # F1〜F14のうちd3_depth_pctが絡む2条件(F1,F2)以外の12条件は列自体が無いため
+        # 「欠損=判定不能=通過」。除外はしないが f_missing_count には積み上がる
+        self.assertEqual(int(out.loc[0, "f_missing_count"]), 12)
+        self.assertTrue(bool(out.loc[0, "F1"]))
+
+    def test_lower_tail_exclusion(self):
+        pool = pd.DataFrame({
+            "ticker": ["A", "B", "C"], "date": [pd.Timestamp("2024-01-01")] * 3,
+            "d3_position": [1.0, 2.0, 3.0],  # A の pctl=1/3=0.333、下端未満ではない
+        })
+        out = layer1.f_pass_mask(pool, pool_days=1)
+        self.assertTrue(bool(out.loc[0, "f_pass"]))  # 誰も下位10%未満にならない
+
+        pool2 = pd.DataFrame({
+            "ticker": [f"T{i}" for i in range(10)],
+            "date": [pd.Timestamp("2024-01-01")] * 10,
+            "d3_position": list(range(1, 11)),
+        })
+        # 極端に低い値を1件追加して下位10%未満を作る（他の10件は下位10%に入らない）
+        pool2 = pd.concat([pool2, pd.DataFrame({
+            "ticker": ["EXTRA"], "date": [pd.Timestamp("2024-01-01")], "d3_position": [-999.0]})],
+            ignore_index=True)
+        out2 = layer1.f_pass_mask(pool2, pool_days=1)
+        extra_row = out2.iloc[-1]
+        self.assertFalse(bool(extra_row["f_pass"]))
+        self.assertFalse(bool(extra_row["F3"]))
+
+
+class DeltaFSeriesTest(unittest.TestCase):
+    def test_delta_f_matches_hand_calc(self):
+        n = 10
+        tickers = [f"T{i}" for i in range(1, n + 1)]
+        rs60 = [float(i) for i in range(1, n + 1)]  # T10のpctl=1.0>0.90 → F10で除外
+        r10 = [i * 0.01 for i in range(1, n + 1)]
+        pool = pd.DataFrame({"ticker": tickers, "date": [pd.Timestamp("2024-01-01")] * n,
+                             "d2_rs60": rs60, "r_10": r10})
+        series = layer1.delta_f_series(pool, h=10, pool_days=1)
+        # F通過(T1..T9)平均 = 0.05, 全体平均 = 0.055 -> delta = -0.005
+        self.assertEqual(len(series), 1)
+        self.assertAlmostEqual(series.iloc[0]["delta_f"], -0.005, places=9)
+        self.assertEqual(series.iloc[0]["n_f_pass"], 9)
+        # 1日だけではNewey-West tは定義できない（n<2はnan、newey_west_mean_tの既存仕様）
+        summary = layer1.delta_f_summary(pool, h=10, pool_days=1)
+        self.assertTrue(np.isnan(summary["delta_f_t"]))
+        self.assertEqual(summary["n_days_used"], 1)
+        self.assertEqual(summary["n_days_excluded"], 0)
+
+    def test_min_rows_per_day_excludes_degenerate_days(self):
+        big_day = pd.DataFrame({
+            "ticker": [f"T{i}" for i in range(10)], "date": [pd.Timestamp("2024-01-01")] * 10,
+            "d2_rs60": [float(i) for i in range(10)], "r_10": [0.01] * 10,
+        })
+        tiny_day = pd.DataFrame({
+            "ticker": ["X", "Y"], "date": [pd.Timestamp("2024-01-02")] * 2,
+            "d2_rs60": [1.0, 2.0], "r_10": [9.0, 9.0],  # 極端な値。混入したら平均が壊れる
+        })
+        pool = pd.concat([big_day, tiny_day], ignore_index=True)
+        series = layer1.delta_f_series(pool, h=10, pool_days=1, min_rows_per_day=3)
+        self.assertEqual(len(series), 1)
+        self.assertEqual(series.iloc[0]["date"], pd.Timestamp("2024-01-01"))
+        summary = layer1.delta_f_summary(pool, h=10, pool_days=1, min_rows_per_day=3)
+        self.assertEqual(summary["n_days_total"], 2)
+        self.assertEqual(summary["n_days_used"], 1)
+        self.assertEqual(summary["n_days_excluded"], 1)
+
+
+class ExcludeDataQualityTickersTest(unittest.TestCase):
+    def test_removes_only_listed_tickers(self):
+        pool = _pool([
+            {"ticker": "9900.T", "r_10": 1.0},
+            {"ticker": "1301.T", "r_10": 2.0},
+        ])
+        out = layer1.exclude_data_quality_tickers(pool)
+        self.assertEqual(sorted(out["ticker"]), ["1301.T"])
+
+    def test_no_op_when_excluded_ticker_absent(self):
+        pool = _pool([{"ticker": "1301.T", "r_10": 2.0}])
+        out = layer1.exclude_data_quality_tickers(pool)
+        self.assertEqual(len(out), 1)
+
+
 class SurvivorshipNoteTest(unittest.TestCase):
     def test_computes_ratio(self):
         delistings = pd.DataFrame({"ticker": ["9999.T", "8888.T"]})

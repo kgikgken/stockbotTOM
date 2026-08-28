@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from ..features import dimensions, indicators
+from ..scoring import composite
 from .replay import HOLDOUT_WINDOW, MIN_HISTORY_BARS, _date_position, replay_universe_tickers
 from . import labels as labels_mod
 
@@ -605,6 +606,146 @@ def baseline_comparison_table(
             trades = nishimura_trades(ohlcv, tickers, nishimura_start, nishimura_end)
             rows.append(nishimura_summary(trades))
     return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------------ F 除外（§6.1）・ΔF（T-403 R1.1 追加）
+# DESIGN.md §6.1 の表をそのまま列挙する。除外条件は「プールの直近F_POOL_DAYS営業日内
+# 百分位」の末端のみ。F2 は「末端から連続して負である分位が2つ以上続く場合に限り連続分を
+# 除外してよい」規則の適用結果として §6.1 の表に確定値 pctl>0.70 が既に記載されている
+# ため、ここではその確定値をそのまま使う（連続負分位の判定自体はこのモジュールでは
+# 再導出しない）。
+F_CONDITIONS: List[tuple] = [
+    ("F1", "d3_depth_pct", "low", 0.10),
+    ("F2", "d3_depth_pct", "high", 0.70),
+    ("F3", "d3_position", "low", 0.10),
+    ("F4", "d3_dev5", "high", 0.90),
+    ("F5", "d3_maxdrop", "low", 0.10),
+    ("F6", "d3_retrace", "low", 0.10),
+    ("F7", "d3_hl_dist", "high", 0.90),
+    ("F8", "d3_ma_dist", "high", 0.90),
+    ("F9", "d3_depth_atr", "low", 0.10),
+    ("F10", "d2_rs60", "high", 0.90),
+    ("F11", "d2_rs120", "high", 0.90),
+    ("F12", "d2_rsline_pos", "high", 0.90),
+    ("F13", "d4_pb_ratio", "low", 0.10),
+    ("F14", "d5_atr_ratio", "low", 0.10),
+]
+F_POOL_DAYS = composite.POOL_DAYS  # DESIGN.md §6.3 と同じプール（20営業日）を使う
+
+# T-402: サガミホールディングス(9900.T)。分割（基準日2026-08-30、効力発生日2026-08-31、
+# 1→2株）をyfinanceが効力発生前に一部の過去バー（2025-01-08以降）へ先出し適用しており、
+# storeの当該銘柄の価格系列に段差がある（inspect_ticker_revision.pyで実データ確認済み）。
+# 再生成はデータを悪化させるため行わず、データ品質によりL1集計から除外する
+# （TASKS.md T-402。170/362,461行=0.05%、検定数は増えない）。
+DATA_QUALITY_EXCLUDED_TICKERS = frozenset({"9900.T"})
+
+
+def exclude_data_quality_tickers(pool: pd.DataFrame,
+                                 excluded: Iterable[str] = DATA_QUALITY_EXCLUDED_TICKERS) -> pd.DataFrame:
+    """データ品質により除外する銘柄をpoolから取り除く（TASKS.md T-402参照）。
+    再計算・回帰の対象ではなく単純なticker除外であり、他の行・列には影響しない。
+    """
+    excluded = set(excluded)
+    if "ticker" not in pool.columns or not excluded:
+        return pool
+    return pool[~pool["ticker"].isin(excluded)].reset_index(drop=True)
+
+
+def pool_percentile_series(pool: pd.DataFrame, feature_id: str,
+                           pool_days: int = F_POOL_DAYS) -> pd.Series:
+    """直近 pool_days 営業日（T を含む、全銘柄を跨いだプール）内百分位
+    （DESIGN.md §6.3。scoring.composite._percentile_up と同じ定義:
+    プール内で自分以下の値を持つ行の割合）。pool の行順序には依存しない。
+    """
+    out = pd.Series(np.nan, index=pool.index, dtype=float)
+    if feature_id not in pool.columns or len(pool) == 0:
+        return out
+    dates = pd.to_datetime(pool["date"])
+    unique_dates = np.sort(dates.unique())
+    by_date_values = {d: pool.loc[dates == d, feature_id].to_numpy(dtype=float) for d in unique_dates}
+
+    window: List[np.ndarray] = []
+    for d in unique_dates:
+        window.append(by_date_values[d])
+        if len(window) > pool_days:
+            window.pop(0)
+        window_vals = np.concatenate(window)
+        window_vals = window_vals[~np.isnan(window_vals)]
+        day_idx = pool.index[dates == d]
+        if window_vals.size == 0:
+            continue
+        window_sorted = np.sort(window_vals)
+        vals = pool.loc[day_idx, feature_id].to_numpy(dtype=float)
+        ranks = np.searchsorted(window_sorted, vals, side="right")
+        pct = ranks / window_sorted.size
+        pct = np.where(np.isnan(vals), np.nan, pct)
+        out.loc[day_idx] = pct
+    return out
+
+
+def f_pass_mask(pool: pd.DataFrame, pool_days: int = F_POOL_DAYS) -> pd.DataFrame:
+    """DESIGN.md §6.1: F1〜F14 それぞれの通過可否と f_pass（全条件通過=F通過）・
+    f_missing_count（欠損により判定不能だった条件数）を列で返す。欠損は除外しない
+    （判定不能として通過扱い、§6.1）。
+    """
+    out = pd.DataFrame(index=pool.index)
+    missing_count = pd.Series(0, index=pool.index, dtype=int)
+    pass_all = pd.Series(True, index=pool.index)
+    pctl_cache: Dict[str, pd.Series] = {}
+    for fid, feature_id, tail, threshold in F_CONDITIONS:
+        if feature_id not in pctl_cache:
+            pctl_cache[feature_id] = pool_percentile_series(pool, feature_id, pool_days=pool_days)
+        pctl = pctl_cache[feature_id]
+        raw_missing = pool[feature_id].isna() if feature_id in pool.columns \
+            else pd.Series(True, index=pool.index)
+        excluded = (pctl < threshold) if tail == "low" else (pctl > threshold)
+        excluded = excluded.fillna(False) & ~raw_missing
+        out[fid] = ~excluded
+        missing_count += raw_missing.astype(int)
+        pass_all &= ~excluded
+    out["f_missing_count"] = missing_count
+    out["f_pass"] = pass_all
+    return out
+
+
+def delta_f_series(pool: pd.DataFrame, h: int = DEFAULT_H, pool_days: int = F_POOL_DAYS,
+                   min_rows_per_day: Optional[int] = None) -> pd.DataFrame:
+    """ΔF_t = mean(r_h | F通過, 日t) − mean(r_h | 全押し目状態, 日t) の日次系列
+    （TASKS.md T-403「ΔFの計算」。pool は既にgate_pass・状態該当で絞り込み済みの
+    候補集合＝「全押し目状態」母集団そのもの）。min_rows_per_day を指定すると、
+    その日のpool行数がそれ未満の日を系列から除外する（呼び出し側の事前登録した基準。
+    除外日数は戻り値の行数と unique(pool["date"]) の日数の差で分かる）。
+    """
+    r_col = f"r_{h}"
+    fmask = f_pass_mask(pool, pool_days=pool_days)
+    work = pool.assign(_f_pass=fmask["f_pass"].to_numpy())
+    dates = pd.to_datetime(work["date"])
+    rows = []
+    for d, idx in work.groupby(dates, observed=True).groups.items():
+        day_df = work.loc[idx]
+        n_all = len(day_df)
+        if min_rows_per_day is not None and n_all < min_rows_per_day:
+            continue
+        all_mean = float(day_df[r_col].mean()) if r_col in day_df.columns else np.nan
+        f_df = day_df[day_df["_f_pass"]]
+        f_mean = float(f_df[r_col].mean()) if len(f_df) and r_col in f_df.columns else np.nan
+        delta = f_mean - all_mean if np.isfinite(f_mean) and np.isfinite(all_mean) else np.nan
+        rows.append({"date": d, "n_all": n_all, "n_f_pass": len(f_df),
+                    "mean_r_all": all_mean, "mean_r_f_pass": f_mean, "delta_f": delta})
+    return pd.DataFrame(rows, columns=["date", "n_all", "n_f_pass", "mean_r_all",
+                                       "mean_r_f_pass", "delta_f"])
+
+
+def delta_f_summary(pool: pd.DataFrame, h: int = DEFAULT_H, pool_days: int = F_POOL_DAYS,
+                    min_rows_per_day: Optional[int] = None) -> dict:
+    """delta_f_series の時系列平均・Newey-West t（保有日数=hをラグ、§10.1と同じ規約）。"""
+    series = delta_f_series(pool, h=h, pool_days=pool_days, min_rows_per_day=min_rows_per_day)
+    n_days_total = pool["date"].nunique() if "date" in pool.columns else 0
+    nw = newey_west_mean_t(series["delta_f"].to_numpy(dtype=float), lag=h)
+    return {"h": h, "pool_days": pool_days, "min_rows_per_day": min_rows_per_day,
+           "n_days_total": n_days_total, "n_days_excluded": n_days_total - len(series),
+           "n_days_used": nw["n"], "delta_f_mean": nw["mean"], "delta_f_se": nw["se"],
+           "delta_f_t": nw["t"], "delta_f_p": nw["p"]}
 
 
 # ------------------------------------------------------------------ 6. 生存バイアス
