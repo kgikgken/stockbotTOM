@@ -1,0 +1,57 @@
+name: refetch-recent-splits
+
+# T-402 の恒久的な保守作業。store の直近 HISTORY_DAYS 本以内に Stock Splits
+# イベントが記録されている全銘柄を、HISTORY_FULL_DAYS ぶん全履歴再取得して
+# store を整合させる（`python -m stockbot.cli refetch-recent-splits`）。
+#
+# 日次fetch（history_days、既定400本）の窓内で分割が起きると、窓の中だけが
+# 調整され窓より過去のstore側は未調整のまま残り段差が生じる（9900.Tほか
+# 複数銘柄で確認、TASKS.md T-402）。手動実行想定（頑健性窓のreplayチャンク生成
+# 中はstoreを変更しないよう、チャンク完了後にのみ実行すること）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# store キャッシュへの同時書き込みを避けるため data-daily と同じグループにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  refetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store
+        uses: actions/cache@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Refetch recent-splits tickers
+        run: python -m stockbot.cli refetch-recent-splits
+
+      - name: check_splits を全銘柄・全期間で再実行（解除可否の判定材料）
+        if: always()
+        run: python scripts/check_splits_full_history.py

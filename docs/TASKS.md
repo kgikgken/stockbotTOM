@@ -360,11 +360,29 @@ L1 の判定が出るまで M3b（表示・テンプレート校正）と M5（�
       可能性が高い誤検出と見られるが、規則どおり除外する。7877.T・7983.T
       （同日・同比率0.2）は、別会社が同日に同じ分割を行うより、データ
       ソース側の不具合を疑う方が自然だが、これも規則どおり除外する
-    - **本番配信（`manual_exclusions.csv`）は9900.Tのみ、未更新**。今回の
-      決定は両窓の集計（L1）の除外であり、本番配信側への適用は明示的な
-      指示を受けていない。6834.T・7649.T・9900.Tは直近に分割が控えており、
-      本番の現在のstoreも同種の価格の不整合を抱えている可能性がある
-      （残タスク、設計責任者の判断待ち）
+    - **本番配信（`manual_exclusions.csv`）: 10銘柄すべてに拡大（完了、
+      2026-08-28）**。「検証で信用できないと判定した銘柄を配信に出さない」
+      という方針により、両窓の除外リストと同じ10銘柄を配信対象からも除外。
+      検証側の除外（窓の同一性を守るため）とは目的も寿命も異なる: 本番側は
+      全履歴再取得で段差が解消した銘柄から順次解除する時限的な除外、検証側は
+      窓を変えない恒久的な除外。`until`は暫定的に2099-12-31（解除は日付では
+      なく再取得後の`check_splits_full_history.py`再実行結果で判定するため）
+    - **全履歴再取得の恒久的な保守コマンドを追加（完了）**。
+      `cli.step_refetch_recent_splits`（新規CLIサブコマンド
+      `python -m stockbot.cli refetch-recent-splits`）: storeの直近
+      `history_days`本以内にStock Splitsイベントが記録されている全銘柄を
+      スキャンし、`history_full_days`ぶん全履歴再取得してstoreへ upsert する。
+      `_refetch_new_splits_full_history`（日次fetch中にその場で対応）とは別の
+      経路で、storeの現在状態を直接見て能動的に洗い出す。ワークフロー
+      `refetch-recent-splits.yml`を追加（`data-daily`concurrencyグループ、
+      手動実行）。**実行順序（2026-08-28指示）: チャンク7完了後に実行する
+      （チャンク1〜6と7の生成中にstoreの状態を変えないため）。** 実行後、
+      `check_splits_full_history.py`を再実行し、段差が消えた銘柄から本番除外
+      （`manual_exclusions.csv`）を解除する。3477.T・7877.T・7983.Tは2017年の
+      データで`history_full_days`（既定2600本）の外にあり、解消しない見込み
+      （頑健性窓の除外は維持）
+      テスト: `tests/test_split_refetch.py` `RefetchRecentSplitsFullHistoryTest`
+      （直近history_days本以内のSplitsだけを対象にする・無ければno-opの2点）
   - **新規Splitsイベント検出時の全履歴再取得を実装（完了）**。9900.Tのケースで
     判明した構造的な問題: 日次fetch（`history_days`、既定400本）の窓内で
     新規に記録された分割（`check_splits`の`kind=="unadjusted_split"`）は、
