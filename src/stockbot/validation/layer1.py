@@ -42,7 +42,13 @@ SCORED_FEATURE_IDS = [fid for fid, _dim, direction, _band in dimensions.FEATURE_
 ALL_FEATURE_IDS = dimensions.FEATURE_IDS
 DIMENSIONS = ["D1", "D2", "D3", "D4", "D5", "D6", "D7"]
 VARIANTS = ["v1", "v2", "v3"]
-DEFAULT_H = 10  # DESIGN.md §10.2-1: 単変量の基準horizon。他の段も既定で揃える
+DEFAULT_H = 3  # DESIGN.md §9.3: 設計窓(2021-08-01〜2024-01-31)で「(c)−(a′)が最大になるh」
+# の選択基準を h∈{3,5,10,15,20,30} 全てに機械的に適用して選択・凍結（2026-08-29、
+# CI実行 scripts/select_h.py。それ以前は実装上の既定値10だった）。
+# (c)−(a′)の日次差分・NW t（ラグ=h）: h=3: mean=0.000577,t=2.310,p=0.021（採用）/
+# h=5: t=1.311 / h=10: t=0.498 / h=15: t=-0.146 / h=20: t=-0.807 / h=30: t=-1.223
+# （h が伸びるほど単調に悪化、h=3のみ有意）。以後の全h集計・§10.3の第1・第2関門
+# 判定はこのhを使う。選択基準そのものは事前登録済みであり値を見て変えていない
 N_DRAWS_DEFAULT = 100  # DESIGN.md §10.2-4(a)
 
 # ic_summary() の戻り値のキー（列が1つも無い空のDataFrameを書き出すと0バイトのcsvになり
