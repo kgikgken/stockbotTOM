@@ -94,3 +94,12 @@ jobs:
       - name: 頑健性窓replayでの全列再計算（分類3対照チェック、focus以外は1行/銘柄）
         if: always()
         run: python scripts/verify_full_recompute.py --replay-dir data/replay_robustness --focus-ticker 9900.T
+
+      # 2026-08-29指示: 年別の1日あたり行数を両窓で報告（記録用、採否判断はしない）
+      - name: 年別1日あたり行数（両窓）
+        if: always()
+        run: |
+          echo "=== 主評価窓 ==="
+          python scripts/replay_run_summary.py --replay-dir data/replay
+          echo "=== 頑健性窓 ==="
+          python scripts/replay_run_summary.py --replay-dir data/replay_robustness
