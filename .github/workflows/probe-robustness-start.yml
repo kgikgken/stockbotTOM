@@ -124,6 +124,14 @@ jobs:
         if: always()
         run: python scripts/recompute_f_conditions_h3.py --replay-dir data/replay
 
+      # 2026-08-29指示: ΔF = mean(F通過) − mean(全押し目) のため、各条件の寄与は
+      # 末端分位が負かではなくプール平均を上回るか下回るかで決まる。設計窓の
+      # 押し目プール全体のmean(r_h)をΔFと同時に報告する。h=10のΔFも記録として
+      # 併記するが判定には使わない（判定はh=3のみ、かつ内部確認窓で行う）
+      - name: 設計窓のΔFとプール平均mean(r_h)（h=3・h=10記録用）
+        if: always()
+        run: python scripts/report_design_window_delta_f.py --replay-dir data/replay
+
       # 2026-08-29指示: 設計窓(a′)・頑健性窓それぞれで、期待営業日数（データ駆動の
       # 非取引日判定を適用したpd.bdate_range）と実際の保存日数を突合する。
       # Actionsのキャッシュ上書き等で静かに欠けた日があるとΔF_tの時系列に穴が
