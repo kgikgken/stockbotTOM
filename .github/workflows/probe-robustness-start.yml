@@ -103,3 +103,19 @@ jobs:
           python scripts/replay_run_summary.py --replay-dir data/replay
           echo "=== 頑健性窓 ==="
           python scripts/replay_run_summary.py --replay-dir data/replay_robustness
+
+      # 2026-08-29指示（DESIGN.md §9.3）: (a′)設計窓（2021-08-01〜2024-01-31）の
+      # 全チャンクが完了したため、hの選択基準「(c)−(a′)が最大になるh」を
+      # h∈{3,5,10,15,20,30}すべてで機械的に算出する。選択基準の適用のみで、
+      # 値の解釈・採否判断はしない（select_h.py参照）
+      - name: (a′)設計窓（読み取り専用）
+        uses: actions/cache/restore@v4
+        with:
+          path: data/a_prime
+          key: a-prime-v1-${{ github.run_id }}
+          restore-keys: |
+            a-prime-v1-
+
+      - name: hの選択（DESIGN.md §9.3、設計窓のみ）
+        if: always()
+        run: python scripts/select_h.py --replay-dir data/replay --a-prime-dir data/a_prime
