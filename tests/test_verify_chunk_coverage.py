@@ -70,6 +70,30 @@ class CheckCoverageTest(unittest.TestCase):
         self.assertIn(missing_day.date().isoformat(), result["missing"])
         self.assertEqual(result["n_extra"], 1)
         self.assertIn(phantom_day.date().isoformat(), result["extra"])
+        # 余剰日は空ファイル（ヘッダのみ）なので候補行を持たない=実害なし
+        self.assertEqual(result["n_extra_with_rows"], 0)
+        self.assertEqual(result["extra_detail"][0]["n_rows"], 0)
+
+    def test_extra_date_with_real_rows_is_flagged_as_harmful(self):
+        dates = pd.bdate_range("2018-07-13", "2018-07-18")
+        phantom_day = pd.Timestamp("2018-07-16")
+        real_days = dates.drop(phantom_day)
+        ohlcv = {f"T{i}": pd.DataFrame({"Close": 1.0}, index=real_days) for i in range(10)}
+
+        with TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            for d in real_days:
+                _touch_csv_gz(tmp / f"replay_{d.date().isoformat()}.csv.gz")
+            # 幻日に実際の候補行(1行)が書かれてしまっているケース(ΔF_tへの実害あり)
+            path = tmp / f"replay_{phantom_day.date().isoformat()}.csv.gz"
+            with gzip.open(path, "wt") as f:
+                f.write("ticker,date,r_3\nT0,2018-07-16,0.01\n")
+
+            result = check_coverage(dates[0], dates[-1], tmp, "replay", ohlcv, log=lambda *a: None)
+
+        self.assertEqual(result["n_extra_with_rows"], 1)
+        detail = [d for d in result["extra_detail"] if d["date"] == phantom_day.date().isoformat()][0]
+        self.assertEqual(detail["n_rows"], 1)
 
     def test_no_gaps_reports_zero(self):
         dates = pd.bdate_range("2018-07-13", "2018-07-17")
