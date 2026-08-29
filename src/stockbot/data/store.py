@@ -90,11 +90,31 @@ class OhlcvStore:
 
     # ------------------------------------------------------------ upsert
     def upsert(self, new: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """new を既存に上書き統合する。
+        """new を既存に上書き統合する（マージ。new に無い既存の日は残る）。
 
         戻り値: (統合後, added=新規に観測した足, revisions=値が変わった足)
         """
+        return self._merge(self.load(), new)
+
+    def upsert_replace(self, new: pd.DataFrame, tickers) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """tickers に含まれる銘柄は、既存の全行を先に削除してから new を統合する
+        （マージではなく置換）。
+
+        全履歴再取得（history_full_days 等の固定長ウィンドウでの再取得）はマージだと、
+        取得ウィンドウの外にある古い行が未調整のまま取り残され、ウィンドウの端に
+        価格の段差が生じる（T-402、9900.Tの2016-02-09境界で実データにより確認）。
+        再取得のたびにウィンドウが動くため、マージのままではウィンドウを伸ばしても
+        再発し続ける。対象銘柄については置換にすることで、fetchできた範囲だけが
+        storeに残る（履歴が短くなった銘柄はMIN_HISTORY_BARSの判定で自然に扱われる
+        ため実害はない）。tickers に無い銘柄は通常どおりマージされる。
+        """
+        tickers = set(tickers)
         old = self.load()
+        if len(old) and tickers:
+            old = old[~old["ticker"].isin(tickers)]
+        return self._merge(old, new)
+
+    def _merge(self, old: pd.DataFrame, new: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         new = new[LONG_COLS].copy()
         new["date"] = pd.to_datetime(new["date"]).dt.normalize()
         if len(old) == 0:

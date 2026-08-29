@@ -48,5 +48,50 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(len(files), 1)
 
 
+class UpsertReplaceTest(unittest.TestCase):
+    """T-402: 全履歴再取得はマージだと取得ウィンドウの外の古い行が取り残されて
+    段差が生じる（9900.Tの2016-02-09境界で実データ確認済み）。upsert_replaceは
+    対象銘柄の既存行を先に削除してから統合し、fetchできた範囲だけが残ることを
+    確認する。"""
+
+    def test_replace_drops_dates_outside_new_fetch_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = OhlcvStore(Path(d) / "store", Path(d) / "daily")
+            # 初回: 10本(2026-08-07〜2026-08-20)取得したことにする
+            wide = {"9900.T": _ohlcv(10, "2026-08-20")}
+            merged, _added, _rev = st.upsert(to_long(wide))
+            st.save(merged)
+            self.assertEqual(len(merged), 10)
+
+            # 全履歴再取得で直近5本だけ取れた場合（古い5本は取得窓の外）
+            narrow = {"9900.T": _ohlcv(5, "2026-08-20", close0=2000.0)}
+            merged2, _added2, _rev2 = st.upsert_replace(to_long(narrow), ["9900.T"])
+            self.assertEqual(len(merged2), 5)  # 古い5本は残らない(マージなら10本のまま)
+            self.assertEqual(float(merged2["close"].min()), 2000.0)
+
+    def test_replace_leaves_other_tickers_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = OhlcvStore(Path(d) / "store", Path(d) / "daily")
+            wide = {"9900.T": _ohlcv(10, "2026-08-20"), "1301.T": _ohlcv(10, "2026-08-20")}
+            merged, _added, _rev = st.upsert(to_long(wide))
+            st.save(merged)
+
+            narrow = {"9900.T": _ohlcv(5, "2026-08-20", close0=2000.0)}
+            merged2, _added2, _rev2 = st.upsert_replace(to_long(narrow), ["9900.T"])
+            self.assertEqual(len(merged2[merged2["ticker"] == "9900.T"]), 5)
+            self.assertEqual(len(merged2[merged2["ticker"] == "1301.T"]), 10)  # 対象外は無傷
+
+    def test_replace_with_empty_ticker_list_behaves_like_upsert(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = OhlcvStore(Path(d) / "store", Path(d) / "daily")
+            wide = {"9900.T": _ohlcv(10, "2026-08-20")}
+            merged, _added, _rev = st.upsert(to_long(wide))
+            st.save(merged)
+
+            narrow = {"9900.T": _ohlcv(5, "2026-08-20", close0=2000.0)}
+            merged2, _added2, _rev2 = st.upsert_replace(to_long(narrow), [])
+            self.assertEqual(len(merged2), 10)  # 対象銘柄指定なし=通常のマージと同じ
+
+
 if __name__ == "__main__":
     unittest.main()
