@@ -34,6 +34,27 @@ def saved_dates(replay_dir: Path, prefix: str) -> set:
     return out
 
 
+def _extra_file_detail(replay_dir: Path, prefix: str, date_t: pd.Timestamp) -> dict:
+    """余剰日（非取引日と判定されたのに保存されている日）が、空ファイル
+    （候補0件・データ無し）なのか、実際の候補行を持つのかを調べる。
+    候補行を持つ場合はΔF_tへの実害があるため区別する。"""
+    import json
+
+    date_str = date_t.date().isoformat()
+    csv_path = Path(replay_dir) / f"{prefix}_{date_str}.csv.gz"
+    n_rows = None
+    if csv_path.exists():
+        n_rows = int(len(pd.read_csv(csv_path)))
+    meta_path = Path(replay_dir) / f"{prefix}_meta_{date_str}.json"
+    empty_reason = None
+    if meta_path.exists():
+        try:
+            empty_reason = json.loads(meta_path.read_text(encoding="utf-8")).get("empty_reason")
+        except (ValueError, OSError):
+            pass
+    return {"date": date_str, "n_rows": n_rows, "empty_reason": empty_reason}
+
+
 def check_coverage(start: pd.Timestamp, end: pd.Timestamp, replay_dir: Path, prefix: str,
                    ohlcv: Dict[str, pd.DataFrame], log=print) -> dict:
     from stockbot.validation.replay import _real_trading_days
@@ -46,11 +67,14 @@ def check_coverage(start: pd.Timestamp, end: pd.Timestamp, replay_dir: Path, pre
 
     missing = sorted(expected - saved_in_range)
     extra = sorted(saved_in_range - expected)
+    extra_detail = [_extra_file_detail(replay_dir, prefix, d) for d in extra]
+    n_extra_with_rows = sum(1 for d in extra_detail if d["n_rows"])
     result = {
         "n_expected": len(expected), "n_saved_in_range": len(saved_in_range),
         "n_missing": len(missing), "n_extra": len(extra),
         "missing": [d.date().isoformat() for d in missing],
         "extra": [d.date().isoformat() for d in extra],
+        "extra_detail": extra_detail, "n_extra_with_rows": n_extra_with_rows,
     }
     log(f"[coverage] {replay_dir}: 期待営業日数={result['n_expected']} / "
         f"保存日数(範囲内)={result['n_saved_in_range']} / 不足={result['n_missing']} / "
@@ -59,6 +83,10 @@ def check_coverage(start: pd.Timestamp, end: pd.Timestamp, replay_dir: Path, pre
         log(f"[coverage] {replay_dir}: 欠けている日付: {result['missing']}")
     if extra:
         log(f"[coverage] {replay_dir}: 余剰の日付: {result['extra']}")
+        log(f"[coverage] {replay_dir}: 余剰日のうち候補行を持つ日数={n_extra_with_rows}"
+            f"（ΔF_tへの実害の有無。0行またはempty_reasonありなら実害なし）")
+        for d in extra_detail:
+            log(f"[coverage]   {d['date']}: n_rows={d['n_rows']} empty_reason={d['empty_reason']}")
     return result
 
 
