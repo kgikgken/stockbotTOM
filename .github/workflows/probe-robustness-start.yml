@@ -104,10 +104,10 @@ jobs:
           echo "=== 頑健性窓 ==="
           python scripts/replay_run_summary.py --replay-dir data/replay_robustness
 
-      # 2026-08-29指示（DESIGN.md §9.3）: (a′)設計窓（2021-08-01〜2024-01-31）の
-      # 全チャンクが完了したため、hの選択基準「(c)−(a′)が最大になるh」を
-      # h∈{3,5,10,15,20,30}すべてで機械的に算出する。選択基準の適用のみで、
-      # 値の解釈・採否判断はしない（select_h.py参照）
+      # 2026-08-29指示への回答済み（DESIGN.md §9.3）: (a′)設計窓（2021-08-01〜
+      # 2024-01-31）の全チャンクが完了し、h∈{3,5,10,15,20,30}全てで(c)−(a′)を
+      # 機械的に算出した結果 h=3 が選択・凍結された（layer1.DEFAULT_H=3、
+      # TASKS.md記録済み）。h選択ステップは役目を終えたため削除する
       - name: (a′)設計窓（読み取り専用）
         uses: actions/cache/restore@v4
         with:
@@ -116,6 +116,18 @@ jobs:
           restore-keys: |
             a-prime-v1-
 
-      - name: hの選択（DESIGN.md §9.3、設計窓のみ）
+      # 2026-08-29指示: hをh=3に凍結したため、これまでh=10の曲線で決めていた
+      # F1〜F14の境界値（DESIGN.md §6.1）の前提を設計窓・h=3で測り直す
+      # （§10.2手順1「設計窓のみで実施し、Fの分位境界を確定する」の未実施分。
+      # 向き・閾値は変更しない、末端分位のmean(r_3)の符号だけを再集計する）
+      - name: F1〜F14の末端分位を設計窓・h=3で再チェック
         if: always()
-        run: python scripts/select_h.py --replay-dir data/replay --a-prime-dir data/a_prime
+        run: python scripts/recompute_f_conditions_h3.py --replay-dir data/replay
+
+      # 2026-08-29指示: 設計窓(a′)・頑健性窓それぞれで、期待営業日数（データ駆動の
+      # 非取引日判定を適用したpd.bdate_range）と実際の保存日数を突合する。
+      # Actionsのキャッシュ上書き等で静かに欠けた日があるとΔF_tの時系列に穴が
+      # 空くため、判定前に確認する
+      - name: 設計窓・頑健性窓のチャンク突合
+        if: always()
+        run: python scripts/verify_chunk_coverage.py
