@@ -49,7 +49,7 @@ class RefetchNewSplitsFullHistoryTest(unittest.TestCase):
             full = _df(n=2600, base=850.0)
             return {"9900.T": full}, {"data_total": 1, "data_ok": 1}
 
-        out_ohlcv, out_issues = cli._refetch_new_splits_full_history(
+        out_ohlcv, out_issues, refetched = cli._refetch_new_splits_full_history(
             ohlcv, issues, self.cfg, self.now, log=lambda *a: None, fetch_fn=fake_fetch)
 
         self.assertEqual(len(calls), 1)
@@ -59,6 +59,7 @@ class RefetchNewSplitsFullHistoryTest(unittest.TestCase):
         # 9900.Tのunadjusted_split行は消え、1301.Tのsuspected行はそのまま残る
         self.assertNotIn("9900.T", set(out_issues.loc[out_issues["kind"] == "unadjusted_split", "ticker"]))
         self.assertIn("1301.T", set(out_issues["ticker"]))
+        self.assertEqual(refetched, ["9900.T"])  # store.upsert_replace に渡す対象
 
     def test_no_op_when_no_unadjusted_split_issues(self):
         issues = pd.DataFrame([
@@ -72,11 +73,12 @@ class RefetchNewSplitsFullHistoryTest(unittest.TestCase):
             calls.append(True)
             return {}, {}
 
-        out_ohlcv, out_issues = cli._refetch_new_splits_full_history(
+        out_ohlcv, out_issues, refetched = cli._refetch_new_splits_full_history(
             ohlcv, issues, self.cfg, self.now, log=lambda *a: None, fetch_fn=fake_fetch)
         self.assertEqual(len(calls), 0)
         self.assertIs(out_ohlcv, ohlcv)
         self.assertTrue(out_issues.equals(issues))
+        self.assertEqual(refetched, [])
 
     def test_no_op_when_issues_empty(self):
         issues = pd.DataFrame(columns=["ticker", "date", "kind", "ratio", "observed", "action"])
@@ -87,10 +89,11 @@ class RefetchNewSplitsFullHistoryTest(unittest.TestCase):
             calls.append(True)
             return {}, {}
 
-        out_ohlcv, out_issues = cli._refetch_new_splits_full_history(
+        out_ohlcv, out_issues, refetched = cli._refetch_new_splits_full_history(
             ohlcv, issues, self.cfg, self.now, log=lambda *a: None, fetch_fn=fake_fetch)
         self.assertEqual(len(calls), 0)
         self.assertIs(out_ohlcv, ohlcv)
+        self.assertEqual(refetched, [])
 
 
 class RefetchRecentSplitsFullHistoryTest(unittest.TestCase):

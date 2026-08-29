@@ -94,18 +94,22 @@ def _target_tickers(cfg: Settings, listed: pd.DataFrame, log=print) -> list[str]
 def _refetch_new_splits_full_history(
     ohlcv: dict, issues: pd.DataFrame, cfg: Settings, now: pd.Timestamp, log=print,
     fetch_fn=fetch_ohlcv,
-) -> tuple[dict, pd.DataFrame]:
+) -> tuple[dict, pd.DataFrame, list[str]]:
     """T-402: 日次取得窓（history_days、既定400本）の中で新規に記録された分割
     （check_splits の kind=="unadjusted_split"）は、その窓の中だけを調整するため、
     窓より過去のstore側の値は未調整のまま残り、窓の境界（400本前後）に段差が立つ
     （9900.Tで判明）。該当銘柄だけ history_full_days（既定2600本）で全履歴を
     再取得し、check_splits を掛け直して ohlcv/issues を差し替える。
+
+    戻り値の3番目（refetched_tickers）は呼び出し側が store.upsert_replace に渡す
+    ためのもの。全履歴再取得はマージだと取得ウィンドウの外の古い行が取り残され
+    段差が再発するため、対象銘柄は置換で store に反映する（T-402、2026-08-29）。
     """
     if len(issues) == 0:
-        return ohlcv, issues
+        return ohlcv, issues, []
     newly_split = sorted(issues.loc[issues["kind"] == "unadjusted_split", "ticker"].unique())
     if not newly_split:
-        return ohlcv, issues
+        return ohlcv, issues, []
     log(f"[fetch] 新規Splitsイベント検出（{len(newly_split)}銘柄）: "
         f"全履歴({cfg.history_full_days}本)を再取得: {newly_split}")
     full_ohlcv, _full_meta = fetch_fn(newly_split, cfg.history_full_days, cfg.fetch_deadline_sec,
@@ -114,7 +118,7 @@ def _refetch_new_splits_full_history(
     ohlcv = dict(ohlcv)
     ohlcv.update(full_ohlcv)
     issues = pd.concat([issues[~issues["ticker"].isin(newly_split)], full_issues], ignore_index=True)
-    return ohlcv, issues
+    return ohlcv, issues, newly_split
 
 
 def step_fetch(cfg: Settings, listed: pd.DataFrame, log=print) -> tuple[dict, dict, pd.DataFrame]:
@@ -130,13 +134,14 @@ def step_fetch(cfg: Settings, listed: pd.DataFrame, log=print) -> tuple[dict, di
         ohlcv, meta = fetch_ohlcv(tickers, cfg.history_days, cfg.fetch_deadline_sec,
                                   now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
     ohlcv, issues = check_all(ohlcv)
+    refetched_tickers: list[str] = []
     if not cfg.dryrun:
-        ohlcv, issues = _refetch_new_splits_full_history(ohlcv, issues, cfg, now, log=log)
+        ohlcv, issues, refetched_tickers = _refetch_new_splits_full_history(ohlcv, issues, cfg, now, log=log)
     log(f"[fetch] ok {meta['data_ok']}/{meta['data_total']} / 履歴不足 {len(meta['short'])} / "
         f"失敗 {len(meta['failed'])} / 分割issue {len(issues)}")
 
     store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
-    merged, added, revisions = store.upsert(to_long(ohlcv))
+    merged, added, revisions = store.upsert_replace(to_long(ohlcv), refetched_tickers)
     store.save(merged)
     files = store.write_daily_increments(added)
     store.append_revisions(revisions, now)
@@ -303,7 +308,9 @@ def step_refetch_recent_splits(cfg: Settings, log=print, fetch_fn=fetch_ohlcv) -
                                      now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
     full_ohlcv, issues = check_all(full_ohlcv)
 
-    merged, added, revisions = store.upsert(to_long(full_ohlcv))
+    # マージではなく置換（T-402、2026-08-29）: fetchできた範囲だけがstoreに残る
+    # ようにし、取得ウィンドウの外に古い行が取り残されて段差が再発するのを防ぐ
+    merged, added, revisions = store.upsert_replace(to_long(full_ohlcv), targets)
     store.save(merged)
     store.write_daily_increments(added)
     store.append_revisions(revisions, now)
