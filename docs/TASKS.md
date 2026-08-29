@@ -506,6 +506,52 @@ L1 の判定が出るまで M3b（表示・テンプレート校正）と M5（�
        カウントから漏れたかを特定して記録する
   - **ベースライン (a′) の追加**: G0〜G3 を通過しているが押し目状態でない銘柄の等加重。
     (c) − (a) と (c) − (a′) の両方に日次差分の NW t を付ける（点推定だけでは不十分）
+    - **2026-08-29 実行条件確認で未実装が判明、実装完了**: 設計責任者から「(a′) が
+      PR #48 の報告に含まれていない」との指摘。確認したところ (a)(b)(c) は
+      `layer1.py` に実装済みだが (a′) は本当に未実装だった。原因:
+      `pipeline.compute_daily_features` は「採点対象」（gate_pass かつ状態が
+      形成中/反発開始/ブレイク）以外の行を計算後に捨てるため（§10.2-4(a′) が
+      必要とする「gate_pass だが押し目状態でない」母集団は既存の replay 出力
+      （data/replay・data/replay_robustness）には最初から存在しない）。
+      `validation/replay.py` に `_a_prime_one_day`/`run_a_prime_replay`/
+      `load_a_prime_table` を追加: 対象母集団を反転して同じ gate/state 判定
+      ロジック（swings→pullback→gates、O(n)のswings検出が支配的というコスト
+      構造は compute_daily_features と同等）を独立に再実行し、r_h（h∈H_LIST）
+      を日付ごとの別ファイル（data/a_prime、`run_replay`と同じ中断再開規約）に
+      保存する。CLIラッパー: `scripts/run_a_prime_replay.py`。
+      `layer1.py` に `c_minus_a_prime_series`/`c_minus_a_prime_summary`
+      （`delta_f_series`/`delta_f_summary`と同じ日次差分→NW tの形）と
+      `select_h`（DESIGN.md §9.3の選択基準「(c)−(a′)が最大になるh」を
+      h∈{3,5,10,15,20,30}全てに機械的に適用するだけで、値の解釈・妥当性判断は
+      しない）を追加。テスト: `tests/test_replay.py`
+      `APrimePopulationTest`（gate_pass=True かつ 状態が非採点対象のときだけ
+      含む・状態が採点対象ならゲート判定を待たず除外・gate_pass=Falseなら除外の
+      3点）・`RunAPrimeReplayTest`（日次ファイル保存・中断再開・
+      `load_a_prime_table`）、`tests/test_layer1.py` `CMinusAPrimeTest`
+      （手計算一致・日付の和集合・`select_h`が最大値のhを1つだけ選ぶ・
+      全hが計算不能なら選択なし）。全334テスト・DRYRUNとも確認済み
+    - **設計窓（2021-08-01〜2024-01-31）での実行: 新規ワークフロー
+      `a-prime-design-window.yml`を追加、CI実行中（結果は次回追記）**。
+      store・data/replay・data/replay_robustness のいずれにも書き込まない
+      別アーティファクト（data/a_prime）。頑健性窓と同じ理由でコストが大きい
+      （評価対象銘柄数×日数のオーダーでswings検出が支配的。頑健性窓チャンク8
+      の実測=123営業日/約1時間45分から外挿すると設計窓(約625営業日)は複数
+      チャンクに分ける必要がある）ため、半年弱単位のチャンクに分けて
+      `replay-robustness.yml`と同じ運用（`data-daily`同時実行グループ、
+      中断再開）で回す。h の選択（`scripts/select_h.py`）と判定（第1・第2関門）
+      は全チャンク完了後に実施する
+    - **2026-08-29 指示: 判定（第1関門・第2関門）は h の凍結後まで保留**。
+      これまでの ΔF 報告は `DEFAULT_H=10`（実装上の既定値であり設計上の選択では
+      ない）で行われており、DESIGN.md §9.3 の手順（設計窓だけで h を選び凍結 →
+      その h で第1関門 → その h で第2関門）を踏んでいなかった。(a′) 実装・
+      設計窓での実行が完了し h が選択・凍結されるまで、判定は行わない
+  - **年別の1日あたり行数（記録用、2026-08-29 指示）**: `scripts/replay_run_summary.py`
+    に `by_year_summary` を追加。主評価窓・頑健性窓のどちらの `--replay-dir` でも
+    年別の対象日数・延べ行数・平均行数/日を出す（既存の `warmup` 除外ロジックを
+    再利用）。地合い（2018年末急落・2020年コロナ）でG2落ちが増え密度が下がるのは
+    窓の性質として想定内（頑健性窓をレジーム多様性のために選んだ以上の帰結）。
+    採否判断はしない、記録のみ。結果は頑健性窓の次回チャンク実行時に自動で出る
+    （`replay-robustness.yml`の summary ステップが呼ぶ）
   - **ΔF の計算**: `ΔF_t = mean(r_h | F 通過, 日 t) − mean(r_h | 全押し目状態, 日 t)` の
     時系列平均と NW t。F1〜F14 の leave-one-out も同じ形式で出す（採否の判断はしない）
     - **F1〜F14 の判定・ΔF_t 集計本体を実装（完了、2026-08-28、PR未マージ時点でこの

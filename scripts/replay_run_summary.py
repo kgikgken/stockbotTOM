@@ -82,6 +82,24 @@ def build_summary(table: pd.DataFrame, exclude_warmup: bool = True) -> Dict[str,
     return summary
 
 
+def by_year_summary(table: pd.DataFrame, exclude_warmup: bool = True) -> pd.DataFrame:
+    """年別の1日あたり行数（診断・記録用。2026-08-29 指示: 頑健性窓中盤の密度低下を
+    年別に確認する）。"""
+    if exclude_warmup and "warmup" in table.columns:
+        table = table[~table["warmup"].fillna(False).astype(bool)]
+    cols = ["year", "n_days", "total_rows", "avg_rows_per_day"]
+    if len(table) == 0:
+        return pd.DataFrame(columns=cols)
+    years = pd.to_datetime(table["date"]).dt.year
+    rows = []
+    for year, idx in table.groupby(years).groups.items():
+        sub = table.loc[idx]
+        by_date = sub.groupby("date").size()
+        rows.append({"year": int(year), "n_days": int(len(by_date)), "total_rows": int(len(sub)),
+                    "avg_rows_per_day": float(by_date.mean())})
+    return pd.DataFrame(rows, columns=cols).sort_values("year").reset_index(drop=True)
+
+
 def empty_file_breakdown(replay_dir: Path) -> Dict[str, int]:
     """空ファイルを「データ無し」「候補0件（ゲート等）」で分けて数える
     （replay_meta_*.json サイドカーを参照。無ければ安全側でデータ無し扱い）。"""
@@ -118,6 +136,10 @@ def main(argv=None) -> int:
     table = load_replay_table(args.replay_dir)
     summary = build_summary(table, exclude_warmup=not args.include_warmup)
     print(json.dumps(summary, ensure_ascii=False, indent=1))
+
+    by_year = by_year_summary(table, exclude_warmup=not args.include_warmup)
+    print("[replay-summary] 年別:")
+    print(by_year.to_string(index=False))
 
     n_files = len(list(Path(args.replay_dir).glob("replay_*.csv.gz")))
     breakdown = empty_file_breakdown(Path(args.replay_dir))

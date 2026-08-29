@@ -756,6 +756,60 @@ def delta_f_summary(pool: pd.DataFrame, h: int = DEFAULT_H, pool_days: int = F_P
            "delta_f_t": nw["t"], "delta_f_p": nw["p"]}
 
 
+# ---------------------------------------------------------- §9.3 h の選択・(c)−(a′)
+def c_minus_a_prime_series(pool: pd.DataFrame, a_prime: pd.DataFrame, h: int = DEFAULT_H) -> pd.DataFrame:
+    """(c) − (a′) の日次系列（DESIGN.md §9.3「h は (c) − (a′) が最大になる h」・
+    §10.2-4）。pool は「押し目状態の全銘柄の等加重」＝(c) の母集団そのもの
+    （run_layer1 に渡されるものと同じ、gate_pass・状態該当で絞り込み済み）。
+    a_prime は validation.replay.run_a_prime_replay の出力（load_a_prime_table）
+    ＝「G0〜G3通過だが押し目状態でない銘柄の等加重」＝(a′)。delta_f_series と同じ
+    形（日次差分→NW t、newey_west_mean_t に渡す）。
+    """
+    r_col = f"r_{h}"
+    c_dates = pd.to_datetime(pool["date"]) if "date" in pool.columns else pd.Series([], dtype="datetime64[ns]")
+    a_dates = pd.to_datetime(a_prime["date"]) if "date" in a_prime.columns and len(a_prime) \
+        else pd.Series([], dtype="datetime64[ns]")
+    all_dates = sorted(set(c_dates.unique()) | set(a_dates.unique()))
+    rows = []
+    for d in all_dates:
+        c_day = pool.loc[(c_dates == d).to_numpy(), r_col] if r_col in pool.columns else pd.Series([], dtype=float)
+        a_day = a_prime.loc[(a_dates == d).to_numpy(), r_col] if r_col in a_prime.columns \
+            else pd.Series([], dtype=float)
+        c_mean = float(c_day.mean()) if len(c_day) else np.nan
+        a_mean = float(a_day.mean()) if len(a_day) else np.nan
+        delta = c_mean - a_mean if np.isfinite(c_mean) and np.isfinite(a_mean) else np.nan
+        rows.append({"date": d, "n_c": len(c_day), "n_a_prime": len(a_day),
+                    "mean_r_c": c_mean, "mean_r_a_prime": a_mean, "delta": delta})
+    return pd.DataFrame(rows, columns=["date", "n_c", "n_a_prime", "mean_r_c", "mean_r_a_prime", "delta"])
+
+
+def c_minus_a_prime_summary(pool: pd.DataFrame, a_prime: pd.DataFrame, h: int = DEFAULT_H) -> dict:
+    """c_minus_a_prime_series の時系列平均・Newey-West t（保有日数=hをラグ）。"""
+    series = c_minus_a_prime_series(pool, a_prime, h=h)
+    n_days_total = len(series)
+    nw = newey_west_mean_t(series["delta"].to_numpy(dtype=float), lag=h)
+    return {"h": h, "n_days_total": n_days_total, "n_days_used": nw["n"],
+           "c_minus_a_prime_mean": nw["mean"], "c_minus_a_prime_se": nw["se"],
+           "c_minus_a_prime_t": nw["t"], "c_minus_a_prime_p": nw["p"]}
+
+
+def select_h(pool: pd.DataFrame, a_prime: pd.DataFrame,
+            h_list: Iterable[int] = (3, 5, 10, 15, 20, 30)) -> pd.DataFrame:
+    """DESIGN.md §9.3: 設計窓（2021-08-01〜2024-01-31）だけで、(c) − (a′) が
+    最大になる h を選ぶ。pool・a_prime は呼び出し側が設計窓に絞り込んだものを渡す。
+    採否や解釈はしない（CLAUDE.md）—各 h の c_minus_a_prime_summary を並べた表を
+    返すだけで、事前登録済みの選択基準（最大値）の適用先を示す selected 列を1つだけ
+    True にする（同点なら h_list の先頭、＝小さい方を優先）。
+    """
+    rows = [c_minus_a_prime_summary(pool, a_prime, h=h) for h in h_list]
+    table = pd.DataFrame(rows)
+    table["selected"] = False
+    if len(table) and table["c_minus_a_prime_mean"].notna().any():
+        best_idx = table["c_minus_a_prime_mean"].idxmax()
+        table.loc[best_idx, "selected"] = True
+    return table
+
+
 # ------------------------------------------------------------------ 6. 生存バイアス
 def survivorship_note(delistings: Optional[pd.DataFrame], listed: Optional[pd.DataFrame]) -> dict:
     """生存バイアスの上限評価（SPEC §4）の診断メモ。実際のIC・リターン数値を補正する
