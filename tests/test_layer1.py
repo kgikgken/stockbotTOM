@@ -458,6 +458,57 @@ class DeltaFSeriesTest(unittest.TestCase):
         self.assertEqual(summary["n_days_excluded"], 1)
 
 
+class CMinusAPrimeTest(unittest.TestCase):
+    """DESIGN.md §9.3・§10.2-4: (c)−(a′) の日次差分とhの選択（機械的規則、最大値）。"""
+
+    def test_matches_hand_calc_single_day(self):
+        pool = pd.DataFrame({"ticker": ["A", "B", "C"], "date": [pd.Timestamp("2024-01-01")] * 3,
+                             "r_10": [0.02, 0.04, 0.06]})  # (c) mean = 0.04
+        a_prime = pd.DataFrame({"ticker": ["X", "Y"], "date": [pd.Timestamp("2024-01-01")] * 2,
+                                "r_10": [0.01, 0.03]})  # (a′) mean = 0.02
+        series = layer1.c_minus_a_prime_series(pool, a_prime, h=10)
+        self.assertEqual(len(series), 1)
+        self.assertAlmostEqual(series.iloc[0]["delta"], 0.02, places=9)
+        self.assertEqual(series.iloc[0]["n_c"], 3)
+        self.assertEqual(series.iloc[0]["n_a_prime"], 2)
+
+        summary = layer1.c_minus_a_prime_summary(pool, a_prime, h=10)
+        # newey_west_mean_t は n<2 のとき mean・t とも nan を返す既定仕様
+        # （delta_f_summary の hand-calc テストと同じ扱い。日次値は series 側で確認済み）
+        self.assertTrue(np.isnan(summary["c_minus_a_prime_mean"]))
+        self.assertTrue(np.isnan(summary["c_minus_a_prime_t"]))
+        self.assertEqual(summary["n_days_used"], 1)
+
+    def test_day_missing_from_either_side_gives_nan_delta(self):
+        pool = pd.DataFrame({"ticker": ["A"], "date": [pd.Timestamp("2024-01-01")], "r_10": [0.05]})
+        a_prime = pd.DataFrame({"ticker": ["X"], "date": [pd.Timestamp("2024-01-02")], "r_10": [0.01]})
+        series = layer1.c_minus_a_prime_series(pool, a_prime, h=10)
+        self.assertEqual(len(series), 2)  # 日付の和集合
+        self.assertTrue(series["delta"].isna().all())
+
+    def test_select_h_picks_max_and_marks_exactly_one(self):
+        dates = [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")]
+        pool_rows, a_prime_rows = [], []
+        for d in dates:
+            for h, c_r, a_r in [(3, 0.01, 0.005), (5, 0.05, 0.01)]:
+                pool_rows.append({"ticker": "A", "date": d, f"r_{h}": c_r})
+                a_prime_rows.append({"ticker": "X", "date": d, f"r_{h}": a_r})
+        # 1行にまとめる(同じticker/dateで複数h列を持たせる)
+        pool = pd.DataFrame({"ticker": ["A"] * 3, "date": dates, "r_3": [0.01] * 3, "r_5": [0.05] * 3})
+        a_prime = pd.DataFrame({"ticker": ["X"] * 3, "date": dates, "r_3": [0.005] * 3, "r_5": [0.01] * 3})
+        table = layer1.select_h(pool, a_prime, h_list=(3, 5))
+        self.assertEqual(table["selected"].sum(), 1)
+        selected_row = table[table["selected"]].iloc[0]
+        # h=5: delta=0.04 > h=3: delta=0.005 なので h=5 が選ばれる
+        self.assertEqual(int(selected_row["h"]), 5)
+
+    def test_select_h_all_nan_marks_none_selected(self):
+        pool = pd.DataFrame(columns=["ticker", "date", "r_3"])
+        a_prime = pd.DataFrame(columns=["ticker", "date", "r_3"])
+        table = layer1.select_h(pool, a_prime, h_list=(3,))
+        self.assertEqual(table["selected"].sum(), 0)
+
+
 class ExcludeDataQualityTickersTest(unittest.TestCase):
     def test_removes_only_listed_tickers(self):
         pool = _pool([

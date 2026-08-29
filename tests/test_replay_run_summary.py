@@ -12,7 +12,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from replay_run_summary import build_summary, empty_file_breakdown  # noqa: E402
+from replay_run_summary import build_summary, by_year_summary, empty_file_breakdown  # noqa: E402
 
 
 def _table(rows):
@@ -62,6 +62,38 @@ class BuildSummaryTest(unittest.TestCase):
         summary = build_summary(table, exclude_warmup=False)
         self.assertEqual(summary["total_rows"], 2)
         self.assertEqual(summary["n_warmup_rows_excluded"], 0)
+
+
+class ByYearSummaryTest(unittest.TestCase):
+    """2026-08-29指示: 頑健性窓の年別1日あたり行数（記録用）。"""
+
+    def test_groups_by_year_and_averages_per_day(self):
+        table = _table([
+            {"date": "2018-06-01", "ticker": "1301.T"},
+            {"date": "2018-06-01", "ticker": "1302.T"},
+            {"date": "2018-06-04", "ticker": "1301.T"},
+            {"date": "2019-01-07", "ticker": "1301.T"},
+        ])
+        out = by_year_summary(table)
+        self.assertEqual(list(out["year"]), [2018, 2019])
+        self.assertEqual(out.iloc[0]["n_days"], 2)
+        self.assertEqual(out.iloc[0]["total_rows"], 3)
+        self.assertAlmostEqual(out.iloc[0]["avg_rows_per_day"], 1.5)
+        self.assertEqual(out.iloc[1]["n_days"], 1)
+
+    def test_excludes_warmup_rows_by_default(self):
+        table = _table([
+            {"date": "2017-02-13", "ticker": "1301.T", "warmup": True},
+            {"date": "2017-03-15", "ticker": "1301.T", "warmup": False},
+        ])
+        out = by_year_summary(table)
+        self.assertEqual(list(out["year"]), [2017])
+        self.assertEqual(out.iloc[0]["total_rows"], 1)
+
+    def test_empty_table_gives_empty_frame_with_schema(self):
+        out = by_year_summary(pd.DataFrame(columns=["date", "ticker"]))
+        self.assertEqual(list(out.columns), ["year", "n_days", "total_rows", "avg_rows_per_day"])
+        self.assertEqual(len(out), 0)
 
 
 class EmptyFileBreakdownTest(unittest.TestCase):

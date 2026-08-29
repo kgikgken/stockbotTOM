@@ -3,6 +3,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -540,6 +541,89 @@ class LoadRecentReplayDaysTest(unittest.TestCase):
         recent = replay._load_recent_replay_days("/does/not/exist/at/all",
                                                   pd.Timestamp("2021-08-10"), pool_days=5)
         self.assertEqual(recent, [])
+
+
+class APrimePopulationTest(unittest.TestCase):
+    """DESIGN.md §10.2-4 (a′): G0〜G3通過だが押し目状態でない銘柄だけを選ぶこと
+    （T-403、§9.3のhの選択に使う母集団）。pullback_state/evaluate_gates を差し替えて
+    母集団の反転ロジックだけを検証する（実データで特定のstate/gate_passを作るのは
+    困難なため）。"""
+
+    def test_included_when_gate_pass_true_and_state_not_scorable(self):
+        ohlcv, _idx_ohlcv, listed = _short_replay_inputs()
+        date_t = pd.Timestamp("2021-08-10")
+        with mock.patch.object(replay.pullback, "pullback_state",
+                               return_value={"state": replay.pullback.STATE_NO_STRUCTURE}), \
+             mock.patch.object(replay.gates, "evaluate_gates", return_value={"gate_pass": True}):
+            out = replay._a_prime_one_day(date_t, ohlcv, listed, k=3, label_n=15, min_history_bars=50)
+        self.assertEqual(sorted(out["ticker"]), sorted(ohlcv))
+        self.assertEqual(list(out.columns), replay.A_PRIME_COLS)
+
+    def test_excluded_when_state_is_scorable_even_if_gate_pass_true(self):
+        # 状態が採点対象（形成中/反発開始/ブレイク）なら、ゲート判定を待たず除外される
+        # （評価対象は「押し目状態でない」銘柄だけ、DESIGN.md §10.2-4(a′)）
+        ohlcv, _idx_ohlcv, listed = _short_replay_inputs()
+        date_t = pd.Timestamp("2021-08-10")
+        with mock.patch.object(replay.pullback, "pullback_state",
+                               return_value={"state": replay.pullback.STATE_FORMING}), \
+             mock.patch.object(replay.gates, "evaluate_gates", return_value={"gate_pass": True}) as gate_mock:
+            out = replay._a_prime_one_day(date_t, ohlcv, listed, k=3, label_n=15, min_history_bars=50)
+        self.assertEqual(len(out), 0)
+        gate_mock.assert_not_called()
+
+    def test_excluded_when_gate_pass_false(self):
+        ohlcv, _idx_ohlcv, listed = _short_replay_inputs()
+        date_t = pd.Timestamp("2021-08-10")
+        with mock.patch.object(replay.pullback, "pullback_state",
+                               return_value={"state": replay.pullback.STATE_NO_STRUCTURE}), \
+             mock.patch.object(replay.gates, "evaluate_gates", return_value={"gate_pass": False}):
+            out = replay._a_prime_one_day(date_t, ohlcv, listed, k=3, label_n=15, min_history_bars=50)
+        self.assertEqual(len(out), 0)
+
+    def test_empty_universe_returns_empty_frame_with_schema(self):
+        _ohlcv, _idx_ohlcv, listed = _short_replay_inputs()
+        out = replay._a_prime_one_day(pd.Timestamp("2021-08-10"), {}, listed,
+                                      k=3, label_n=15, min_history_bars=50)
+        self.assertEqual(list(out.columns), replay.A_PRIME_COLS)
+        self.assertEqual(len(out), 0)
+
+
+class RunAPrimeReplayTest(unittest.TestCase):
+    """run_a_prime_replay: 日付ごとの保存・中断再開・load_a_prime_table を確認する。"""
+
+    def test_saves_one_file_per_business_day_and_is_resumable(self):
+        ohlcv, _idx_ohlcv, listed = _short_replay_inputs()
+        start, stop = pd.Timestamp("2021-08-02"), pd.Timestamp("2021-08-06")
+        with TemporaryDirectory() as tmp:
+            replay.run_a_prime_replay(ohlcv, listed, tmp, start, stop,
+                                      k=3, label_n=15, min_history_bars=50, log=lambda *a: None)
+            files_before = sorted(Path(tmp).glob("a_prime_*.csv.gz"))
+            self.assertGreater(len(files_before), 0)
+            mtimes_before = {f.name: f.stat().st_mtime_ns for f in files_before}
+
+            logs = []
+            replay.run_a_prime_replay(ohlcv, listed, tmp, start, stop,
+                                      k=3, label_n=15, min_history_bars=50, log=logs.append)
+            files_after = sorted(Path(tmp).glob("a_prime_*.csv.gz"))
+            mtimes_after = {f.name: f.stat().st_mtime_ns for f in files_after}
+
+            self.assertEqual(mtimes_before, mtimes_after, "再開時に既存日を書き直していないこと")
+            self.assertTrue(any("再開スキップ" in m for m in logs))
+
+    def test_load_a_prime_table_concatenates_all_saved_days(self):
+        ohlcv, _idx_ohlcv, listed = _short_replay_inputs()
+        with TemporaryDirectory() as tmp:
+            replay.run_a_prime_replay(ohlcv, listed, tmp,
+                                      pd.Timestamp("2021-08-02"), pd.Timestamp("2021-08-04"),
+                                      k=3, label_n=15, min_history_bars=50, log=lambda *a: None)
+            table = replay.load_a_prime_table(tmp)
+            self.assertEqual(list(table.columns), replay.A_PRIME_COLS)
+
+    def test_load_a_prime_table_empty_dir_gives_empty_schema(self):
+        with TemporaryDirectory() as tmp:
+            table = replay.load_a_prime_table(Path(tmp) / "does_not_exist")
+            self.assertEqual(list(table.columns), replay.A_PRIME_COLS)
+            self.assertEqual(len(table), 0)
 
 
 if __name__ == "__main__":

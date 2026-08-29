@@ -23,8 +23,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from ..features import indicators
-from ..pipeline import BOOL_COLS, DATE_COLS, DAILY_FEATURES_COLS, _coerce_bool, compute_daily_features
+from ..features import gates, indicators, pullback, swings
+from ..pipeline import (
+    BOOL_COLS, DATE_COLS, DAILY_FEATURES_COLS, SCORABLE_STATES, _coerce_bool, compute_daily_features,
+)
 from . import labels as labels_mod
 
 # DESIGN.md §10.1
@@ -415,6 +417,141 @@ def run_replay(
             f"（別途、ゲート等で候補0件だった日が {n_empty_no_candidates} 日あるが、"
             "これはデータの不備ではないためこの判定には含めていない）"
         )
+
+
+# ------------------------------------------------------------------ (a′) DESIGN.md §10.2-4
+# G0〜G3 を通過しているが押し目状態でない銘柄の等加重（h の選択、§9.3 で使う）。
+# compute_daily_features は採点対象（gate_pass かつ状態が形成中/反発開始/ブレイク）だけを
+# 残して他を捨てるため（pipeline.py 参照）、既存の replay 出力からは作れない。ここでは
+# 同じ gate/state 判定ロジックを対象母集団を反転して独立に再実行する（コストは
+# compute_daily_features の対象銘柄走査部分と同程度。O(n) の swings 検出が支配的）。
+A_PRIME_COLS = ["ticker", "date"] + [f"r_{h}" for h in labels_mod.H_LIST]
+
+
+def _a_prime_one_day(
+    date_t: pd.Timestamp,
+    ohlcv_full: Dict[str, pd.DataFrame],
+    listed: pd.DataFrame,
+    k: int, label_n: int,
+    min_history_bars: int = MIN_HISTORY_BARS,
+    earnings_schedule: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """T（date_t）1日ぶんの(a′)母集団（DESIGN.md §10.2-4）: G0〜G3通過かつ
+    state が SCORABLE_STATES に含まれない銘柄の r_h（h∈labels.H_LIST）。
+
+    先読み無し: 指標・状態・ゲートは T までに切ったコピーで計算し、ラベル（超過
+    リターン）だけ T+1 以降の打ち切らない系列を使う（replay_one_day と同じ規約）。
+    """
+    universe_tickers = replay_universe_tickers(listed, ohlcv_full, date_t, min_history_bars)
+    if not universe_tickers:
+        return pd.DataFrame(columns=A_PRIME_COLS)
+
+    benchmarks_raw = labels_mod.universe_benchmark_returns(
+        {t: ohlcv_full[t] for t in universe_tickers}, date_t, labels_mod.H_LIST)
+    benchmarks = {h: v["mean"] for h, v in benchmarks_raw.items()}
+
+    rows = []
+    for ticker in universe_tickers:
+        df = ohlcv_full[ticker]
+        pos = _date_position(df.index, date_t)
+        if pos is None:
+            continue
+        df_trunc = df.iloc[: pos + 1]
+        high, low, close = df_trunc["High"], df_trunc["Low"], df_trunc["Close"]
+        sma5 = indicators.sma(close, 5)
+        sma75 = indicators.sma(close, 75)
+        sma200 = indicators.sma(close, 200)
+        atr14 = indicators.atr_wilder(high, low, close, 14)
+        raw = swings.detect_raw_swings(high, low, k)
+        alternated = swings.alternate_swings(raw)
+        t_pos = len(df_trunc) - 1
+        pb = pullback.pullback_state(high, low, close, sma5, sma200, atr14, alternated, t_pos, k)
+        if pb["state"] in SCORABLE_STATES:
+            continue
+        gate = gates.evaluate_gates(close, high, sma75, sma200, t_pos, True, label_n,
+                                    earnings_schedule=earnings_schedule, ticker=ticker)
+        if not gate["gate_pass"]:
+            continue
+        c_full = df["Close"].to_numpy(dtype=float)
+        o_full = df["Open"].to_numpy(dtype=float)
+        row = {"ticker": ticker, "date": date_t}
+        for h in labels_mod.H_LIST:
+            row[f"r_{h}"] = labels_mod.excess_return(c_full, o_full, t_pos, h, benchmarks[h])
+        rows.append(row)
+    return pd.DataFrame(rows, columns=A_PRIME_COLS)
+
+
+def _a_prime_path(output_dir: Path, date_t: pd.Timestamp) -> Path:
+    return Path(output_dir) / f"a_prime_{pd.Timestamp(date_t).strftime('%Y-%m-%d')}.csv.gz"
+
+
+def load_a_prime_table(output_dir: Path) -> pd.DataFrame:
+    """output_dir に保存済みの a_prime_*.csv.gz を全て読み込み1つの表にまとめる。"""
+    output_dir = Path(output_dir)
+    if not output_dir.exists():
+        return pd.DataFrame(columns=A_PRIME_COLS)
+    frames = []
+    for f in sorted(output_dir.glob("a_prime_*.csv.gz")):
+        df = pd.read_csv(f, parse_dates=["date"])
+        frames.append(df if len(df.columns) else pd.DataFrame(columns=A_PRIME_COLS))
+    if not frames:
+        return pd.DataFrame(columns=A_PRIME_COLS)
+    return pd.concat(frames, ignore_index=True)
+
+
+def run_a_prime_replay(
+    ohlcv: Dict[str, pd.DataFrame],
+    listed: pd.DataFrame,
+    output_dir: Path,
+    start: pd.Timestamp, end: pd.Timestamp,
+    k: int, label_n: int,
+    min_history_bars: int = MIN_HISTORY_BARS,
+    earnings_schedule: Optional[pd.DataFrame] = None,
+    include_holdout: bool = False,
+    log=print,
+) -> None:
+    """start〜end の営業日ごとに(a′)母集団（DESIGN.md §10.2-4、§9.3のhの選択に使う）
+    を計算し、output_dir に a_prime_YYYY-MM-DD.csv.gz として保存する。
+
+    run_replay と同じ中断再開規約（既にファイルがある日はスキップ）。h の選択は
+    設計窓（2021-08-01〜2024-01-31）だけで行う（DESIGN.md §9.3）ため、通常は
+    start/end をこの範囲に絞って呼ぶ。プール継続の概念が無い（(a′) は日次で
+    独立に決まる母集団のため）ので、run_replay と異なり history_pool の
+    引き継ぎは不要
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not include_holdout:
+        ohlcv = _truncate_before_holdout(ohlcv)
+
+    dates = pd.bdate_range(start, end)
+    dates = _filter_holdout(dates, include_holdout, log=log)
+    dates = _real_trading_days(dates, ohlcv, log=log)
+    if len(dates) == 0:
+        log("[a_prime] 再生対象の営業日が無い")
+        return
+
+    t_start = time.monotonic()
+    n_done = n_skipped = 0
+    for i, date_t in enumerate(dates):
+        out_path = _a_prime_path(output_dir, date_t)
+        if out_path.exists():
+            n_skipped += 1
+            continue
+
+        day_df = _a_prime_one_day(date_t, ohlcv, listed, k, label_n,
+                                  min_history_bars, earnings_schedule=earnings_schedule)
+        day_df.to_csv(out_path, index=False, compression="gzip")
+        n_done += 1
+
+        elapsed = time.monotonic() - t_start
+        if n_done % 10 == 0 or i == len(dates) - 1:
+            log(f"[a_prime] {date_t.date()} 完了 ({i + 1}/{len(dates)} 営業日, "
+                f"新規 {n_done} / 再開スキップ {n_skipped}, 経過 {elapsed:.0f}秒)")
+
+    log(f"[a_prime] 完了。新規 {n_done} 日 / 再開スキップ {n_skipped} 日 "
+        f"/ 合計経過 {time.monotonic() - t_start:.0f}秒")
 
 
 def main(argv: Optional[list] = None) -> int:
