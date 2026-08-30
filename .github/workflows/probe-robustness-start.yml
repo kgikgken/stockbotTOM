@@ -139,3 +139,9 @@ jobs:
       - name: 設計窓・頑健性窓のチャンク突合
         if: always()
         run: python scripts/verify_chunk_coverage.py
+
+      # 2026-08-30: 内部確認窓(a′)の全チャンクが完了（1,101日・993,343行、うち
+      # 設計窓613日を除いた新規分は内部確認窓ぶん）。§10.3 第1関門を一度だけ判定する
+      - name: 第1関門（内部確認窓、h=3）
+        if: always()
+        run: python scripts/gate1_internal_confirmation.py --replay-dir data/replay --a-prime-dir data/a_prime
