@@ -103,6 +103,14 @@ def main(argv=None) -> int:
     check_coverage(pd.Timestamp("2021-08-01"), pd.Timestamp("2024-01-31"),
                    Path("data/a_prime"), "a_prime", ohlcv)
 
+    # 2026-08-30指示: 第1関門（§10.3）用。data/a_primeは日付ベースのキャッシュで
+    # 設計窓・内部確認窓の両方を蓄積するため、内部確認窓側の欠落有無も別途確認する
+    # （check_coverageはstart<=d<=endでsaved_datesを絞り込むため、同一ディレクトリでも
+    # 窓ごとに正しく突合できる）
+    print("\n=== 内部確認窓(a′) 2024-02-01〜2026-01-30 ===")
+    check_coverage(pd.Timestamp("2024-02-01"), pd.Timestamp("2026-01-30"),
+                   Path("data/a_prime"), "a_prime", ohlcv)
+
     print("\n=== 頑健性窓 2017-02-13〜2021-07-31（g3_start基準、warmup含む） ===")
     check_coverage(pd.Timestamp("2017-02-13"), pd.Timestamp("2021-07-31"),
                    Path("data/replay_robustness"), "replay", ohlcv)
