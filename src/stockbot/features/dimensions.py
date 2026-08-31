@@ -15,6 +15,8 @@ d3_template（§7 テンプレート適合度、T-302）は scoring.template を
 
 d3_ma_dist の「着地 MA の種別」（集計用、DESIGN.md 表の注記）は特徴量スコアの対象
 ではないため、戻り値のメイン表には入れず、2つ目の戻り値（extra dict）で返す。
+種別の判定そのものは公開関数 landing_ma() に切り出してある（docs/SCREENER.md §3 の
+配信記録が「止まった線」を同じ判定で記録するため）。
 
 引数の open_/high/low/close/volume/dividends は 0 始まりの位置（swings.py と同じ規約）
 で扱う、実日付の DatetimeIndex を持つ整列済み pandas.Series（週足集約・決算日数計算
@@ -87,6 +89,51 @@ FEATURE_IDS = [m[0] for m in FEATURE_METADATA]
 RESULT_COLS = ["id", "dimension", "direction", "band_lo", "band_hi", "value"]
 
 D6_IDS = frozenset(m[0] for m in FEATURE_METADATA if m[1] == "D6")
+
+
+# 「着地した線」の候補。DESIGN.md §0 が使うと決めた 4 本だけ（増やさない）
+LANDING_MA_NAMES = ("SMA5", "SMA25", "SMA75", "SMA200")
+
+
+def ma_values_at(close: pd.Series, pos: int) -> dict:
+    """位置 pos における SMA5/25/75/200 の値（landing_ma に渡す形）。
+
+    窓が満たない線は NaN になる（indicators.sma と同じ）。pos までの終値しか
+    使わないので、系列を pos で切って計算しても同じ値になる。
+    """
+    out: dict = {}
+    for name in LANDING_MA_NAMES:
+        n = int(name[3:])
+        series = sma(close, n)
+        out[name] = float(series.iloc[pos]) if 0 <= pos < len(series) else np.nan
+    return out
+
+
+def landing_ma(lp_value: float, ma_values: dict, atr_t: float) -> dict:
+    """押し安値 Lp が「どの線で止まったか」と、その線までの距離（DESIGN.md §5 D3 d3_ma_dist）。
+
+    d3_ma_dist は「Lp に最も近い SMA との距離 /ATR」という 1 つの数値だが、運用では
+    どの線で止まったか（線の名前そのもの）を記録して線ごとに集計したい
+    （docs/SCREENER.md §3）。距離と線名を同時に返すのはこの関数だけにして、
+    compute_dimensions（特徴量表）も配信記録も同じ判定を通す。
+
+    ma_values は {"SMA5": 値, ...}（ma_values_at の出力）。NaN の線は候補から外す。
+    距離が同じ線が複数ある場合は LANDING_MA_NAMES の並び（短い線が先）で最初のものを選ぶ。
+
+    戻り値: {"landing_ma": 線名 or None, "landing_ma_value": 線の値 or NaN,
+             "dist_atr": 距離/ATR or NaN}。候補が 1 本も無い、ATR が使えない、
+    lp_value が NaN のいずれかなら全て None/NaN（例外にしない）。
+    """
+    none = {"landing_ma": None, "landing_ma_value": np.nan, "dist_atr": np.nan}
+    if not (np.isfinite(lp_value) and np.isfinite(atr_t) and atr_t > 0):
+        return none
+    finite = [(name, float(ma_values[name])) for name in LANDING_MA_NAMES
+              if name in ma_values and np.isfinite(ma_values[name])]
+    if not finite:
+        return none
+    name, value = min(finite, key=lambda nv: abs(lp_value - nv[1]))
+    return {"landing_ma": name, "landing_ma_value": value,
+            "dist_atr": abs(lp_value - value) / atr_t}
 
 
 def _regression_slope(y: np.ndarray) -> float:
@@ -252,13 +299,16 @@ def compute_dimensions(
             if np.isfinite(atr_t) and atr_t > 0:
                 values["d3_hl_dist"] = (lp_value - l0_low) / atr_t
 
-                ma_candidates = {"SMA5": sma5_a[lp], "SMA25": sma25_a[lp],
-                                 "SMA75": sma75_a[lp], "SMA200": sma200_a[lp]}
-                finite = {k2: v2 for k2, v2 in ma_candidates.items() if np.isfinite(v2)}
-                if finite:
-                    landing = min(finite, key=lambda k2: abs(lp_value - finite[k2]))
-                    values["d3_ma_dist"] = abs(lp_value - finite[landing]) / atr_t
-                    extra["d3_ma_dist_landing_ma"] = landing
+                landing = landing_ma(
+                    lp_value,
+                    {"SMA5": sma5_a[lp], "SMA25": sma25_a[lp],
+                     "SMA75": sma75_a[lp], "SMA200": sma200_a[lp]},
+                    atr_t,
+                )
+                values["d3_ma_dist"] = landing["dist_atr"]
+                if landing["landing_ma"] is not None:
+                    extra["d3_ma_dist_landing_ma"] = landing["landing_ma"]
+                    extra["d3_ma_dist_landing_value"] = landing["landing_ma_value"]
 
             bad_news = False
             for t in interval:

@@ -8,6 +8,8 @@
   python -m stockbot.cli references  # 決算発表予定日・上場廃止銘柄一覧の更新のみ
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
   python -m stockbot.cli features    # 保存済みデータから日次特徴量を再計算・保存
+  python -m stockbot.cli screen      # 19条件で候補を選び、配信記録に保存（docs/SCREENER.md §2）
+  python -m stockbot.cli resolve     # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）
 
 環境変数: SPEC/README 参照。SCREEN_DRYRUN=1 で合成データ・ネットワーク不要。
 """
@@ -33,12 +35,14 @@ from .data.jpx_lists import (
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
+from .features import indicators, pullback, swings
 from .pipeline import (
     DAILY_FEATURES_COLS,
     compute_daily_features,
     load_recent_daily_features,
     save_daily_features,
 )
+from .screener import record, resolver, screen
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -403,12 +407,96 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
     return df
 
 
+def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -> pd.DataFrame:
+    """19 条件で候補を選び、配信記録に保存する（docs/SCREENER.md §2）。
+
+    ユニバース通過銘柄を母集団として A〜D・E2・E3 を銘柄ごとに判定し、その通過集合に
+    E1（当日候補内で rs60 の上位10%を落とす）を掛け、売買代金の降順・同一33業種3件までに
+    絞る。順位は付けない。結果を daily/delivered_YYYY-MM-DD.csv に書く（§3.2）。
+
+    配信記録は「その日に何を出したか」の台帳なので、同じ日に 2 回実行しても最初の
+    記録が正（save_delivered が上書きしない）。
+    """
+    cfg.ensure_dirs()
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    idx_df = from_long(store.load()).get(IDX_TICKER)
+    if idx_df is None or len(idx_df) == 0:
+        log("[screen] 指数データが無いためスキップ（E1 の rs60 が計算できない）")
+        return pd.DataFrame(columns=record.DELIVERED_COLS)
+
+    earnings_schedule = None
+    p = cfg.reference_dir / "earnings_schedule.csv"
+    if p.exists():
+        earnings_schedule = load_earnings_schedule(p)
+    else:
+        log("[screen] 決算発表予定日が無い → A4 は全銘柄で「決算日未取得」扱い")
+
+    tickers = universe[universe["passes"]]["ticker"].tolist()
+    evaluated = screen.evaluate_universe(ohlcv, tickers, idx_df["Close"], cfg.k,
+                                         earnings_schedule=earnings_schedule, log=log)
+    evaluated, meta = screen.apply_e1(evaluated, log=log)
+    sector_by_ticker = dict(zip(universe["ticker"], universe["sector33"].fillna("")))
+    candidates = screen.select_candidates(evaluated, sector_by_ticker)
+    log(f"[screen] 候補 {len(candidates)} 件（売買代金降順・同一33業種は"
+        f"{screen.SECTOR_CAP}件まで。順位ではない）")
+    log(f"[screen] 候補の止まった線: "
+        f"{screen.format_counts(screen.landing_ma_breakdown(candidates), sort=False)}")
+
+    name_by_ticker = dict(zip(universe["ticker"], universe["name"].fillna("")))
+    delivered_on = _now().normalize()
+    rows = []
+    for _i, cand in candidates.iterrows():
+        ticker = str(cand["ticker"])
+        df = ohlcv[ticker]
+        high, low, close = df["High"], df["Low"], df["Close"]
+        t_pos = len(df) - 1
+        alt = swings.alternate_swings(swings.detect_raw_swings(high, low, cfg.k))
+        pb = pullback.pullback_state(high, low, close, indicators.sma(close, 5),
+                                     indicators.sma(close, 200),
+                                     indicators.atr_wilder(high, low, close, 14),
+                                     alt, t_pos, cfg.k)
+        rows.append(record.build_record(
+            ticker, high, low, close, pb, t_pos, delivered_on,
+            name=str(name_by_ticker.get(ticker, "")),
+            extra={"adv_jpy": float(cand["adv_jpy"]), "sector33": str(cand["sector33"]),
+                   "a4_earnings_unknown": bool(cand["a4_earnings_unknown"]),
+                   "e1_skipped": meta["e1_skipped"]},
+        ))
+    delivered = record.records_to_frame(rows)
+    path = record.save_delivered(delivered, cfg.daily_dir, delivered_on)
+    log(f"[screen] 配信記録 {len(delivered)} 件を {path.name} に保存"
+        + ("（E1 スキップ日）" if meta["e1_skipped"] else ""))
+
+    # Actions のログは 90 日で消える。E1 のスキップ率や条件別の不成立件数は
+    # 数週間かけて見るものなので、リポジトリ側にも残す（docs/SCREENER.md §3.6）
+    asof = evaluated["date"].max() if len(evaluated) else None
+    summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on)
+    screen.save_summary(summary, cfg.daily_dir, delivered_on)
+    return delivered
+
+
+def step_resolve(cfg: Settings, log=print) -> list[Path]:
+    """配信記録（daily/delivered_YYYY-MM-DD.csv）に 5 営業日後の結果を付ける
+    （docs/SCREENER.md §3.3）。
+
+    結果が既にあるファイルと、5 営業日がまだ経過していないファイルには触らない。
+    配信記録が 1 件も無ければ何もしない（スクリーナー本体が未配信の間はこれが通常）。
+    DRYRUN では data-dryrun/ 側の記録だけを見る（config.data_dir が分かれている）。
+    """
+    cfg.ensure_dirs()
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    written = resolver.resolve_pending(cfg.daily_dir, ohlcv, log=log)
+    log(f"[resolve] 結果を付けたファイル {len(written)} 件")
+    return written
+
+
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
-                                       "references", "universe", "features",
-                                       "refetch-recent-splits"])
+                                       "references", "universe", "features", "screen",
+                                       "resolve", "refetch-recent-splits"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -428,6 +516,16 @@ def main(argv: list[str] | None = None) -> int:
             step_refetch_recent_splits(cfg, log)
         elif args.command == "references":
             step_references(cfg, log)
+        elif args.command == "screen":
+            store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+            ohlcv = from_long(store.load())
+            u = load_latest_universe(cfg.universe_dir)
+            if u is None:
+                log("[screen] ユニバースが無いためスキップ（先に universe を実行）")
+            else:
+                step_screen(cfg, u, ohlcv, log)
+        elif args.command == "resolve":
+            step_resolve(cfg, log)
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)
