@@ -44,7 +44,7 @@
   ```
   src/stockbot/
     config.py  cli.py  pipeline.py
-    screener/    record.py  resolver.py
+    screener/    conditions.py  screen.py  record.py  resolver.py
     data/        yf_fetch.py  adjust.py  store.py  jpx_lists.py  synthetic.py
     universe/    build.py
     features/    indicators.py  swings.py  pullback.py  dimensions.py  regime.py

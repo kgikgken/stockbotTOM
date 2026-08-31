@@ -25,7 +25,7 @@ from ..features.indicators import atr_wilder
 DELIVERED_PREFIX = "delivered_"
 DELIVERED_SUFFIX = ".csv"
 
-DELIVERED_COLS = [
+CORE_COLS = [
     "delivered_on",       # 配信日（LINE に流した日）
     "asof",               # 判定日 T（この日の引けまでの情報だけで決めた）
     "ticker",
@@ -44,20 +44,37 @@ DELIVERED_COLS = [
     "pullback_days",      # 押し目日数 d
 ]
 
+# スクリーナー側が渡す列（docs/SCREENER.md §3.2）。build_record の extra で受け取る。
+# 判定に使った値ではなく、あとから「なぜこの並びか」「どの注記が要るか」を引くためのもの
+EXTRA_DEFAULTS: dict = {
+    "adv_jpy": np.nan,             # 20日平均売買代金（配信の並び順の根拠）
+    "sector33": "",                # 33業種（同一業種3件までの根拠）
+    "a4_earnings_unknown": False,  # True ならカードに「決算日未取得」と出す（§2.3）
+    "e1_skipped": False,           # True ならその日は母集団不足で E1 を適用していない（§2.4）
+}
+EXTRA_COLS = list(EXTRA_DEFAULTS)
+
+DELIVERED_COLS = CORE_COLS + EXTRA_COLS
+
 DATE_COLS = ["delivered_on", "asof", "lp_date", "h0_date"]
 
 
 def build_record(ticker: str, high: pd.Series, low: pd.Series, close: pd.Series,
                  pullback_result: dict, t_pos: int, delivered_on,
-                 name: str = "") -> dict:
+                 name: str = "", extra: Optional[dict] = None) -> dict:
     """1 銘柄ぶんの配信記録を作る（docs/SCREENER.md §3.2）。
 
     high/low/close は 0 始まりの位置で扱う整列済み pandas.Series（features 内の
     他モジュールと同じ規約）。pullback_result は features.pullback.pullback_state()
-    の戻り値をそのまま渡す。t_pos は判定日 T の位置。
+    の戻り値をそのまま渡す。t_pos は判定日 T の位置。extra は EXTRA_DEFAULTS の
+    キーだけを受け取る（未知のキーは取り違えなので例外にする）。
 
     T より後の行が系列に付いていても結果は変わらない（[t_pos] までしか読まない）。
     """
+    extra = dict(extra or {})
+    unknown = set(extra) - set(EXTRA_DEFAULTS)
+    if unknown:
+        raise ValueError(f"配信記録に無い列: {sorted(unknown)}")
     idx = close.index
     atr14 = atr_wilder(high, low, close, 14)
     atr_t = float(atr14.iloc[t_pos])
@@ -86,15 +103,25 @@ def build_record(ticker: str, high: pd.Series, low: pd.Series, close: pd.Series,
         "state": pullback_result.get("state", ""),
         "depth_pct": float(pullback_result.get("depth_pct", np.nan)),
         "pullback_days": pullback_result.get("d"),
+        **{key: extra.get(key, default) for key, default in EXTRA_DEFAULTS.items()},
     }
 
 
 def records_to_frame(records: Iterable[dict]) -> pd.DataFrame:
-    """build_record の出力を DELIVERED_COLS の順に並べた DataFrame にする。"""
+    """build_record の出力を DELIVERED_COLS の順に並べた DataFrame にする。
+
+    EXTRA_COLS（スクリーナー側が渡す列）が無い行は既定値で埋める。CORE_COLS は
+    埋めない —— 押し安値や止まった線が欠けている記録は作りたくないので、
+    足りなければ KeyError にする。
+    """
     rows = list(records)
     if not rows:
         return pd.DataFrame(columns=DELIVERED_COLS)
-    return pd.DataFrame(rows)[DELIVERED_COLS]
+    df = pd.DataFrame(rows)
+    for col, default in EXTRA_DEFAULTS.items():
+        if col not in df.columns:
+            df[col] = default
+    return df[DELIVERED_COLS]
 
 
 def delivered_path(daily_dir: Path, delivered_on) -> Path:
@@ -125,14 +152,30 @@ def save_delivered(df: pd.DataFrame, daily_dir: Path, delivered_on) -> Path:
 def load_delivered(path: Path) -> pd.DataFrame:
     """配信記録を読む。日付列は Timestamp、landing_ma などの文字列列は空文字を保つ。"""
     df = pd.read_csv(path, dtype={"ticker": str, "name": str, "landing_ma": str,
-                                  "state": str}, keep_default_na=False, na_values=[""])
+                                  "state": str, "sector33": str},
+                     keep_default_na=False, na_values=[""])
     for col in DATE_COLS:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
-    for col in ("ticker", "name", "landing_ma", "state"):
+    for col in ("ticker", "name", "landing_ma", "state", "sector33"):
         if col in df.columns:
             df[col] = df[col].fillna("")
+    for col in ("a4_earnings_unknown", "e1_skipped"):
+        if col in df.columns:
+            df[col] = df[col].map(_coerce_bool).astype("boolean")
     return df
+
+
+def _coerce_bool(v) -> object:
+    """CSV 往復でブール列が "True"/"False" の文字列になるため明示的に戻す。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        if v in ("True", "true"):
+            return True
+        if v in ("False", "false"):
+            return False
+    return pd.NA
 
 
 def list_delivered(daily_dir: Path) -> list[tuple[pd.Timestamp, Path]]:

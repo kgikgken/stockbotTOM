@@ -1,8 +1,9 @@
 name: data-daily
 
-# M1 データ基盤: 平日 7:00 JST に取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース
-# → 配信記録の結果付け（docs/SCREENER.md §3.3）。
-# LINE 配信はまだ無い。今日から前向きアーカイブを貯め始めるのが目的。
+# 平日 7:00 JST に 取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース
+# → 19条件のスクリーニングと配信記録（docs/SCREENER.md §2・§3.2）
+# → 配信記録の結果付け（§3.3）。
+# LINE への画像配信はまだ無い（描画が未実装）。記録は今日から貯まる。
 
 on:
   schedule:
@@ -71,9 +72,15 @@ jobs:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli references
 
-      # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）。配信記録が無い間は
-      # 何もしない。references と同じく daily とは別ステップにして、ここが失敗しても
-      # 取得・保存の成果を失わないようにする。
+      # 19条件で候補を選び、配信記録に保存する（docs/SCREENER.md §2）。
+      # references（決算発表予定日）の後に置く —— A4 の判定に使うため。
+      - name: Screen
+        env:
+          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
+        run: python -m stockbot.cli screen
+
+      # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）。references と同じく
+      # daily とは別ステップにして、ここが失敗しても取得・保存の成果を失わないようにする。
       - name: Resolve delivered records
         env:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
