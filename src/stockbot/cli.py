@@ -8,6 +8,7 @@
   python -m stockbot.cli references  # 決算発表予定日・上場廃止銘柄一覧の更新のみ
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
   python -m stockbot.cli features    # 保存済みデータから日次特徴量を再計算・保存
+  python -m stockbot.cli resolve     # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md）
 
 環境変数: SPEC/README 参照。SCREEN_DRYRUN=1 で合成データ・ネットワーク不要。
 """
@@ -39,6 +40,7 @@ from .pipeline import (
     load_recent_daily_features,
     save_daily_features,
 )
+from .screener import resolver
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -403,11 +405,27 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
     return df
 
 
+def step_resolve(cfg: Settings, log=print) -> list[Path]:
+    """配信記録（daily/delivered_YYYY-MM-DD.csv）に 5 営業日後の結果を付ける
+    （docs/SCREENER.md §3.3）。
+
+    結果が既にあるファイルと、5 営業日がまだ経過していないファイルには触らない。
+    配信記録が 1 件も無ければ何もしない（スクリーナー本体が未配信の間はこれが通常）。
+    DRYRUN では data-dryrun/ 側の記録だけを見る（config.data_dir が分かれている）。
+    """
+    cfg.ensure_dirs()
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    written = resolver.resolve_pending(cfg.daily_dir, ohlcv, log=log)
+    log(f"[resolve] 結果を付けたファイル {len(written)} 件")
+    return written
+
+
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
-                                       "references", "universe", "features",
+                                       "references", "universe", "features", "resolve",
                                        "refetch-recent-splits"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
@@ -428,6 +446,8 @@ def main(argv: list[str] | None = None) -> int:
             step_refetch_recent_splits(cfg, log)
         elif args.command == "references":
             step_references(cfg, log)
+        elif args.command == "resolve":
+            step_resolve(cfg, log)
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)

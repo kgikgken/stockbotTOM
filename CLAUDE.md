@@ -4,24 +4,30 @@
 毎営業日 7:00 JST に GitHub Actions で動き、候補をランキングして LINE に画像で配信する。
 
 ## 正の情報源（この順で優先）
-1. `docs/SPEC.md` — 決定事項。ここに無いことは決まっていない
-2. `docs/DESIGN.md` — 詳細設計。式・閾値・手順はここに従う
-3. `docs/TASKS.md` — 作業分割。受け入れ条件と必須テスト。質問ログもここ
-4. `docs/RESEARCH.md` — 根拠。設計を変える根拠にはしない（変えるのは設計責任者）
+
+**現在の作業対象は運用ツール（`docs/SCREENER.md`）である。** 検証プロジェクト
+（v8 順張り押し目）は 2026-08-30 に終了した（`docs/CLOSING.md`）。
+
+1. `docs/SCREENER.md` — 運用ツールの仕様。式・記録・手順はここに従う。質問ログもここ
+2. `docs/SPEC.md` — 決定事項。ここに無いことは決まっていない
+3. `docs/RESEARCH.md` — 根拠。設計を変える根拠にはしない（変えるのは設計責任者）
+
+終了済みで**編集しない**もの: `docs/DESIGN.md`、`docs/TASKS.md`、`docs/CLOSING.md`、
+`docs/FUTURE_HYPOTHESIS.md`。DESIGN.md はコードの式がどこの実装かを引くために読んでよいが、
+そこの検定数・停止規則・撤退基準を新しい作業に引き継がない（SCREENER.md §0）。
 
 チャットの指示と文書が食い違ったら、文書を正として指摘する。
 
 ## 作業の進め方
-- 1 回の作業は TASKS.md の 1 タスク。タスク ID をブランチ名とコミットメッセージに入れる（例 `feat(T-203): pullback state machine`）
 - 実装前に受け入れ条件と必須テストを読み、テストを先に書く
-- DESIGN.md に書いていない判断が必要になったら、実装せず TASKS.md の質問ログに追記して止まる。推測で埋めない
-- 完了報告には次を含める: 変更ファイル一覧、テスト結果（件数）、DESIGN.md のどの節を実装したか、設計責任者のレビュー対象箇所（スイング確定ラグ・ラベル・時点整合に触れた場合は必ず明記）
+- SCREENER.md に書いていない判断が必要になったら、実装せず SCREENER.md の質問ログ（§6）に追記して止まる。推測で埋めない
+- 完了報告には次を含める: 変更ファイル一覧、テスト結果（件数）、SCREENER.md のどの節を実装したか、設計責任者のレビュー対象箇所（スイング確定ラグ・時点整合に触れた場合は必ず明記）
 
 ## 絶対に守ること
 - **未来参照の禁止**: すべての量は T の引けまでのデータで計算する。スイングは確定ラグ k 本後にしか使えない。週足は T を含む週を使わない。ラベルだけが T+1 以降を見る
 - **再計算一致テスト**（DESIGN.md §11）を新しい特徴量・指標すべてに適用する。これが落ちたら他が通っていてもマージしない
-- **パラメータを増やさない**: DESIGN.md §12 にある値だけ。新しい閾値が欲しければ質問ログへ
-- **重みを自由にしない**: スコアは V1/V2/V3 の 3 変種だけ
+- **パラメータを増やさない**: 新しい閾値が欲しければ質問ログへ
+- **スコアを作らない**: 運用ツールの条件はブール判定のみ。スコア計算・F 除外・プール百分位を使わない（SCREENER.md §2.2）
 - **ホールドアウト（2026-02〜2026-08）を見ない**: 検証 L1 や設計途中で参照するコードを書かない。`validation/replay.py` はホールドアウト生成を明示フラグなしで行わない
 - **LINE 経路を変えない**: `src/worker.js`、`wrangler.toml`、Secrets 名（`LINE_CHANNEL_ACCESS_TOKEN` / `LINE_TO` / `WORKER_URL` / `WORKER_AUTH_TOKEN`）
 - **保存データをコミットしない**: `data/store/` は `.gitignore`。`data/daily/`、`data/universe/`、`data/reference/` はコミットする
@@ -33,16 +39,17 @@
 - `SCREEN_DRYRUN=1` で合成データにより全工程が通ること。新しい段を足したら DRYRUN 経路も足す
 - yfinance は関数内で遅延 import（テストと DRYRUN で不要）
 - ログは `print`。日本語可。絵文字は使わない
-- 型ヒント必須。docstring に DESIGN.md の節番号を書く
+- 型ヒント必須。docstring に SCREENER.md の節番号を書く（既存の検証コードは DESIGN.md の節番号のまま）
 - ファイル配置
   ```
   src/stockbot/
     config.py  cli.py  pipeline.py
+    screener/    record.py  resolver.py
     data/        yf_fetch.py  adjust.py  store.py  jpx_lists.py  synthetic.py
     universe/    build.py
     features/    indicators.py  swings.py  pullback.py  dimensions.py  regime.py
     scoring/     composite.py  template.py  ranking.py
-    validation/  labels.py  replay.py  layer1.py  layer2.py  baselines.py  report.py  resolver.py
+    validation/  labels.py  replay.py  layer1.py  report.py  calibration.py
     render/      template.html  render.py  assets/
     notify/      line_send.py
   tests/

@@ -1,7 +1,8 @@
 name: data-daily
 
-# M1 データ基盤: 平日 7:00 JST に取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース。
-# LINE 配信はまだ無い（M5 で screen.yml に統合する）。今日から前向きアーカイブを貯め始めるのが目的。
+# M1 データ基盤: 平日 7:00 JST に取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース
+# → 配信記録の結果付け（docs/SCREENER.md §3.3）。
+# LINE 配信はまだ無い。今日から前向きアーカイブを貯め始めるのが目的。
 
 on:
   schedule:
@@ -69,6 +70,14 @@ jobs:
         env:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli references
+
+      # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）。配信記録が無い間は
+      # 何もしない。references と同じく daily とは別ステップにして、ここが失敗しても
+      # 取得・保存の成果を失わないようにする。
+      - name: Resolve delivered records
+        env:
+          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
+        run: python -m stockbot.cli resolve
 
       - name: Commit snapshots
         if: always()
