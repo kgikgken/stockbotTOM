@@ -439,6 +439,8 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     candidates = screen.select_candidates(evaluated, sector_by_ticker)
     log(f"[screen] 候補 {len(candidates)} 件（売買代金降順・同一33業種は"
         f"{screen.SECTOR_CAP}件まで。順位ではない）")
+    log(f"[screen] 候補の止まった線: "
+        f"{screen.format_counts(screen.landing_ma_breakdown(candidates), sort=False)}")
 
     name_by_ticker = dict(zip(universe["ticker"], universe["name"].fillna("")))
     delivered_on = _now().normalize()
@@ -464,6 +466,12 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     path = record.save_delivered(delivered, cfg.daily_dir, delivered_on)
     log(f"[screen] 配信記録 {len(delivered)} 件を {path.name} に保存"
         + ("（E1 スキップ日）" if meta["e1_skipped"] else ""))
+
+    # Actions のログは 90 日で消える。E1 のスキップ率や条件別の不成立件数は
+    # 数週間かけて見るものなので、リポジトリ側にも残す（docs/SCREENER.md §3.6）
+    asof = evaluated["date"].max() if len(evaluated) else None
+    summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on)
+    screen.save_summary(summary, cfg.daily_dir, delivered_on)
     return delivered
 
 

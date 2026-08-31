@@ -3,7 +3,10 @@
 E1（当日候補内での上位10%除外）と、母集団10件未満のスキップ、売買代金降順・
 同一33業種3件までの絞り込みを確かめる。
 """
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -15,8 +18,14 @@ from stockbot.screener.screen import (
     SCREEN_COLS,
     SECTOR_CAP,
     apply_e1,
+    build_summary,
     evaluate_universe,
+    fail_counts,
+    format_counts,
+    landing_ma_breakdown,
+    save_summary,
     select_candidates,
+    summary_path,
 )
 
 QUIET = lambda *_a, **_k: None  # noqa: E731
@@ -155,3 +164,80 @@ class EvaluateUniverseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MonitoringTest(unittest.TestCase):
+    """運用の監視に使う集計（docs/SCREENER.md §3.6）。条件も閾値も変えない、観測だけ。"""
+
+    def test_fail_counts_counts_non_true(self):
+        df = make_rows(10)
+        df.loc[0:2, "C1"] = False
+        df.loc[0:0, "D2"] = pd.NA        # 欠損も不成立として数える
+        counts = fail_counts(df)
+        self.assertEqual(counts["C1"], 3)
+        self.assertEqual(counts["D2"], 1)
+        self.assertEqual(counts["A1"], 0)
+        self.assertNotIn("E1", counts)   # E1 は母集団の外では未判定なので含めない
+
+    def test_fail_counts_on_empty(self):
+        counts = fail_counts(make_rows(0))
+        self.assertEqual(set(counts), set(SELF_CONTAINED_IDS))
+        self.assertEqual(sum(counts.values()), 0)
+
+    def test_landing_ma_breakdown_keys_are_stable(self):
+        df = make_rows(6)
+        df.loc[0:1, "landing_ma"] = "SMA5"
+        df.loc[4:5, "landing_ma"] = "SMA200"
+        counts = landing_ma_breakdown(df)
+        self.assertEqual(list(counts), ["SMA5", "SMA25", "SMA75", "SMA200"])
+        self.assertEqual(counts, {"SMA5": 2, "SMA25": 2, "SMA75": 0, "SMA200": 2})
+
+    def test_landing_ma_breakdown_ignores_missing(self):
+        df = make_rows(4)
+        df["landing_ma"] = ""
+        self.assertEqual(sum(landing_ma_breakdown(df).values()), 0)
+        self.assertEqual(sum(landing_ma_breakdown(make_rows(0)).values()), 0)
+
+    def test_format_counts(self):
+        counts = {"A1": 1, "B2": 5, "C3": 3}
+        self.assertEqual(format_counts(counts), "B2:5 C3:3 A1:1")
+        self.assertEqual(format_counts(counts, top=2), "B2:5 C3:3")
+        self.assertEqual(format_counts(counts, sort=False), "A1:1 B2:5 C3:3")
+
+    def test_build_and_save_summary(self):
+        df = make_rows(20)
+        df.loc[0:3, "C1"] = False
+        evaluated, meta = apply_e1(df, log=QUIET)
+        candidates = select_candidates(evaluated, {})
+        summary = build_summary(evaluated, candidates, meta,
+                                pd.Timestamp("2026-08-28"), pd.Timestamp("2026-08-31"))
+        self.assertEqual(summary["asof"], "2026-08-28")
+        self.assertEqual(summary["delivered_on"], "2026-08-31")
+        self.assertEqual(summary["n_evaluated"], 20)
+        self.assertEqual(summary["n_pool"], 16)
+        self.assertEqual(summary["n_candidates"], len(candidates))
+        self.assertFalse(summary["e1_skipped"])
+        self.assertIsNotNone(summary["e1_threshold"])
+        self.assertEqual(summary["fail_counts"]["C1"], 4)
+        self.assertEqual(sum(summary["landing_ma_all"].values()), 20)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = save_summary(summary, Path(tmp), pd.Timestamp("2026-08-31"))
+            self.assertEqual(path.name, "screen_summary_2026-08-31.json")
+            self.assertEqual(path, summary_path(Path(tmp), pd.Timestamp("2026-08-31")))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), summary)
+
+    def test_summary_records_e1_skip(self):
+        evaluated, meta = apply_e1(make_rows(E1_MIN_POOL - 1), log=QUIET)
+        summary = build_summary(evaluated, select_candidates(evaluated, {}), meta,
+                                pd.Timestamp("2026-08-28"), pd.Timestamp("2026-08-31"))
+        self.assertTrue(summary["e1_skipped"])
+        self.assertIsNone(summary["e1_threshold"])   # JSON に NaN を書かない
+
+    def test_summary_on_empty_day(self):
+        evaluated, meta = apply_e1(make_rows(0), log=QUIET)
+        summary = build_summary(evaluated, select_candidates(evaluated, {}), meta, None,
+                                pd.Timestamp("2026-08-31"))
+        self.assertIsNone(summary["asof"])
+        self.assertEqual(summary["n_candidates"], 0)
+        self.assertTrue(summary["e1_skipped"])

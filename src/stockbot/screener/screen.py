@@ -8,12 +8,15 @@
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 import numpy as np
 import pandas as pd
 
 from ..features import pullback, swings
+from ..features.dimensions import LANDING_MA_NAMES
 from ..features.indicators import atr_wilder, sma
 from .conditions import (
     CONDITION_IDS,
@@ -29,6 +32,44 @@ SECTOR_CAP = 3          # 同一 33 業種の上限
 MIN_HISTORY_BARS = 60   # 指標計算に必要な最低限（これ未満は評価しない）
 
 SCREEN_COLS = ["ticker", "date"] + CONDITION_IDS + ["passes"] + DIAGNOSTIC_COLS + ["state"]
+
+SUMMARY_PREFIX = "screen_summary_"
+SUMMARY_SUFFIX = ".json"
+
+
+# ------------------------------------------------------------------ 監視用の集計
+def fail_counts(df: pd.DataFrame) -> Dict[str, int]:
+    """条件ごとの不成立件数（docs/SCREENER.md §3.6）。
+
+    1 銘柄が複数の条件で同時に落ちうるので、合計は評価件数と一致しない
+    （pipeline.py の「ゲート落ちの内訳」と同じ趣旨）。欠損は不成立として数える。
+    E1 はその日の候補集合に依存し、母集団の外では未判定なのでここには含めない。
+    """
+    if df is None or len(df) == 0:
+        return {cid: 0 for cid in SELF_CONTAINED_IDS}
+    return {cid: int((~df[cid].fillna(False).astype(bool)).sum()) for cid in SELF_CONTAINED_IDS}
+
+
+def landing_ma_breakdown(df: pd.DataFrame) -> Dict[str, int]:
+    """止まった線ごとの件数（docs/SCREENER.md §3.6）。
+
+    線が取れなかった行（押し目構造が無い、ATR が使えない）は数えない。
+    キーは LANDING_MA_NAMES の並びで固定する（0 件の線も 0 として残す）ので、
+    日をまたいで同じ形で比べられる。
+    """
+    counts = {name: 0 for name in LANDING_MA_NAMES}
+    if df is None or len(df) == 0 or "landing_ma" not in df.columns:
+        return counts
+    for name, n in df["landing_ma"].fillna("").value_counts().items():
+        if name in counts:
+            counts[name] = int(n)
+    return counts
+
+
+def format_counts(counts: Dict[str, int], top: Optional[int] = None, sort: bool = True) -> str:
+    """"A1:3 B2:1 ..." の形にする。sort=False なら渡された順（線の内訳はこちら）。"""
+    items = sorted(counts.items(), key=lambda kv: -kv[1]) if sort else list(counts.items())
+    return " ".join(f"{k}:{v}" for k, v in (items[:top] if top else items))
 
 
 def evaluate_universe(
@@ -74,10 +115,13 @@ def evaluate_universe(
     n_pool = int(out.apply(passes_self_contained, axis=1).sum())
     # 候補が 0 件の日に「どの条件で落ちたか」が分からないと運用で困る。
     # pipeline.py の「ゲート落ちの内訳」と同じ趣旨（複数条件に同時該当しうる）
-    breakdown = " ".join(f"{cid}:{int((~out[cid].fillna(False)).sum())}"
-                         for cid in SELF_CONTAINED_IDS)
-    log(f"[screen] 評価 {n_evaluated} 銘柄 / 18条件通過 {n_pool} 件 / "
-        f"条件別の不成立件数: {breakdown}")
+    fails = fail_counts(out)
+    log(f"[screen] 評価 {n_evaluated} 銘柄 / 18条件通過 {n_pool} 件")
+    log(f"[screen] 条件別の不成立件数（多い順）: {format_counts(fails)}")
+    # D4 を掛ける前の「どの線で止まったか」。SMA200 は D4 で落ちるので、
+    # ここに出る SMA200 の件数が D4 が捨てている分になる
+    log(f"[screen] 止まった線の内訳（押し目構造がある銘柄・D4適用前）: "
+        f"{format_counts(landing_ma_breakdown(out), sort=False)}")
     return out
 
 
@@ -148,3 +192,43 @@ def select_candidates(df: pd.DataFrame, sector_by_ticker: Optional[Dict[str, str
     if not keep:
         return passed.iloc[0:0]
     return pd.DataFrame(keep).reset_index(drop=True)
+
+
+def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
+                  asof, delivered_on) -> dict:
+    """その日のスクリーニングの要約（docs/SCREENER.md §3.6）。
+
+    Actions のログは 90 日で消えるが、E1 のスキップ率や条件別の不成立件数は
+    数週間から数か月かけて見るものなので、リポジトリ側に残す。
+    """
+    return {
+        "delivered_on": pd.Timestamp(delivered_on).strftime("%Y-%m-%d"),
+        "asof": pd.Timestamp(asof).strftime("%Y-%m-%d") if asof is not None else None,
+        "n_evaluated": int(len(evaluated)),
+        "n_pool": int(meta.get("e1_pool_n", 0)),
+        "n_candidates": int(len(candidates)),
+        "e1_skipped": bool(meta.get("e1_skipped", True)),
+        "e1_threshold": (None if not np.isfinite(meta.get("e1_threshold", np.nan))
+                         else float(meta["e1_threshold"])),
+        "fail_counts": fail_counts(evaluated),
+        "landing_ma_all": landing_ma_breakdown(evaluated),
+        "landing_ma_candidates": landing_ma_breakdown(candidates),
+    }
+
+
+def summary_path(daily_dir: Path, delivered_on) -> Path:
+    d = pd.Timestamp(delivered_on).strftime("%Y-%m-%d")
+    return Path(daily_dir) / f"{SUMMARY_PREFIX}{d}{SUMMARY_SUFFIX}"
+
+
+def save_summary(summary: dict, daily_dir: Path, delivered_on) -> Path:
+    """daily/screen_summary_YYYY-MM-DD.json に保存する（毎日上書きしてよい）。
+
+    配信記録（delivered_*.csv）と違って上書きしてよい —— これは判断の記録ではなく、
+    その日のスクリーニングがどう動いたかの観測値だから。
+    """
+    daily_dir = Path(daily_dir)
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    path = summary_path(daily_dir, delivered_on)
+    path.write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
