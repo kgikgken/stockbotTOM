@@ -52,12 +52,14 @@ EXTRA_DEFAULTS: dict = {
     "a4_earnings_unknown": False,  # True ならカードに「決算日未取得」と出す（§2.6）
     "e1_skipped": False,           # True ならその日は母集団不足で E1 を適用していない（§2.5）
     "earnings_days": np.nan,       # 決算発表までの営業日数（取れなければ NaN）。カードに出す
+    "streak": 1,                   # 連続点灯日数。今日が初日なら 1（§3.2）
+    "prev_delivered_on": pd.NaT,   # 前回この銘柄が候補になった配信日（無ければ空）
 }
 EXTRA_COLS = list(EXTRA_DEFAULTS)
 
 DELIVERED_COLS = CORE_COLS + EXTRA_COLS
 
-DATE_COLS = ["delivered_on", "asof", "lp_date", "h0_date"]
+DATE_COLS = ["delivered_on", "asof", "lp_date", "h0_date", "prev_delivered_on"]
 
 
 def build_record(ticker: str, high: pd.Series, low: pd.Series, close: pd.Series,
@@ -193,6 +195,52 @@ def list_delivered(daily_dir: Path) -> list[tuple[pd.Timestamp, Path]]:
             continue
     out.sort(key=lambda x: x[0])
     return out
+
+
+MAX_STREAK_LOOKBACK = 60  # 連続点灯を遡る上限（C3 で押し目は 12 日までなのでこれで足りる）
+
+
+def lookback_stats(daily_dir: Path, tickers, delivered_on,
+                   max_files: int = MAX_STREAK_LOOKBACK) -> tuple[dict, dict]:
+    """過去の配信記録から、銘柄ごとの連続点灯日数と前回点灯日を求める（docs/SCREENER.md §3.2）。
+
+    - streak: 今日を 1 日目として、直前の配信日から連続で候補に出ている日数
+    - prev_delivered_on: 今日より前で最後に候補になった配信日（無ければ None）
+
+    delivered_on より前の配信記録だけを見る（今日の分は数えない）。
+
+    **配信記録のファイルが欠けている日（ワークフローが失敗した日など）は「その日は
+    出なかった」と同じ扱いになるため、streak は実際より短くなりうる。** 記録した時点で
+    分かることをそのまま書く方針で、あとから遡って直さない。同じ押し目かどうかを厳密に
+    見たい場合は `h0_date`（押し目の起点）が一致するかで判定する。
+    """
+    tickers = list(tickers)
+    streak = {t: 1 for t in tickers}
+    prev_seen: dict = {t: None for t in tickers}
+    if not tickers:
+        return streak, prev_seen
+
+    delivered_on = pd.Timestamp(delivered_on).normalize()
+    past = [(d, f) for d, f in list_delivered(daily_dir) if d < delivered_on]
+    past.sort(key=lambda x: x[0], reverse=True)
+
+    unbroken = set(tickers)   # まだ連続が途切れていない銘柄
+    for d, f in past[:max_files]:
+        try:
+            present = set(load_delivered(f)["ticker"].astype(str))
+        except Exception:
+            present = set()   # 読めないファイルは「出なかった」扱い（例外にしない）
+        for t in tickers:
+            if prev_seen[t] is None and t in present:
+                prev_seen[t] = d
+        for t in list(unbroken):
+            if t in present:
+                streak[t] += 1
+            else:
+                unbroken.discard(t)
+        if not unbroken and all(v is not None for v in prev_seen.values()):
+            break
+    return streak, prev_seen
 
 
 def latest_delivered(daily_dir: Path) -> Optional[pd.DataFrame]:

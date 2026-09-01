@@ -135,8 +135,9 @@ class TestBuildRecord(unittest.TestCase):
         self.assertEqual(set(full), set(cut))
         for key, value in full.items():
             other = cut[key]
-            if isinstance(value, float) and np.isnan(value):
-                self.assertTrue(isinstance(other, float) and np.isnan(other), key)
+            # NaN も NaT も自分自身と等しくないので、欠損同士は「欠損である」ことで比べる
+            if pd.isna(value):
+                self.assertTrue(pd.isna(other), key)
             else:
                 self.assertEqual(value, other, key)
 
@@ -192,3 +193,75 @@ class TestSaveLoad(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LookbackStatsTest(unittest.TestCase):
+    """連続点灯日数と前回点灯日（docs/SCREENER.md §3.2）。"""
+
+    def _write(self, daily, date, tickers):
+        from stockbot.screener.record import lookback_stats  # noqa: F401
+        recs = []
+        for t in tickers:
+            rec, _pb, _c = TestBuildRecord()._record()
+            recs.append(dict(rec, ticker=t, delivered_on=pd.Timestamp(date)))
+        save_delivered(records_to_frame(recs), daily, date)
+
+    def test_first_appearance_is_streak_one(self):
+        from stockbot.screener.record import lookback_stats
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            streak, prev = lookback_stats(daily, ["1234.T"], "2026-09-03")
+            self.assertEqual(streak["1234.T"], 1)
+            self.assertIsNone(prev["1234.T"])
+
+    def test_consecutive_days_increment(self):
+        from stockbot.screener.record import lookback_stats
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self._write(daily, "2026-09-01", ["1234.T"])
+            self._write(daily, "2026-09-02", ["1234.T"])
+            streak, prev = lookback_stats(daily, ["1234.T"], "2026-09-03")
+            self.assertEqual(streak["1234.T"], 3)          # 今日を含めて3日目
+            self.assertEqual(prev["1234.T"], pd.Timestamp("2026-09-02"))
+
+    def test_gap_breaks_the_streak_but_keeps_prev(self):
+        """間が空いたら連続は切れる。前回点灯日は残る（断続点灯が分かる）。"""
+        from stockbot.screener.record import lookback_stats
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self._write(daily, "2026-09-01", ["1234.T"])
+            self._write(daily, "2026-09-02", ["9999.T"])   # この日は出ていない
+            streak, prev = lookback_stats(daily, ["1234.T"], "2026-09-03")
+            self.assertEqual(streak["1234.T"], 1)
+            self.assertEqual(prev["1234.T"], pd.Timestamp("2026-09-01"))
+
+    def test_today_file_is_not_counted(self):
+        from stockbot.screener.record import lookback_stats
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self._write(daily, "2026-09-03", ["1234.T"])   # 今日ぶん
+            streak, prev = lookback_stats(daily, ["1234.T"], "2026-09-03")
+            self.assertEqual(streak["1234.T"], 1)
+            self.assertIsNone(prev["1234.T"])
+
+    def test_empty_tickers(self):
+        from stockbot.screener.record import lookback_stats
+        with tempfile.TemporaryDirectory() as tmp:
+            streak, prev = lookback_stats(Path(tmp), [], "2026-09-03")
+            self.assertEqual(streak, {})
+            self.assertEqual(prev, {})
+
+    def test_streak_and_prev_are_recorded(self):
+        rec, _pb, _c = TestBuildRecord()._record()
+        rec = dict(rec, streak=3, prev_delivered_on=pd.Timestamp("2026-09-02"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = save_delivered(records_to_frame([rec]), Path(tmp), "2026-09-03")
+            back = load_delivered(path)
+            self.assertEqual(int(back["streak"].iloc[0]), 3)
+            self.assertEqual(back["prev_delivered_on"].iloc[0], pd.Timestamp("2026-09-02"))
+
+    def test_defaults_when_not_supplied(self):
+        rec, _pb, _c = TestBuildRecord()._record()
+        df = records_to_frame([rec])
+        self.assertEqual(int(df["streak"].iloc[0]), 1)
+        self.assertTrue(pd.isna(df["prev_delivered_on"].iloc[0]))
