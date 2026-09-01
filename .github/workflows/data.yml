@@ -2,8 +2,8 @@ name: data-daily
 
 # 平日 7:00 JST に 取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース
 # → 19条件のスクリーニングと配信記録（docs/SCREENER.md §2・§3.2）
-# → 配信記録の結果付け（§3.3）。
-# LINE への画像配信はまだ無い（描画が未実装）。記録は今日から貯まる。
+# → 配信記録の結果付け（§3.3）→ LINE 配信（§4）。
+# 配信はテキスト（Cloudflare Worker 経由）。画像カードの描画は未実装。
 
 on:
   schedule:
@@ -96,6 +96,17 @@ jobs:
           if ! git push; then
             git pull --rebase && git push
           fi
+
+      # LINE 配信（docs/SCREENER.md §4）。**コミットより後ろに置く。**
+      # 配信が失敗しても screen と resolve の結果は既に main に push 済みで失われない。
+      # continue-on-error にはしない（失敗を握り潰すと配信されない原因が分からなくなる）。
+      - name: Notify (LINE)
+        if: always()
+        env:
+          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_AUTH_TOKEN: ${{ secrets.WORKER_AUTH_TOKEN }}
+        run: python -m stockbot.cli notify
 
       - name: Upload artifacts
         if: always()

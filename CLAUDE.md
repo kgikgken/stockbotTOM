@@ -46,13 +46,13 @@
   src/stockbot/
     config.py  cli.py  pipeline.py
     screener/    conditions.py  screen.py  record.py  resolver.py
+    notify/      message.py  line_send.py
     data/        yf_fetch.py  adjust.py  store.py  jpx_lists.py  synthetic.py
     universe/    build.py
     features/    indicators.py  swings.py  pullback.py  dimensions.py  regime.py
     scoring/     composite.py  template.py  ranking.py
     validation/  labels.py  replay.py  layer1.py  report.py  calibration.py
-    render/      template.html  render.py  assets/
-    notify/      line_send.py
+    render/      template.html  render.py  assets/（画像カード。未実装）
   tests/
   docs/
   data/  (reference/ daily/ universe/ をコミット、store/ は除外)
