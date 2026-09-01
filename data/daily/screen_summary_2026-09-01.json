@@ -1,0 +1,41 @@
+{
+ "delivered_on": "2026-09-01",
+ "asof": "2026-08-31",
+ "n_evaluated": 1330,
+ "n_pool": 1,
+ "n_candidates": 1,
+ "e1_skipped": true,
+ "e1_threshold": null,
+ "fail_counts": {
+  "A1": 192,
+  "A2": 12,
+  "A3": 0,
+  "A4": 8,
+  "B1": 498,
+  "B2": 303,
+  "B3": 334,
+  "B4": 329,
+  "C1": 1086,
+  "C2": 678,
+  "C3": 967,
+  "C4": 316,
+  "D1": 491,
+  "D2": 945,
+  "D3": 796,
+  "D4": 712,
+  "E2": 305,
+  "E3": 1053
+ },
+ "landing_ma_all": {
+  "SMA5": 514,
+  "SMA25": 277,
+  "SMA75": 219,
+  "SMA200": 252
+ },
+ "landing_ma_candidates": {
+  "SMA5": 1,
+  "SMA25": 0,
+  "SMA75": 0,
+  "SMA200": 0
+ }
+}
