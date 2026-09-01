@@ -195,15 +195,19 @@ def select_candidates(df: pd.DataFrame, sector_by_ticker: Optional[Dict[str, str
 
 
 def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
-                  asof, delivered_on) -> dict:
+                  asof, delivered_on, gauge: Optional[dict] = None) -> dict:
     """その日のスクリーニングの要約（docs/SCREENER.md §3.6）。
 
     Actions のログは 90 日で消えるが、E1 のスキップ率や条件別の不成立件数は
     数週間から数か月かけて見るものなので、リポジトリ側に残す。
     """
+    gauge = gauge or {}
     return {
         "delivered_on": pd.Timestamp(delivered_on).strftime("%Y-%m-%d"),
         "asof": pd.Timestamp(asof).strftime("%Y-%m-%d") if asof is not None else None,
+        # 地合いゲージ（DESIGN.md §8.1 の6点）。順位にも条件にも使わない。配信の見出し用
+        "regime_level": gauge.get("level"),
+        "regime_score": gauge.get("score"),
         "n_evaluated": int(len(evaluated)),
         "n_pool": int(meta.get("e1_pool_n", 0)),
         "n_candidates": int(len(candidates)),

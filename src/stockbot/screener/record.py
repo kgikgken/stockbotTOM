@@ -49,8 +49,9 @@ CORE_COLS = [
 EXTRA_DEFAULTS: dict = {
     "adv_jpy": np.nan,             # 20日平均売買代金（配信の並び順の根拠）
     "sector33": "",                # 33業種（同一業種3件までの根拠）
-    "a4_earnings_unknown": False,  # True ならカードに「決算日未取得」と出す（§2.3）
-    "e1_skipped": False,           # True ならその日は母集団不足で E1 を適用していない（§2.4）
+    "a4_earnings_unknown": False,  # True ならカードに「決算日未取得」と出す（§2.6）
+    "e1_skipped": False,           # True ならその日は母集団不足で E1 を適用していない（§2.5）
+    "earnings_days": np.nan,       # 決算発表までの営業日数（取れなければ NaN）。カードに出す
 }
 EXTRA_COLS = list(EXTRA_DEFAULTS)
 

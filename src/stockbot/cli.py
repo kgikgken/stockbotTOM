@@ -10,6 +10,7 @@
   python -m stockbot.cli features    # 保存済みデータから日次特徴量を再計算・保存
   python -m stockbot.cli screen      # 19条件で候補を選び、配信記録に保存（docs/SCREENER.md §2）
   python -m stockbot.cli resolve     # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）
+  python -m stockbot.cli notify      # その日の配信記録を LINE に流す（docs/SCREENER.md §4）
 
 環境変数: SPEC/README 参照。SCREEN_DRYRUN=1 で合成データ・ネットワーク不要。
 """
@@ -35,13 +36,14 @@ from .data.jpx_lists import (
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
-from .features import indicators, pullback, swings
+from .features import indicators, pullback, regime, swings
 from .pipeline import (
     DAILY_FEATURES_COLS,
     compute_daily_features,
     load_recent_daily_features,
     save_daily_features,
 )
+from .notify import line_send, message
 from .screener import record, resolver, screen
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
@@ -435,6 +437,14 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     evaluated = screen.evaluate_universe(ohlcv, tickers, idx_df["Close"], cfg.k,
                                          earnings_schedule=earnings_schedule, log=log)
     evaluated, meta = screen.apply_e1(evaluated, log=log)
+
+    # 地合いゲージ（DESIGN.md §8.1）。条件にも順位にも使わない。配信の見出しに出すだけ
+    idx_close = idx_df["Close"]
+    asof_idx = idx_close.index[-1]
+    breadth_75, breadth_200, _n = regime.compute_breadth(
+        {t: ohlcv[t] for t in tickers if t in ohlcv and ohlcv[t] is not None}, asof_idx)
+    gauge = regime.regime_gauge(idx_close, len(idx_close) - 1, breadth_75, breadth_200)
+    log(f"[screen] 地合い={gauge['level']}({gauge['score']}/6)")
     sector_by_ticker = dict(zip(universe["ticker"], universe["sector33"].fillna("")))
     candidates = screen.select_candidates(evaluated, sector_by_ticker)
     log(f"[screen] 候補 {len(candidates)} 件（売買代金降順・同一33業種は"
@@ -460,7 +470,8 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
             name=str(name_by_ticker.get(ticker, "")),
             extra={"adv_jpy": float(cand["adv_jpy"]), "sector33": str(cand["sector33"]),
                    "a4_earnings_unknown": bool(cand["a4_earnings_unknown"]),
-                   "e1_skipped": meta["e1_skipped"]},
+                   "e1_skipped": meta["e1_skipped"],
+                   "earnings_days": float(cand["earnings_days"])},
         ))
     delivered = record.records_to_frame(rows)
     path = record.save_delivered(delivered, cfg.daily_dir, delivered_on)
@@ -470,7 +481,7 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     # Actions のログは 90 日で消える。E1 のスキップ率や条件別の不成立件数は
     # 数週間かけて見るものなので、リポジトリ側にも残す（docs/SCREENER.md §3.6）
     asof = evaluated["date"].max() if len(evaluated) else None
-    summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on)
+    summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on, gauge)
     screen.save_summary(summary, cfg.daily_dir, delivered_on)
     return delivered
 
@@ -491,12 +502,44 @@ def step_resolve(cfg: Settings, log=print) -> list[Path]:
     return written
 
 
+def step_notify(cfg: Settings, log=print) -> dict:
+    """その日の配信記録を LINE に流す（docs/SCREENER.md §4）。
+
+    読むのは `daily/delivered_YYYY-MM-DD.csv` と `daily/screen_summary_YYYY-MM-DD.json`
+    だけで、株価も指標も計算し直さない。配信内容と台帳が食い違わないようにするため
+    （§4.3）。候補0件の日も配信する（§4.2）。
+
+    WORKER_URL が無い環境（ローカル・DRYRUN）では本文を作って log に出すだけで、
+    送信はしない。
+    """
+    cfg.ensure_dirs()
+    delivered_on = _now().normalize()
+    summary_path = screen.summary_path(cfg.daily_dir, delivered_on)
+    if not summary_path.exists():
+        log(f"[notify] {summary_path.name} が無いためスキップ（先に screen を実行）")
+        return {"sent": False, "status": None, "reason": "要約が無い"}
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    path = record.delivered_path(cfg.daily_dir, delivered_on)
+    delivered = record.load_delivered(path) if path.exists() else None
+
+    text = message.build_message(delivered, summary)
+    n = 0 if delivered is None else len(delivered)
+    log(f"[notify] 本文 {len(text)}文字 / 候補 {n}件")
+    for line in text.splitlines():
+        log(f"[notify]   {line}")
+
+    result = line_send.push_text(text)
+    log(f"[notify] {result['reason']}")
+    return result
+
+
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
                                        "references", "universe", "features", "screen",
-                                       "resolve", "refetch-recent-splits"])
+                                       "resolve", "notify", "refetch-recent-splits"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -526,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
                 step_screen(cfg, u, ohlcv, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
+        elif args.command == "notify":
+            step_notify(cfg, log)
         elif args.command == "universe":
             listed = _load_listed_cached(cfg, log)
             step_universe(cfg, listed, log=log)
