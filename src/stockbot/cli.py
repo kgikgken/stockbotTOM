@@ -454,6 +454,9 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
 
     name_by_ticker = dict(zip(universe["ticker"], universe["name"].fillna("")))
     delivered_on = _now().normalize()
+    # 連続点灯日数と前回点灯日は、過去の配信記録から記録時点で確定させる（§3.2）
+    streaks, prev_seen = record.lookback_stats(
+        cfg.daily_dir, [str(t) for t in candidates["ticker"]], delivered_on)
     rows = []
     for _i, cand in candidates.iterrows():
         ticker = str(cand["ticker"])
@@ -471,12 +474,18 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
             extra={"adv_jpy": float(cand["adv_jpy"]), "sector33": str(cand["sector33"]),
                    "a4_earnings_unknown": bool(cand["a4_earnings_unknown"]),
                    "e1_skipped": meta["e1_skipped"],
-                   "earnings_days": float(cand["earnings_days"])},
+                   "earnings_days": float(cand["earnings_days"]),
+                   "streak": int(streaks.get(ticker, 1)),
+                   "prev_delivered_on": prev_seen.get(ticker) or pd.NaT},
         ))
     delivered = record.records_to_frame(rows)
     path = record.save_delivered(delivered, cfg.daily_dir, delivered_on)
     log(f"[screen] 配信記録 {len(delivered)} 件を {path.name} に保存"
         + ("（E1 スキップ日）" if meta["e1_skipped"] else ""))
+    repeats = [f"{r['ticker']}:{int(r['streak'])}日目" for _i, r in delivered.iterrows()
+               if int(r["streak"]) > 1]
+    if repeats:
+        log(f"[screen] 連続点灯: {' '.join(repeats)}")
 
     # Actions のログは 90 日で消える。E1 のスキップ率や条件別の不成立件数は
     # 数週間かけて見るものなので、リポジトリ側にも残す（docs/SCREENER.md §3.6）

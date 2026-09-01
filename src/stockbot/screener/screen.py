@@ -122,6 +122,9 @@ def evaluate_universe(
     # ここに出る SMA200 の件数が D4 が捨てている分になる
     log(f"[screen] 止まった線の内訳（押し目構造がある銘柄・D4適用前）: "
         f"{format_counts(landing_ma_breakdown(out), sort=False)}")
+    known = _earnings_known(out)
+    log(f"[screen] 決算発表予定日が取れた銘柄: {known}/{len(out)} "
+        f"({known / len(out):.1%}) ← A4 が実際に効いた範囲")
     return out
 
 
@@ -194,6 +197,19 @@ def select_candidates(df: pd.DataFrame, sector_by_ticker: Optional[Dict[str, str
     return pd.DataFrame(keep).reset_index(drop=True)
 
 
+def _earnings_known(evaluated: pd.DataFrame) -> int:
+    """判定日以降の決算発表予定日が取れた銘柄数（docs/SCREENER.md §2.6）。"""
+    if evaluated is None or len(evaluated) == 0 or "a4_earnings_unknown" not in evaluated:
+        return 0
+    return int((~evaluated["a4_earnings_unknown"].fillna(True).astype(bool)).sum())
+
+
+def _earnings_coverage(evaluated: pd.DataFrame) -> Optional[float]:
+    """決算発表予定日が取れた銘柄の割合。評価0件の日は None。"""
+    n = 0 if evaluated is None else len(evaluated)
+    return round(_earnings_known(evaluated) / n, 4) if n else None
+
+
 def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
                   asof, delivered_on, gauge: Optional[dict] = None) -> dict:
     """その日のスクリーニングの要約（docs/SCREENER.md §3.6）。
@@ -211,6 +227,10 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
         "n_evaluated": int(len(evaluated)),
         "n_pool": int(meta.get("e1_pool_n", 0)),
         "n_candidates": int(len(candidates)),
+        # A4（決算）のカバー率。JPX のローリング更新は決算期の谷間でほぼ空になるので、
+        # A4 がその日どれだけ効いていたかを日次で残す（docs/SCREENER.md §2.6・§3.6）
+        "earnings_known": _earnings_known(evaluated),
+        "earnings_coverage": _earnings_coverage(evaluated),
         "e1_skipped": bool(meta.get("e1_skipped", True)),
         "e1_threshold": (None if not np.isfinite(meta.get("e1_threshold", np.nan))
                          else float(meta["e1_threshold"])),

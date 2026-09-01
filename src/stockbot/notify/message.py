@@ -62,10 +62,19 @@ def _header(summary: dict, n_candidates: int) -> list[str]:
     return lines
 
 
+def _streak(row) -> str:
+    """連続点灯日数。初日は何も出さない（§3.2 の streak）。"""
+    try:
+        n = int(row.get("streak") or 1)
+    except (TypeError, ValueError):
+        return ""
+    return f"（連続{n}日目）" if n > 1 else ""
+
+
 def _card(i: int, row) -> list[str]:
     ma = MA_LABELS.get(str(row.get("landing_ma") or ""), "—")
     return [
-        f"{i}. {row['ticker']} {row.get('name') or ''}".rstrip(),
+        f"{i}. {row['ticker']} {row.get('name') or ''}{_streak(row)}".rstrip(),
         f"   終値 {_num(row['close_t'])}円 ／ {row.get('state') or '—'}"
         f" ／ {_oku(row.get('adv_jpy'))}",
         f"   止まった線 {ma}（{_num(row.get('landing_dist_atr'), 2)} ATR）",

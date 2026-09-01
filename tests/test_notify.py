@@ -232,3 +232,47 @@ class PushTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StreakDisplayTest(unittest.TestCase):
+    """連続点灯（docs/SCREENER.md §3.2）はカードの見出しに出す。"""
+
+    def test_first_day_has_no_streak_label(self):
+        text = build_message(frame([make_record()]), make_summary())
+        self.assertNotIn("連続", text.split("並びは")[1])   # 見出しの E1 行は別
+
+    def test_second_day_shows_streak(self):
+        rec = dict(make_record(), streak=2)
+        text = build_message(frame([rec]), make_summary())
+        self.assertIn("（連続2日目）", text)
+
+    def test_broken_streak_value_does_not_crash(self):
+        rec = dict(make_record(), streak=None)
+        text = build_message(frame([rec]), make_summary())
+        self.assertIn("2801.T", text)
+
+
+class EarningsCoverageTest(unittest.TestCase):
+    """§3.6: 決算日のカバー率を日次で残す。"""
+
+    def test_summary_carries_coverage(self):
+        from stockbot.screener.screen import apply_e1, build_summary, select_candidates
+        from tests.test_screener_screen import make_rows
+
+        df = make_rows(10)
+        df["a4_earnings_unknown"] = [False] * 3 + [True] * 7
+        evaluated, meta = apply_e1(df, log=lambda *_a: None)
+        s = build_summary(evaluated, select_candidates(evaluated, {}), meta,
+                          pd.Timestamp("2026-08-31"), pd.Timestamp("2026-09-01"))
+        self.assertEqual(s["earnings_known"], 3)
+        self.assertAlmostEqual(s["earnings_coverage"], 0.3)
+
+    def test_coverage_is_none_on_empty_day(self):
+        from stockbot.screener.screen import apply_e1, build_summary, select_candidates
+        from tests.test_screener_screen import make_rows
+
+        evaluated, meta = apply_e1(make_rows(0), log=lambda *_a: None)
+        s = build_summary(evaluated, select_candidates(evaluated, {}), meta, None,
+                          pd.Timestamp("2026-09-01"))
+        self.assertEqual(s["earnings_known"], 0)
+        self.assertIsNone(s["earnings_coverage"])
