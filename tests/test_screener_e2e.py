@@ -92,9 +92,11 @@ class ScreenerEndToEndTest(unittest.TestCase):
             self.assertTrue((journal["n_bars"] == HORIZON_DAYS).all())
 
             summary = summarize_by_landing_ma(journal)
+            self.assertEqual(summary["landing_ma"].tolist()[:4],
+                             ["SMA5", "SMA25", "SMA75", "SMA200"])
             self.assertEqual(int(summary["n"].sum()), len(self.records))
             self.assertEqual(int(summary["n_resolved"].sum()), len(self.records))
-            for rate in summary["success_rate"]:
+            for rate in summary["success_rate"].dropna():
                 self.assertTrue(0.0 <= rate <= 1.0)
 
             # 2 回目の実行は何もしない（確定した記録を作り直さない）
@@ -192,4 +194,6 @@ class ScreenToJournalTest(unittest.TestCase):
 
             summary = summarize_by_landing_ma(journal)
             self.assertEqual(int(summary["n"].sum()), len(candidates))
-            self.assertTrue((summary["success_rate"] == 1.0).all())
+            self.assertTrue((summary["success_rate"].dropna() == 1.0).all())
+            # 候補が出ていない線は n=0 の行として残る（消えない）
+            self.assertEqual(len(summary), 4)

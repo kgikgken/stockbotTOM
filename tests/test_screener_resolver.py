@@ -241,16 +241,22 @@ class TestJournal(unittest.TestCase):
             self.assertNotIn("success", j.columns)
 
     def test_summary_by_landing_ma(self):
+        """4本を常に出す。候補に出ていない線は n=0（docs/SCREENER.md §3.4）。"""
         with tempfile.TemporaryDirectory() as tmp:
             daily = Path(tmp)
             self._build(daily)
             s = summarize_by_landing_ma(load_journal(daily))
-            self.assertEqual(s["landing_ma"].tolist(), ["SMA25", "SMA75"])
-            self.assertEqual(s["n"].tolist(), [1, 1])
-            self.assertEqual(s["n_resolved"].tolist(), [1, 1])
-            self.assertAlmostEqual(s.loc[0, "success_rate"], 1.0)
-            self.assertAlmostEqual(s.loc[1, "success_rate"], 0.0)
-            self.assertAlmostEqual(s.loc[1, "broke_lp_rate"], 1.0)
+            self.assertEqual(s["landing_ma"].tolist(), ["SMA5", "SMA25", "SMA75", "SMA200"])
+            self.assertEqual(s["n"].tolist(), [0, 1, 1, 0])
+            self.assertEqual(s["n_resolved"].tolist(), [0, 1, 1, 0])
+            by = s.set_index("landing_ma")
+            self.assertAlmostEqual(by.loc["SMA25", "success_rate"], 1.0)
+            self.assertAlmostEqual(by.loc["SMA75", "success_rate"], 0.0)
+            self.assertAlmostEqual(by.loc["SMA75", "broke_lp_rate"], 1.0)
+            # 候補に出ていない線は率が欠損（0.0 ではない。0勝ではなく未出走）
+            for ma in ("SMA5", "SMA200"):
+                self.assertTrue(pd.isna(by.loc[ma, "success_rate"]), ma)
+                self.assertTrue(pd.isna(by.loc[ma, "mean_ret_h"]), ma)
 
     def test_summary_filters_by_distance(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -259,14 +265,34 @@ class TestJournal(unittest.TestCase):
             save_delivered(records_to_frame([make_record(ticker="1111.T"), far]),
                            daily, DELIVERED_ON)
             j = load_journal(daily)
-            self.assertEqual(len(summarize_by_landing_ma(j)), 2)
-            self.assertEqual(summarize_by_landing_ma(j, max_dist_atr=1.0)["landing_ma"].tolist(),
-                             ["SMA25"])
+            self.assertEqual(summarize_by_landing_ma(j)["n"].tolist(), [0, 1, 0, 1])
+            # 距離で絞ると SMA200 の1件が落ちるが、行は n=0 で残る
+            filtered = summarize_by_landing_ma(j, max_dist_atr=1.0)
+            self.assertEqual(filtered["landing_ma"].tolist(),
+                             ["SMA5", "SMA25", "SMA75", "SMA200"])
+            self.assertEqual(filtered["n"].tolist(), [0, 1, 0, 0])
 
     def test_summary_on_empty_journal(self):
+        """記録が無い日も 4 行の形は保つ（全て n=0）。ただしこれは D4 の情報ではない。"""
         s = summarize_by_landing_ma(pd.DataFrame())
-        self.assertEqual(len(s), 0)
+        self.assertEqual(s["landing_ma"].tolist(), ["SMA5", "SMA25", "SMA75", "SMA200"])
+        self.assertEqual(s["n"].tolist(), [0, 0, 0, 0])
         self.assertIn("success_rate", s.columns)
+        self.assertTrue(s["success_rate"].isna().all())
+
+    def test_summary_keeps_no_line_rows_when_present(self):
+        """止まった線が取れなかった記録がある日だけ、末尾に「（線なし）」を足す。"""
+        from stockbot.screener.resolver import NO_LINE
+
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            recs = [make_record(ticker="1111.T", landing_ma="SMA25"),
+                    dict(make_record(ticker="4444.T"), landing_ma="")]
+            save_delivered(records_to_frame(recs), daily, DELIVERED_ON)
+            s = summarize_by_landing_ma(load_journal(daily))
+            self.assertEqual(s["landing_ma"].tolist(),
+                             ["SMA5", "SMA25", "SMA75", "SMA200", NO_LINE])
+            self.assertEqual(int(s.set_index("landing_ma").loc[NO_LINE, "n"]), 1)
 
     def test_outcome_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

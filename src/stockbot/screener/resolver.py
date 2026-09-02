@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.store import IDX_TICKER
+from ..features.dimensions import LANDING_MA_NAMES
 from ..features.indicators import sma
 from .record import DELIVERED_COLS, list_delivered, load_delivered
 
@@ -283,38 +284,56 @@ def load_journal(daily_dir: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+SUMMARY_COLS = ["landing_ma", "n", "n_resolved", "success_rate",
+                "broke_lp_rate", "recovered_sma5_rate", "mean_ret_h"]
+NO_LINE = "（線なし）"   # 止まった線が取れなかった記録。4本のいずれでもない
+
+
+def _summary_row(name: str, g: pd.DataFrame) -> dict:
+    resolved = g[g["success"].notna()] if "success" in g.columns and len(g) else g.iloc[0:0]
+    return {
+        "landing_ma": name,
+        "n": int(len(g)),
+        "n_resolved": int(len(resolved)),
+        "success_rate": _rate(resolved, "success"),
+        "broke_lp_rate": _rate(resolved, "broke_lp"),
+        "recovered_sma5_rate": _rate(resolved, "recovered_sma5"),
+        "mean_ret_h": (float(resolved["ret_h"].mean())
+                       if len(resolved) and "ret_h" in resolved else np.nan),
+    }
+
+
 def summarize_by_landing_ma(journal: pd.DataFrame, max_dist_atr: Optional[float] = None) -> pd.DataFrame:
     """止まった線ごとの件数と実績（docs/SCREENER.md §3.4）。
+
+    **SMA5 / SMA25 / SMA75 / SMA200 の 4 行を常に出す。** 候補に一度も出ていない線は
+    n=0 の行になる。groupby は存在する値しかグループにしないため、素朴に集計すると
+    その線の行ごと表から消え、「まだ集計されていない」のか「候補に出ていない」のかが
+    読み手に区別できなくなる。
+
+    **記録がある状態での n=0 は「D4（ma_dist ≤ 1.0 かつ 5/25/75日線）がその線を通して
+    いない」という情報であって、データ不足ではない。** 判断材料になるのはこの対比なので
+    行を落とさない（§3.4）。journal 自体が空なら全て 0 になるが、それは「まだ記録が無い」
+    だけで D4 の情報ではない。
 
     max_dist_atr を与えると、押し安値がその距離より遠い記録を除いて集計する
     （最も近い線が遠い場合、その線で止まったとは言いにくいため）。
 
     表を出すところまでがこの関数の仕事で、採否の判断はしない（CLAUDE.md）。
     """
-    if journal is None or len(journal) == 0 or "landing_ma" not in journal.columns:
-        return pd.DataFrame(columns=["landing_ma", "n", "n_resolved", "success_rate",
-                                     "broke_lp_rate", "recovered_sma5_rate", "mean_ret_h"])
-    df = journal.copy()
-    if max_dist_atr is not None and "landing_dist_atr" in df.columns:
+    empty = pd.DataFrame(columns=journal.columns if journal is not None else [])
+    df = empty if journal is None or "landing_ma" not in getattr(journal, "columns", []) \
+        else journal.copy()
+    if len(df) and max_dist_atr is not None and "landing_dist_atr" in df.columns:
         df = df[df["landing_dist_atr"] <= max_dist_atr]
-    df["landing_ma"] = df["landing_ma"].fillna("").replace("", "（線なし）")
+    if len(df):
+        df["landing_ma"] = df["landing_ma"].fillna("").replace("", NO_LINE)
 
-    rows = []
-    for name, g in df.groupby("landing_ma", sort=False):
-        resolved = g[g["success"].notna()] if "success" in g.columns else g.iloc[0:0]
-        rows.append({
-            "landing_ma": name,
-            "n": int(len(g)),
-            "n_resolved": int(len(resolved)),
-            "success_rate": _rate(resolved, "success"),
-            "broke_lp_rate": _rate(resolved, "broke_lp"),
-            "recovered_sma5_rate": _rate(resolved, "recovered_sma5"),
-            "mean_ret_h": float(resolved["ret_h"].mean()) if len(resolved) and "ret_h" in resolved else np.nan,
-        })
-    out = pd.DataFrame(rows)
-    order = {"SMA5": 0, "SMA25": 1, "SMA75": 2, "SMA200": 3}
-    out = out.sort_values("landing_ma", key=lambda s: s.map(lambda v: order.get(v, 99)))
-    return out.reset_index(drop=True)
+    groups = {name: g for name, g in df.groupby("landing_ma", sort=False)} if len(df) else {}
+    # 4 本は常に出す。線が取れなかった記録がある日だけ NO_LINE を末尾に足す
+    names = list(LANDING_MA_NAMES) + ([NO_LINE] if NO_LINE in groups else [])
+    rows = [_summary_row(name, groups.get(name, df.iloc[0:0])) for name in names]
+    return pd.DataFrame(rows, columns=SUMMARY_COLS)
 
 
 def _rate(df: pd.DataFrame, col: str) -> float:
