@@ -62,6 +62,22 @@ DELIVERED_COLS = CORE_COLS + EXTRA_COLS
 DATE_COLS = ["delivered_on", "asof", "lp_date", "h0_date", "prev_delivered_on"]
 
 
+def as_calendar_date(ts) -> pd.Timestamp:
+    """カレンダー日（tz なしの日付）に揃える。
+
+    配信日は「JST のその日」であって時刻ではない。`cli._now()` は tz 付き（JST）の
+    Timestamp を返すが、配信記録のファイル名から復元する日付は tz なしになる。
+    両者をそのまま比べると `Cannot compare tz-naive and tz-aware timestamps` になるため
+    （2026-09-02 の実行で発生）、日付を扱う入口でここに通して揃える。
+
+    tz 付きの場合は現地の壁時計の日付をそのまま採る（UTC に直さない）。
+    """
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    return ts.normalize()
+
+
 def build_record(ticker: str, high: pd.Series, low: pd.Series, close: pd.Series,
                  pullback_result: dict, t_pos: int, delivered_on,
                  name: str = "", extra: Optional[dict] = None) -> dict:
@@ -90,7 +106,7 @@ def build_record(ticker: str, high: pd.Series, low: pd.Series, close: pd.Series,
 
     h0 = pullback_result.get("h0")
     return {
-        "delivered_on": pd.Timestamp(delivered_on).normalize(),
+        "delivered_on": as_calendar_date(delivered_on),
         "asof": pd.Timestamp(idx[t_pos]).normalize(),
         "ticker": ticker,
         "name": name,
@@ -128,7 +144,7 @@ def records_to_frame(records: Iterable[dict]) -> pd.DataFrame:
 
 
 def delivered_path(daily_dir: Path, delivered_on) -> Path:
-    d = pd.Timestamp(delivered_on).strftime("%Y-%m-%d")
+    d = as_calendar_date(delivered_on).strftime("%Y-%m-%d")
     return Path(daily_dir) / f"{DELIVERED_PREFIX}{d}{DELIVERED_SUFFIX}"
 
 
@@ -220,7 +236,7 @@ def lookback_stats(daily_dir: Path, tickers, delivered_on,
     if not tickers:
         return streak, prev_seen
 
-    delivered_on = pd.Timestamp(delivered_on).normalize()
+    delivered_on = as_calendar_date(delivered_on)
     past = [(d, f) for d, f in list_delivered(daily_dir) if d < delivered_on]
     past.sort(key=lambda x: x[0], reverse=True)
 
