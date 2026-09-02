@@ -17,6 +17,7 @@ from stockbot.features.swings import alternate_swings, detect_raw_swings
 from stockbot.screener.record import (
     DELIVERED_COLS,
     build_record,
+    delivered_path,
     list_delivered,
     load_delivered,
     records_to_frame,
@@ -265,3 +266,63 @@ class LookbackStatsTest(unittest.TestCase):
         df = records_to_frame([rec])
         self.assertEqual(int(df["streak"].iloc[0]), 1)
         self.assertTrue(pd.isna(df["prev_delivered_on"].iloc[0]))
+
+
+class TimezoneTest(unittest.TestCase):
+    """配信日は tz 付き（JST）で渡される（cli._now()）。
+
+    2026-09-02 の実行で `Cannot compare tz-naive and tz-aware timestamps` が出て
+    screen が落ちた回帰テスト。ファイル名から復元する日付は tz なしなので、
+    tz 付きのまま比較すると TypeError になる。
+    """
+
+    def _aware(self, s):
+        return pd.Timestamp(s, tz="Asia/Tokyo")
+
+    def test_as_calendar_date_strips_tz_keeping_local_date(self):
+        from stockbot.screener.record import as_calendar_date
+        # JST の 09-02 08:48（= UTC では 09-01）。壁時計の日付 09-02 を採る
+        aware = pd.Timestamp("2026-09-02 08:48", tz="Asia/Tokyo")
+        d = as_calendar_date(aware)
+        self.assertIsNone(d.tzinfo)
+        self.assertEqual(d, pd.Timestamp("2026-09-02"))
+
+    def test_as_calendar_date_passes_naive_through(self):
+        from stockbot.screener.record import as_calendar_date
+        self.assertEqual(as_calendar_date("2026-09-02"), pd.Timestamp("2026-09-02"))
+        self.assertEqual(as_calendar_date(pd.Timestamp("2026-09-02 15:30")),
+                         pd.Timestamp("2026-09-02"))
+
+    def test_lookback_stats_accepts_tz_aware(self):
+        from stockbot.screener.record import lookback_stats
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            LookbackStatsTest()._write(daily, "2026-09-01", ["1234.T"])
+            streak, prev = lookback_stats(daily, ["1234.T"], self._aware("2026-09-02 08:48"))
+            self.assertEqual(streak["1234.T"], 2)
+            self.assertEqual(prev["1234.T"], pd.Timestamp("2026-09-01"))
+
+    def test_build_record_and_paths_accept_tz_aware(self):
+        rec, _pb, _c = TestBuildRecord()._record()
+        rec = dict(rec)
+        aware = self._aware("2026-09-02 08:48")
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self.assertEqual(delivered_path(daily, aware).name, "delivered_2026-09-02.csv")
+            rec["delivered_on"] = aware
+            path = save_delivered(records_to_frame([rec]), daily, aware)
+            self.assertEqual(path.name, "delivered_2026-09-02.csv")
+            back = load_delivered(path)
+            self.assertEqual(back["delivered_on"].iloc[0], pd.Timestamp("2026-09-02"))
+
+    def test_build_record_stores_naive_delivered_on(self):
+        _o, high, low, close = make_series()
+        t_pos = len(close) - 1
+        from stockbot.features.indicators import atr_wilder as _atr
+        alt = alternate_swings(detect_raw_swings(high, low, K))
+        pb = pullback_state(high, low, close, sma(close, 5), sma(close, 200),
+                            _atr(high, low, close, 14), alt, t_pos, K)
+        rec = build_record("1234.T", high, low, close, pb, t_pos,
+                           delivered_on=self._aware("2026-09-02 08:48"))
+        self.assertIsNone(rec["delivered_on"].tzinfo)
+        self.assertEqual(rec["delivered_on"], pd.Timestamp("2026-09-02"))

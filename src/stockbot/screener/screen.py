@@ -18,6 +18,7 @@ import pandas as pd
 from ..features import pullback, swings
 from ..features.dimensions import LANDING_MA_NAMES
 from ..features.indicators import atr_wilder, sma
+from .record import as_calendar_date
 from .conditions import (
     CONDITION_IDS,
     DIAGNOSTIC_COLS,
@@ -219,8 +220,8 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
     """
     gauge = gauge or {}
     return {
-        "delivered_on": pd.Timestamp(delivered_on).strftime("%Y-%m-%d"),
-        "asof": pd.Timestamp(asof).strftime("%Y-%m-%d") if asof is not None else None,
+        "delivered_on": as_calendar_date(delivered_on).strftime("%Y-%m-%d"),
+        "asof": as_calendar_date(asof).strftime("%Y-%m-%d") if asof is not None else None,
         # 地合いゲージ（DESIGN.md §8.1 の6点）。順位にも条件にも使わない。配信の見出し用
         "regime_level": gauge.get("level"),
         "regime_score": gauge.get("score"),
@@ -241,7 +242,7 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
 
 
 def summary_path(daily_dir: Path, delivered_on) -> Path:
-    d = pd.Timestamp(delivered_on).strftime("%Y-%m-%d")
+    d = as_calendar_date(delivered_on).strftime("%Y-%m-%d")
     return Path(daily_dir) / f"{SUMMARY_PREFIX}{d}{SUMMARY_SUFFIX}"
 
 

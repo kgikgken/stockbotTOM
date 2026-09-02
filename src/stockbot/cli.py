@@ -453,7 +453,9 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
         f"{screen.format_counts(screen.landing_ma_breakdown(candidates), sort=False)}")
 
     name_by_ticker = dict(zip(universe["ticker"], universe["name"].fillna("")))
-    delivered_on = _now().normalize()
+    # 配信日は「JST のその日」というカレンダー日であって時刻ではない。tz を落として
+    # 過去の配信記録（ファイル名由来で tz なし）と比較できるようにする
+    delivered_on = record.as_calendar_date(_now())
     # 連続点灯日数と前回点灯日は、過去の配信記録から記録時点で確定させる（§3.2）
     streaks, prev_seen = record.lookback_stats(
         cfg.daily_dir, [str(t) for t in candidates["ticker"]], delivered_on)
@@ -522,7 +524,7 @@ def step_notify(cfg: Settings, log=print) -> dict:
     送信はしない。
     """
     cfg.ensure_dirs()
-    delivered_on = _now().normalize()
+    delivered_on = record.as_calendar_date(_now())
     summary_path = screen.summary_path(cfg.daily_dir, delivered_on)
     if not summary_path.exists():
         log(f"[notify] {summary_path.name} が無いためスキップ（先に screen を実行）")
