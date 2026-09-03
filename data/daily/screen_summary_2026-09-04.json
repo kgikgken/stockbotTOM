@@ -1,0 +1,47 @@
+{
+ "delivered_on": "2026-09-04",
+ "asof": "2026-09-03",
+ "regime_level": "強",
+ "regime_score": 6,
+ "n_evaluated": 1327,
+ "fetch_ok": 1641,
+ "fetch_total": 1642,
+ "n_pool": 5,
+ "n_candidates": 5,
+ "earnings_known": 33,
+ "earnings_coverage": 0.0249,
+ "e1_skipped": true,
+ "e1_threshold": null,
+ "fail_counts": {
+  "A1": 204,
+  "A2": 14,
+  "A3": 0,
+  "A4": 10,
+  "B1": 494,
+  "B2": 289,
+  "B3": 409,
+  "B4": 369,
+  "C1": 1061,
+  "C2": 668,
+  "C3": 1003,
+  "C4": 296,
+  "D1": 994,
+  "D2": 1150,
+  "D3": 946,
+  "D4": 708,
+  "E2": 128,
+  "E3": 914
+ },
+ "landing_ma_all": {
+  "SMA5": 473,
+  "SMA25": 321,
+  "SMA75": 214,
+  "SMA200": 249
+ },
+ "landing_ma_candidates": {
+  "SMA5": 3,
+  "SMA25": 2,
+  "SMA75": 0,
+  "SMA200": 0
+ }
+}
