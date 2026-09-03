@@ -118,7 +118,7 @@ def evaluate_universe(
     # pipeline.py の「ゲート落ちの内訳」と同じ趣旨（複数条件に同時該当しうる）
     fails = fail_counts(out)
     log(f"[screen] 評価 {n_evaluated} 銘柄 / 18条件通過 {n_pool} 件")
-    log(f"[screen] 条件別の不成立件数（多い順）: {format_counts(fails)}")
+    log(f"[screen] 条件別の不成立件数（延べ・多い順）: {format_counts(fails)}")
     # D4 を掛ける前の「どの線で止まったか」。SMA200 は D4 で落ちるので、
     # ここに出る SMA200 の件数が D4 が捨てている分になる
     log(f"[screen] 止まった線の内訳（押し目構造がある銘柄・D4適用前）: "

@@ -129,6 +129,14 @@ class HeaderTest(unittest.TestCase):
         self.assertIn("E1", text)
         self.assertIn("未適用", text)
 
+    def test_no_e1_line_on_zero_candidate_day(self):
+        """候補0件の日は E1 の注記を出さない。適用する対象がそもそも無い（§4.2）。"""
+        text = build_message(frame([]), make_summary(n_candidates=0, n_pool=0,
+                                                     e1_skipped=True))
+        self.assertNotIn("未適用", text)
+        self.assertNotIn("母集団", text)
+        self.assertIn("候補 0件", text)
+
     def test_no_e1_line_when_applied(self):
         text = build_message(frame([make_record(e1_skipped=False)]),
                              make_summary(e1_skipped=False, n_pool=25))
@@ -146,6 +154,14 @@ class ZeroCandidateTest(unittest.TestCase):
         text = build_message(frame([]), make_summary(n_candidates=0, n_pool=0))
         self.assertIn("候補 0件", text)
         self.assertIn("19条件を全て満たす銘柄がありませんでした", text)
+
+    def test_fail_counts_are_labelled_as_cumulative(self):
+        """1銘柄が複数条件で落ちるので合計は評価銘柄数を超える。「延べ」と明記する。"""
+        s = make_summary(n_candidates=0)
+        text = build_message(frame([]), s)
+        self.assertIn("延べ件数", text)
+        total = sum(s["fail_counts"].values())
+        self.assertGreater(total, s["n_evaluated"])   # 実際に超えている
 
     def test_top_three_failed_conditions(self):
         text = build_message(frame([]), make_summary(n_candidates=0))

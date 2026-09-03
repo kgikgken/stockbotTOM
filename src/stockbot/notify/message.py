@@ -56,7 +56,9 @@ def _header(summary: dict, n_candidates: int) -> list[str]:
         f"（判定 {summary.get('asof', '')} の引け）",
         f"地合い {gauge} ／ 候補 {n_candidates}件",
     ]
-    if summary.get("e1_skipped"):
+    # 候補0件の日は E1 の注記を出さない。母集団も0なので「未適用」は正しいが、
+    # 適用する対象がそもそも無い日にこれを出すと E1 が壊れているように読める
+    if n_candidates and summary.get("e1_skipped"):
         lines.append(f"※ E1（相対力の上位10%除外）は母集団 {summary.get('n_pool', 0)}件"
                      "のため本日は未適用")
     return lines
@@ -91,7 +93,10 @@ def _zero_day(summary: dict) -> list[str]:
     fails = summary.get("fail_counts") or {}
     if fails:
         top = sorted(fails.items(), key=lambda kv: -kv[1])[:TOP_FAILS]
-        lines.append(f"落ちた条件（評価 {summary.get('n_evaluated', 0)}銘柄・多い順）:")
+        # 1銘柄が複数の条件で落ちるので、合計は評価銘柄数を超える。「延べ」と明記しないと
+        # 数字が矛盾しているように読める
+        lines.append(f"落ちた条件（評価 {summary.get('n_evaluated', 0):,}銘柄・"
+                     "延べ件数・多い順）:")
         for cid, n in top:
             lines.append(f"   {cid} {CONDITION_LABELS.get(cid, '')} … {n:,}件")
     return lines
