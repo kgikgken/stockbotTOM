@@ -13,5 +13,7 @@ data/replay/
 # 物理的に分離する（2026-08-26 実行条件の指示: 出力は主評価窓と別アーティファクトに）
 data/replay_robustness/
 data/layer1/
+# 画像カードの中間出力（HTML と PNG）。配信したら用済みなので git に入れない
+data/render/
 # DRYRUN の出力先（config.py: dryrun 時の既定 DATA_DIR）。本番 data/ とは物理的に分離する
 data-dryrun/

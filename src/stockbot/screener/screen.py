@@ -118,7 +118,7 @@ def evaluate_universe(
     # pipeline.py の「ゲート落ちの内訳」と同じ趣旨（複数条件に同時該当しうる）
     fails = fail_counts(out)
     log(f"[screen] 評価 {n_evaluated} 銘柄 / 18条件通過 {n_pool} 件")
-    log(f"[screen] 条件別の不成立件数（多い順）: {format_counts(fails)}")
+    log(f"[screen] 条件別の不成立件数（延べ・多い順）: {format_counts(fails)}")
     # D4 を掛ける前の「どの線で止まったか」。SMA200 は D4 で落ちるので、
     # ここに出る SMA200 の件数が D4 が捨てている分になる
     log(f"[screen] 止まった線の内訳（押し目構造がある銘柄・D4適用前）: "
@@ -212,13 +212,15 @@ def _earnings_coverage(evaluated: pd.DataFrame) -> Optional[float]:
 
 
 def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
-                  asof, delivered_on, gauge: Optional[dict] = None) -> dict:
+                  asof, delivered_on, gauge: Optional[dict] = None,
+                  fetch_meta: Optional[dict] = None) -> dict:
     """その日のスクリーニングの要約（docs/SCREENER.md §3.6）。
 
     Actions のログは 90 日で消えるが、E1 のスキップ率や条件別の不成立件数は
     数週間から数か月かけて見るものなので、リポジトリ側に残す。
     """
     gauge = gauge or {}
+    fetch_meta = fetch_meta or {}
     return {
         "delivered_on": as_calendar_date(delivered_on).strftime("%Y-%m-%d"),
         "asof": as_calendar_date(asof).strftime("%Y-%m-%d") if asof is not None else None,
@@ -226,6 +228,9 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
         "regime_level": gauge.get("level"),
         "regime_score": gauge.get("score"),
         "n_evaluated": int(len(evaluated)),
+        # 取得成功率（配信の健全性ブロック用、§4.5）。fetch_meta.json から畳む
+        "fetch_ok": fetch_meta.get("data_ok"),
+        "fetch_total": fetch_meta.get("data_total"),
         "n_pool": int(meta.get("e1_pool_n", 0)),
         "n_candidates": int(len(candidates)),
         # A4（決算）のカバー率。JPX のローリング更新は決算期の谷間でほぼ空になるので、
