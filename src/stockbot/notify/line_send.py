@@ -1,8 +1,11 @@
 """LINE への push（docs/SCREENER.md §4.1）。
 
-既存の Cloudflare Worker（`src/worker.js`）をそのまま使う。Worker は
-`POST /`（JSON `{"text": ...}`）でテキストを LINE に push する。**Worker・
-`wrangler.toml`・Secrets 名は変更しない**（CLAUDE.md「LINE 経路を変えない」）。
+既存の Cloudflare Worker（`src/worker.js`）をそのまま使う。**Worker・`wrangler.toml`・
+Secrets 名は変更しない**（CLAUDE.md「LINE 経路を変えない」）。使う口は 2 つ。
+
+- `POST /`        … JSON `{"text": ...}` でテキストを push（画像が作れない日のフォールバック）
+- `POST /upload`  … multipart `{file, caption?}` で画像を R2 に置き、その URL を LINE に
+                    image push する。**1 リクエストにつき 1 枚**なので、2 枚組は 2 回投げる
 
 環境変数:
 - `WORKER_URL`        … Worker のエンドポイント。未設定なら送信せずスキップする
@@ -56,6 +59,10 @@ def push_text(text: str, url: Optional[str] = None, token: Optional[str] = None,
         headers["Authorization"] = f"Bearer {token}"
 
     r = post(url, json={"text": text}, headers=headers, timeout=timeout)
+    return _result(r)
+
+
+def _result(r) -> dict:
     status = int(getattr(r, "status_code", 0))
     ok = 200 <= status < 300
     body = ""
@@ -65,3 +72,40 @@ def push_text(text: str, url: Optional[str] = None, token: Optional[str] = None,
         pass
     return {"sent": ok, "status": status,
             "reason": "送信成功" if ok else f"Worker が {status} を返した: {body}"}
+
+
+def push_image(path, caption: str = "", url: Optional[str] = None,
+               token: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT,
+               post=None) -> dict:
+    """Worker の /upload に画像を1枚 push する（docs/SCREENER.md §4.5）。
+
+    Worker は multipart の `file` を R2 に置き、その公開 URL を LINE に image push する。
+    caption を付けるとテキストが先に 1 通流れる（2 枚組では 1 枚目にだけ付ける想定）。
+
+    戻り値は push_text と同じ形。URL 未設定は「送らなかった」であって失敗ではない。
+    """
+    from pathlib import Path as _Path
+
+    url = url or worker_url()
+    if not url:
+        return {"sent": False, "status": None, "reason": "WORKER_URL 未設定のため送信しない"}
+    path = _Path(path)
+    if not path.exists():
+        return {"sent": False, "status": None, "reason": f"画像が無い: {path}"}
+
+    if post is None:
+        import requests  # 遅延 import
+
+        post = requests.post
+
+    headers = {}
+    token = token if token is not None else auth_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    endpoint = url.rstrip("/") + "/upload"
+    with path.open("rb") as fh:
+        files = {"file": (path.name, fh, "image/png")}
+        data = {"caption": caption} if caption else {}
+        r = post(endpoint, files=files, data=data, headers=headers, timeout=timeout)
+    return _result(r)

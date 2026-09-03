@@ -1,0 +1,173 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>順張り押し目スクリーナー</title>
+<style>
+  :root {
+    --ink: #3a2f28; --muted: #7a6a5e; --line: #e3d9cd; --paper: #fdfaf4;
+    --card: #ffffff; --accent: #8a5a3b; --warn: #c0392b; --ok: #2e7d5b;
+    --band: #4a3a30;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #eee6da; font-family: "Noto Sans CJK JP", "Noto Sans JP",
+         "Hiragino Sans", "Yu Gothic", "Unifont-JP", "WenQuanYi Zen Hei", sans-serif;
+         color: var(--ink); -webkit-font-smoothing: antialiased; }
+  .page { width: 960px; background: var(--paper); padding: 22px 24px 18px; }
+  .hero { position: relative; border-radius: 14px; overflow: hidden; margin-bottom: 14px;
+          background: #d9cbb8; }
+  .hero img.bg { width: 100%; height: 132px; object-fit: cover; display: block; opacity: .55; }
+  .hero .band { position: absolute; left: 16px; top: 18px; display: flex; align-items: center;
+                gap: 10px; background: var(--band); color: #fff; padding: 9px 18px 9px 10px;
+                border-radius: 999px; }
+  .hero .band img { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; }
+  .hero .band b { font-size: 19px; letter-spacing: .04em; }
+  .datebadge { position: absolute; left: 16px; bottom: 14px; background: #fff;
+               border: 1px solid var(--line); border-radius: 8px; padding: 5px 12px;
+               font-size: 15px; font-weight: 700; }
+
+  .box { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+         padding: 12px 14px; margin-bottom: 12px; }
+  .box.regime { border: 2px solid #e6b8b0; background: #fdf3f1; }
+  .box h3 { font-size: 17px; margin-bottom: 4px; }
+  .box .sub { font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+          padding: 12px 14px; margin-bottom: 11px; }
+  .card .top { display: flex; align-items: baseline; gap: 9px; margin-bottom: 2px; }
+  .card .num { background: var(--band); color: #fff; width: 24px; height: 24px;
+               border-radius: 50%; display: inline-flex; align-items: center;
+               justify-content: center; font-size: 13px; flex: none; }
+  .card .code { font-size: 20px; font-weight: 700; }
+  .card .name { font-size: 19px; font-weight: 700; }
+  .tag { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: #f3e7d8;
+         color: var(--accent); font-weight: 700; }
+  .tag.streak { background: #e8f1ec; color: var(--ok); }
+  .card .meta { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+  .vals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-bottom: 8px; }
+  .val { border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; }
+  .val .k { font-size: 11.5px; color: var(--muted); }
+  .val .v { font-size: 17px; font-weight: 700; margin-top: 1px; }
+  .val .g { font-size: 11.5px; color: var(--muted); }
+  .val.stop { border-color: #e6c3bd; background: #fdf6f5; }
+  .val.stop .v { color: var(--warn); }
+  .val.target { border-color: #c6ddcd; background: #f4faf6; }
+  .val.target .v { color: var(--ok); }
+  .row { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); }
+  .row .em { color: var(--ink); font-weight: 700; }
+  .row .warn { color: var(--warn); font-weight: 700; }
+  .exit { margin-top: 7px; font-size: 12.5px; color: var(--accent); font-weight: 700; }
+
+  .zero { text-align: center; padding: 20px 12px; }
+  .zero .lead { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
+  .zero table { margin: 0 auto; border-collapse: collapse; font-size: 14px; }
+  .zero td { padding: 4px 12px; }
+  .zero td.n { text-align: right; font-weight: 700; }
+  .foot { font-size: 12px; color: var(--muted); line-height: 1.7; border-top: 1px solid var(--line);
+          padding-top: 9px; margin-top: 4px; }
+
+  .sumlist .item { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line);
+                   border-radius: 11px; padding: 12px 14px; margin-bottom: 9px; background: var(--card); }
+  .sumlist .item .code { font-size: 21px; font-weight: 700; }
+  .sumlist .item .name { font-size: 20px; font-weight: 700; }
+</style>
+
+{% macro header(title) %}
+<div class="hero">
+  {% if hero %}<img class="bg" src="{{ hero }}" alt="">{% endif %}
+  <div class="band">{% if mascot %}<img src="{{ mascot }}" alt="">{% endif %}<b>{{ title }}</b></div>
+  <div class="datebadge">{{ ctx.delivered_on }}（判定 {{ ctx.asof }} の引け）</div>
+</div>
+<div class="box regime">
+  <h3>地合い {{ ctx.regime.text }} ／ 本日の候補 {{ ctx.n_candidates }}件</h3>
+  {% if ctx.e1_note %}<div class="sub">※ {{ ctx.e1_note }}</div>{% endif %}
+</div>
+{% endmacro %}
+
+<div class="page" id="page1">
+  {{ header("順張り押し目スクリーニング") }}
+
+  <div class="box">
+    <h3 style="font-size:15px">データの状況</h3>
+    <div class="sub">
+      取得成功率 {{ ctx.health.fetch_text }} ／ 判定対象 {{ "{:,}".format(ctx.health.n_evaluated) }}銘柄<br>
+      決算発表予定日が取れた銘柄 {{ ctx.health.earnings_text }}<br>
+      <span style="color:var(--warn);font-weight:700">{{ ctx.health.earnings_note }}</span>
+    </div>
+  </div>
+
+  {% if ctx.cards %}
+    {% for c in ctx.cards %}
+    <div class="card">
+      <div class="top">
+        <span class="num">{{ c.rank }}</span>
+        <span class="code">{{ c.ticker }}</span>
+        <span class="name">{{ c.name }}</span>
+        <span class="tag">{{ c.state }}</span>
+        {% if c.streak %}<span class="tag streak">{{ c.streak }}</span>{% endif %}
+      </div>
+      <div class="meta">{{ c.sector33 }}</div>
+      <div class="vals">
+        <div class="val">
+          <div class="k">終値</div><div class="v">{{ c.close }}円</div>
+          <div class="g">止まった線 {{ c.landing_ma }}（{{ c.landing_dist }}）</div>
+        </div>
+        <div class="val stop">
+          <div class="k">撤退ライン（押し安値）</div><div class="v">{{ c.lp }}円</div>
+          <div class="g">終値から {{ c.lp_gap }}</div>
+        </div>
+        <div class="val target">
+          <div class="k">目標の目安（直近高値）</div><div class="v">{{ c.h0_high }}円</div>
+          <div class="g">終値から {{ c.h0_gap }}</div>
+        </div>
+        <div class="val">
+          <div class="k">押しの深さ</div><div class="v">{{ c.depth }}</div>
+          <div class="g">押し目 {{ c.pullback_days }}</div>
+        </div>
+      </div>
+      <div class="row">
+        <span>20日平均売買代金 <span class="em">{{ c.adv }}</span></span>
+        <span>{% if c.earnings.unknown %}<span class="warn">{{ c.earnings.text }}</span>
+              {% else %}<span class="em">{{ c.earnings.text }}</span>{% endif %}</span>
+      </div>
+      <div class="exit">出口: {{ c.exit_rule }}</div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="box zero">
+      <div class="lead">本日は19条件を全て満たす銘柄がありませんでした。</div>
+      <table>
+        {% for r in ctx.zero_day.rows %}
+        <tr><td>{{ r.cid }}</td><td>{{ r.label }}</td>
+            <td class="n">{{ "{:,}".format(r.n) }}件</td></tr>
+        {% endfor %}
+      </table>
+      <div class="sub" style="margin-top:9px">
+        落ちた条件の上位{{ ctx.zero_day.rows|length }}件（評価 {{ "{:,}".format(ctx.zero_day.n_evaluated) }}銘柄・延べ件数・多い順）。
+        1銘柄が複数の条件で落ちるため、合計は評価銘柄数を超えます。
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="foot">
+    {{ ctx.order_note }}<br>{{ ctx.disclaimer }}
+  </div>
+</div>
+
+<div class="page" id="page2">
+  {{ header("本日のまとめ") }}
+  {% if ctx.cards %}
+  <div class="sumlist">
+    {% for c in ctx.cards %}
+    <div class="item">
+      <span class="num" style="background:var(--band);color:#fff;width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:13px">{{ c.rank }}</span>
+      <span class="code">{{ c.ticker }}</span>
+      <span class="name">{{ c.name }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="box zero"><div class="lead">本日の候補はありません。</div>
+    <div class="sub">落ちた条件の内訳は1枚目を参照。</div></div>
+  {% endif %}
+  <div class="foot">詳細（撤退ライン・目標の目安・深さ・決算）は1枚目を参照。<br>{{ ctx.disclaimer }}</div>
+</div>

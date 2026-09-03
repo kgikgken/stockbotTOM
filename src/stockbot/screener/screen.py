@@ -212,13 +212,15 @@ def _earnings_coverage(evaluated: pd.DataFrame) -> Optional[float]:
 
 
 def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
-                  asof, delivered_on, gauge: Optional[dict] = None) -> dict:
+                  asof, delivered_on, gauge: Optional[dict] = None,
+                  fetch_meta: Optional[dict] = None) -> dict:
     """その日のスクリーニングの要約（docs/SCREENER.md §3.6）。
 
     Actions のログは 90 日で消えるが、E1 のスキップ率や条件別の不成立件数は
     数週間から数か月かけて見るものなので、リポジトリ側に残す。
     """
     gauge = gauge or {}
+    fetch_meta = fetch_meta or {}
     return {
         "delivered_on": as_calendar_date(delivered_on).strftime("%Y-%m-%d"),
         "asof": as_calendar_date(asof).strftime("%Y-%m-%d") if asof is not None else None,
@@ -226,6 +228,9 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
         "regime_level": gauge.get("level"),
         "regime_score": gauge.get("score"),
         "n_evaluated": int(len(evaluated)),
+        # 取得成功率（配信の健全性ブロック用、§4.5）。fetch_meta.json から畳む
+        "fetch_ok": fetch_meta.get("data_ok"),
+        "fetch_total": fetch_meta.get("data_total"),
         "n_pool": int(meta.get("e1_pool_n", 0)),
         "n_candidates": int(len(candidates)),
         # A4（決算）のカバー率。JPX のローリング更新は決算期の谷間でほぼ空になるので、

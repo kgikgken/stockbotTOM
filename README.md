@@ -10,8 +10,7 @@
 | データ基盤 | 取得・整合性検査・保存・スナップショット・ユニバース（`data-daily` が毎営業日実行） | 完了 |
 | 記録 | 配信記録と 5 営業日後の結果付け（`docs/SCREENER.md` §3） | 完了 |
 | 条件 | 19 条件のブール判定（`docs/SCREENER.md` §2） | 完了 |
-| LINE 配信 | テキスト配信（`docs/SCREENER.md` §4） | 完了 |
-| 画像カード | 既存デザイン踏襲の描画（SPEC.md §5） | 未着手 |
+| LINE 配信 | 画像カード2枚（`docs/SCREENER.md` §4）。描画失敗時はテキスト | 完了 |
 
 ```bash
 python -m stockbot.cli daily      # 取得 → 保存 → スナップショット → ユニバース → 日次特徴量

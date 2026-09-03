@@ -44,6 +44,7 @@ from .pipeline import (
     save_daily_features,
 )
 from .notify import line_send, message
+from .render import render as render_images_mod
 from .screener import record, resolver, screen
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
@@ -492,7 +493,17 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     # Actions のログは 90 日で消える。E1 のスキップ率や条件別の不成立件数は
     # 数週間かけて見るものなので、リポジトリ側にも残す（docs/SCREENER.md §3.6）
     asof = evaluated["date"].max() if len(evaluated) else None
-    summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on, gauge)
+    # 取得成功率は fetch_meta.json（step_fetch が書く）から。描画側は screen_summary と
+    # delivered しか読まないので、必要な値はここで要約に畳んでおく（docs/SCREENER.md §4.5）
+    fetch_meta = {}
+    fm = cfg.store_dir / "fetch_meta.json"
+    if fm.exists():
+        try:
+            fetch_meta = json.loads(fm.read_text())
+        except (OSError, ValueError):
+            fetch_meta = {}
+    summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on, gauge,
+                                   fetch_meta=fetch_meta)
     screen.save_summary(summary, cfg.daily_dir, delivered_on)
     return delivered
 
@@ -536,13 +547,33 @@ def step_notify(cfg: Settings, log=print) -> dict:
 
     text = message.build_message(delivered, summary)
     n = 0 if delivered is None else len(delivered)
-    log(f"[notify] 本文 {len(text)}文字 / 候補 {n}件")
+    log(f"[notify] 候補 {n}件 / テキスト {len(text)}文字")
+
+    images = []
+    try:
+        images = render_images_mod.render_images(
+            delivered, summary, cfg.data_dir / "render", stem=f"screen_{delivered_on:%Y-%m-%d}")
+        log(f"[notify] 画像 {len(images)}枚を作成: {[p.name for p in images]}")
+    except Exception as e:   # Chromium 無し・フォント無し・起動失敗のいずれでも落とさない
+        log(f"[notify] 画像の作成に失敗（テキストに切り替える）: {type(e).__name__}: {e}")
+
+    if images:
+        results = []
+        for i, path in enumerate(images):
+            # キャプションは1枚目にだけ付ける（2枚とも付けるとテキストが2通流れる）
+            res = line_send.push_image(path, caption=text if i == 0 else "")
+            log(f"[notify] 画像{i + 1}: {res['reason']}")
+            results.append(res)
+        if all(r["sent"] for r in results):
+            return {"sent": True, "status": 200,
+                    "reason": f"画像{len(results)}枚を送信", "mode": "image"}
+        log("[notify] 画像の送信に失敗したためテキストに切り替える")
+
     for line in text.splitlines():
         log(f"[notify]   {line}")
-
     result = line_send.push_text(text)
     log(f"[notify] {result['reason']}")
-    return result
+    return {**result, "mode": "text"}
 
 
 # ------------------------------------------------------------------ main

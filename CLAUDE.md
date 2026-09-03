@@ -52,7 +52,7 @@
     features/    indicators.py  swings.py  pullback.py  dimensions.py  regime.py
     scoring/     composite.py  template.py  ranking.py
     validation/  labels.py  replay.py  layer1.py  report.py  calibration.py
-    render/      template.html  render.py  assets/（画像カード。未実装）
+    render/      context.py  template.html  render.py
   tests/
   docs/
   data/  (reference/ daily/ universe/ をコミット、store/ は除外)
