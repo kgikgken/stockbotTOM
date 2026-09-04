@@ -17,13 +17,17 @@ from stockbot.screener.screen import (
     E1_MIN_POOL,
     SCREEN_COLS,
     SECTOR_CAP,
+    adv_stats,
     apply_e1,
     build_summary,
     evaluate_universe,
     fail_counts,
     format_counts,
     landing_ma_breakdown,
+    latest_summary,
+    list_summaries,
     save_summary,
+    sector_breakdown,
     select_candidates,
     summary_path,
 )
@@ -222,9 +226,10 @@ class MonitoringTest(unittest.TestCase):
         self.assertEqual(sum(summary["landing_ma_all"].values()), 20)
 
         with tempfile.TemporaryDirectory() as tmp:
-            path = save_summary(summary, Path(tmp), pd.Timestamp("2026-08-31"))
-            self.assertEqual(path.name, "screen_summary_2026-08-31.json")
-            self.assertEqual(path, summary_path(Path(tmp), pd.Timestamp("2026-08-31")))
+            path = save_summary(summary, Path(tmp), pd.Timestamp("2026-08-31"), pd.Timestamp("2026-08-28"))
+            self.assertEqual(path.name, "screen_summary_2026-08-31_asof2026-08-28.json")
+            self.assertEqual(path, summary_path(Path(tmp), pd.Timestamp("2026-08-31"),
+                                                pd.Timestamp("2026-08-28")))
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), summary)
 
     def test_summary_records_e1_skip(self):
@@ -241,3 +246,77 @@ class MonitoringTest(unittest.TestCase):
         self.assertIsNone(summary["asof"])
         self.assertEqual(summary["n_candidates"], 0)
         self.assertTrue(summary["e1_skipped"])
+
+
+class SectorAndAdvSummaryTest(unittest.TestCase):
+    """候補の業種内訳と売買代金の分布（docs/SCREENER.md §3.6）。
+
+    集計するだけで、条件にも並び順にも使わない。業種上限3件・A1 の 3 億円は変えない。
+    """
+
+    def _candidates(self):
+        return pd.DataFrame({
+            "ticker": ["6301.T", "7550.T", "7322.T", "8393.T", "8551.T"],
+            "sector33": ["機械", "小売業", "銀行業", "銀行業", "銀行業"],
+            "adv_jpy": [19016302950.0, 6598908375.0, 775440445.0,
+                        687048875.0, 358043250.0],
+        })
+
+    def test_sector_breakdown_is_ordered_by_count(self):
+        out = sector_breakdown(self._candidates())
+        self.assertEqual(list(out.items())[0], ("銀行業", 3))
+        self.assertEqual(out, {"銀行業": 3, "機械": 1, "小売業": 1})
+
+    def test_sector_breakdown_labels_missing_sector(self):
+        df = self._candidates().assign(sector33=["", "機械", "機械", "機械", "機械"])
+        self.assertEqual(sector_breakdown(df)["（未分類）"], 1)
+
+    def test_adv_stats_max_min_median(self):
+        out = adv_stats(self._candidates())
+        self.assertAlmostEqual(out["max"], 19016302950.0)
+        self.assertAlmostEqual(out["min"], 358043250.0)
+        self.assertAlmostEqual(out["median"], 775440445.0)
+
+    def test_zero_candidates_gives_empty_and_none(self):
+        empty = self._candidates().iloc[0:0]
+        self.assertEqual(sector_breakdown(empty), {})
+        self.assertEqual(adv_stats(empty), {"max": None, "min": None, "median": None})
+
+    def test_summary_carries_the_new_fields(self):
+        cands = self._candidates()
+        summary = build_summary(pd.DataFrame(columns=SCREEN_COLS), cands,
+                                {"e1_pool_n": 5, "e1_skipped": True},
+                                pd.Timestamp("2026-09-03"), pd.Timestamp("2026-09-04"))
+        self.assertEqual(summary["sector_candidates"]["銀行業"], 3)
+        self.assertAlmostEqual(summary["adv_candidates"]["median"], 775440445.0)
+        self.assertTrue(summary["delivered_written"])
+        self.assertEqual(summary["delivered_n"], 5)
+
+    def test_summary_records_that_the_ledger_was_not_written(self):
+        summary = build_summary(pd.DataFrame(columns=SCREEN_COLS), self._candidates(),
+                                {"e1_pool_n": 5, "e1_skipped": True},
+                                pd.Timestamp("2026-09-03"), pd.Timestamp("2026-09-04"),
+                                delivered_written=False, delivered_n=0)
+        self.assertFalse(summary["delivered_written"])
+        self.assertEqual(summary["delivered_n"], 0)
+
+
+class SummaryListingTest(unittest.TestCase):
+    def test_latest_summary_prefers_the_newer_asof_on_the_same_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            for asof in ("2026-09-02", "2026-09-03"):
+                save_summary({"asof": asof}, daily, "2026-09-03", asof)
+            found = latest_summary(daily, "2026-09-03")
+            self.assertEqual(found.asof, pd.Timestamp("2026-09-03"))
+            self.assertEqual(found.path.name,
+                             "screen_summary_2026-09-03_asof2026-09-03.json")
+            self.assertEqual(len(list_summaries(daily)), 2)
+
+    def test_old_style_summary_name_is_read_with_asof_from_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            (daily / "screen_summary_2026-09-01.json").write_text(
+                json.dumps({"asof": "2026-08-31"}), encoding="utf-8")
+            found = latest_summary(daily, "2026-09-01")
+            self.assertEqual(found.asof, pd.Timestamp("2026-08-31"))

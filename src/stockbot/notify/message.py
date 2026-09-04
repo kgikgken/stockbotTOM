@@ -15,9 +15,14 @@ import numpy as np
 import pandas as pd
 
 from ..screener.conditions import CONDITION_LABELS
+from ..screener.record import RECORD_MISMATCH_NOTE
 
 MAX_TEXT = 4900  # Worker 側で切られる上限（src/worker.js）。ここで超えないようにする
 TOP_FAILS = 3    # 候補0件の日に添える「落ちた条件」の件数
+
+# 通常は画像カード2枚だけを送る（§4.5）。この本文が流れるのは描画か送信に失敗した日
+# だけなので、受け取った側が「いつもと違う」と分かるように先頭で断る（§4.4）
+FALLBACK_NOTE = "画像生成に失敗（テキストで配信）"
 
 # 記録では SMA5 のような機械的な名前だが、配信では日本語で出す
 MA_LABELS = {"SMA5": "5日線", "SMA25": "25日線", "SMA75": "75日線", "SMA200": "200日線"}
@@ -47,15 +52,19 @@ def _earnings(row) -> str:
     return f"決算まで{int(days)}営業日"
 
 
-def _header(summary: dict, n_candidates: int) -> list[str]:
+def _header(summary: dict, n_candidates: int, fallback: bool = False) -> list[str]:
     level = summary.get("regime_level") or "不明"
     score = summary.get("regime_score")
     gauge = f"{level}（{score}/6）" if score is not None else level
-    lines = [
+    lines = [FALLBACK_NOTE] if fallback else []
+    lines += [
         f"順張り押し目 {summary.get('delivered_on', '')}"
         f"（判定 {summary.get('asof', '')} の引け）",
         f"地合い {gauge} ／ 候補 {n_candidates}件",
     ]
+    # 台帳に書けなかった日（想定外の衝突）。数字がどれを指すのか読み手に分かるようにする
+    if summary.get("delivered_written") is False:
+        lines.append(f"※ {RECORD_MISMATCH_NOTE}")
     # 候補0件の日は E1 の注記を出さない。母集団も0なので「未適用」は正しいが、
     # 適用する対象がそもそも無い日にこれを出すと E1 が壊れているように読める
     if n_candidates and summary.get("e1_skipped"):
@@ -106,17 +115,22 @@ DISCLAIMER = "この配信は監視候補の一覧です。売買の判断はご
 ORDER_NOTE = "並びは20日平均売買代金の降順です。順位ではありません。"
 
 
-def build_message(delivered: Optional[pd.DataFrame], summary: dict) -> str:
+def build_message(delivered: Optional[pd.DataFrame], summary: dict,
+                  fallback: bool = False) -> str:
     """配信本文を組み立てる（§4.2）。
 
     delivered は screener.record.load_delivered() の出力（0行でもよい）。
     summary は screener.screen.build_summary() が書いた JSON を読んだ dict。
 
+    fallback=True で先頭に「画像生成に失敗（テキストで配信）」を入れる。**通常の配信は
+    画像カード2枚だけで、この本文は使わない**（§4.5）。テキストが届いた時点で異常なので、
+    受け取った側がすぐ分かるようにする。
+
     返す文字列は MAX_TEXT 以内。超える場合は末尾のカードから落とし、何件省いたかを
     最終行に書く（黙って切らない）。見出しと免責は必ず残す。
     """
     n = 0 if delivered is None else len(delivered)
-    head = _header(summary, n)
+    head = _header(summary, n, fallback=fallback)
     foot = ["", DISCLAIMER]
 
     if n == 0:

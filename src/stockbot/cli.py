@@ -415,10 +415,11 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
 
     ユニバース通過銘柄を母集団として A〜D・E2・E3 を銘柄ごとに判定し、その通過集合に
     E1（当日候補内で rs60 の上位10%を落とす）を掛け、売買代金の降順・同一33業種3件までに
-    絞る。順位は付けない。結果を daily/delivered_YYYY-MM-DD.csv に書く（§3.2）。
+    絞る。順位は付けない。結果を daily/delivered_<配信日>_asof<判定日>.csv に書く（§3.2）。
 
-    配信記録は「その日に何を出したか」の台帳なので、同じ日に 2 回実行しても最初の
-    記録が正（save_delivered が上書きしない）。
+    配信記録は「その日に何を出したか」の台帳なので、同じ配信日・同じ判定日で 2 回
+    実行しても最初の記録が正（save_delivered が上書きしない）。判定日が違えば
+    ファイル名が違うので、引け前と引け後の実行は別の記録として両方残る（§3.2）。
     """
     cfg.ensure_dirs()
     store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
@@ -438,6 +439,12 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     evaluated = screen.evaluate_universe(ohlcv, tickers, idx_df["Close"], cfg.k,
                                          earnings_schedule=earnings_schedule, log=log)
     evaluated, meta = screen.apply_e1(evaluated, log=log)
+
+    # 判定日 T。ファイル名にも入るので、記録を書く前に確定させる（§3.2）。
+    # 評価が 0 件の日は銘柄側から取れないので、営業日軸（指数）の最終日で代用する
+    asof = record.as_calendar_date(evaluated["date"].max()) if len(evaluated) \
+        else record.as_calendar_date(idx_df.index[-1])
+    log(f"[screen] 判定日 {asof:%Y-%m-%d}")
 
     # 地合いゲージ（DESIGN.md §8.1）。条件にも順位にも使わない。配信の見出しに出すだけ
     idx_close = idx_df["Close"]
@@ -482,9 +489,18 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
                    "prev_delivered_on": prev_seen.get(ticker) or pd.NaT},
         ))
     delivered = record.records_to_frame(rows)
-    path = record.save_delivered(delivered, cfg.daily_dir, delivered_on)
-    log(f"[screen] 配信記録 {len(delivered)} 件を {path.name} に保存"
-        + ("（E1 スキップ日）" if meta["e1_skipped"] else ""))
+    path, written = record.save_delivered(delivered, cfg.daily_dir, delivered_on, asof)
+    if written:
+        delivered_n = len(delivered)
+        log(f"[screen] 配信記録 {delivered_n} 件を {path.name} に保存"
+            + ("（E1 スキップ日）" if meta["e1_skipped"] else ""))
+    else:
+        # 台帳は上書きしない。**「保存した」と書かない** —— 以前はメモリ上の件数を
+        # そのままログに出していたため、書けていないことが誰にも見えなかった（§3.2）
+        existing = record.load_delivered(path)
+        delivered_n = len(existing)
+        log(f"[screen] 警告: {path.name} は既にある。今回の判定 {len(delivered)}件は"
+            f"保存していない（ファイルにある {delivered_n}件が正）")
     repeats = [f"{r['ticker']}:{int(r['streak'])}日目" for _i, r in delivered.iterrows()
                if int(r["streak"]) > 1]
     if repeats:
@@ -492,7 +508,6 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
 
     # Actions のログは 90 日で消える。E1 のスキップ率や条件別の不成立件数は
     # 数週間かけて見るものなので、リポジトリ側にも残す（docs/SCREENER.md §3.6）
-    asof = evaluated["date"].max() if len(evaluated) else None
     # 取得成功率は fetch_meta.json（step_fetch が書く）から。描画側は screen_summary と
     # delivered しか読まないので、必要な値はここで要約に畳んでおく（docs/SCREENER.md §4.5）
     fetch_meta = {}
@@ -503,13 +518,21 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
         except (OSError, ValueError):
             fetch_meta = {}
     summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on, gauge,
-                                   fetch_meta=fetch_meta)
-    screen.save_summary(summary, cfg.daily_dir, delivered_on)
+                                   fetch_meta=fetch_meta, delivered_written=written,
+                                   delivered_n=delivered_n)
+    screen.save_summary(summary, cfg.daily_dir, delivered_on, asof)
+    # 候補の偏りは日次で残す（§3.6）。集計するだけで条件にも並び順にも使わない
+    if summary["sector_candidates"]:
+        adv = summary["adv_candidates"]
+        log(f"[screen] 候補の業種内訳: "
+            f"{screen.format_counts(summary['sector_candidates'], sort=False)}")
+        log(f"[screen] 候補の売買代金: 最大 {adv['max'] / 1e8:,.1f}億 / "
+            f"中央 {adv['median'] / 1e8:,.1f}億 / 最小 {adv['min'] / 1e8:,.1f}億")
     return delivered
 
 
 def step_resolve(cfg: Settings, log=print) -> list[Path]:
-    """配信記録（daily/delivered_YYYY-MM-DD.csv）に 5 営業日後の結果を付ける
+    """配信記録（daily/delivered_<配信日>_asof<判定日>.csv）に 5 営業日後の結果を付ける
     （docs/SCREENER.md §3.3）。
 
     結果が既にあるファイルと、5 営業日がまだ経過していないファイルには触らない。
@@ -525,50 +548,65 @@ def step_resolve(cfg: Settings, log=print) -> list[Path]:
 
 
 def step_notify(cfg: Settings, log=print) -> dict:
-    """その日の配信記録を LINE に流す（docs/SCREENER.md §4）。
+    """その日の配信を LINE に流す（docs/SCREENER.md §4）。
 
-    読むのは `daily/delivered_YYYY-MM-DD.csv` と `daily/screen_summary_YYYY-MM-DD.json`
-    だけで、株価も指標も計算し直さない。配信内容と台帳が食い違わないようにするため
-    （§4.3）。候補0件の日も配信する（§4.2）。
+    読むのは `daily/delivered_*.csv` と `daily/screen_summary_*.json` だけで、株価も
+    指標も計算し直さない。配信内容と台帳が食い違わないようにするため（§4.3）。
+    候補0件の日も配信する（§4.2）。同じ配信日に判定が 2 つある日は、判定日が新しい方
+    （引け後）を流す。
+
+    **通常は画像カード2枚だけを送る。テキストは送らない**（§4.5）。Worker の
+    `/upload` は caption を付けると画像とは別にテキストを 1 通 push する
+    （`src/worker.js`）ので、caption は付けない。描画または送信に失敗した日だけ
+    テキストに落とし、本文の先頭に失敗した旨を入れる（§4.4）。
 
     WORKER_URL が無い環境（ローカル・DRYRUN）では本文を作って log に出すだけで、
     送信はしない。
     """
     cfg.ensure_dirs()
     delivered_on = record.as_calendar_date(_now())
-    summary_path = screen.summary_path(cfg.daily_dir, delivered_on)
-    if not summary_path.exists():
-        log(f"[notify] {summary_path.name} が無いためスキップ（先に screen を実行）")
+    found = screen.latest_summary(cfg.daily_dir, delivered_on)
+    if found is None:
+        log(f"[notify] {delivered_on:%Y-%m-%d} の要約が無いためスキップ（先に screen を実行）")
         return {"sent": False, "status": None, "reason": "要約が無い"}
 
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    path = record.delivered_path(cfg.daily_dir, delivered_on)
-    delivered = record.load_delivered(path) if path.exists() else None
-
-    text = message.build_message(delivered, summary)
+    summary = json.loads(found.path.read_text(encoding="utf-8"))
+    log(f"[notify] {found.path.name} を読む")
+    delivered = None
+    if found.asof is not None:
+        path = record.delivered_path(cfg.daily_dir, delivered_on, found.asof)
+        delivered = record.load_delivered(path) if path.exists() else None
     n = 0 if delivered is None else len(delivered)
-    log(f"[notify] 候補 {n}件 / テキスト {len(text)}文字")
 
     images = []
+    failure = ""
     try:
         images = render_images_mod.render_images(
             delivered, summary, cfg.data_dir / "render", stem=f"screen_{delivered_on:%Y-%m-%d}")
-        log(f"[notify] 画像 {len(images)}枚を作成: {[p.name for p in images]}")
+        log(f"[notify] 候補 {n}件 / 画像 {len(images)}枚を作成: {[p.name for p in images]}")
     except Exception as e:   # Chromium 無し・フォント無し・起動失敗のいずれでも落とさない
-        log(f"[notify] 画像の作成に失敗（テキストに切り替える）: {type(e).__name__}: {e}")
+        failure = f"{type(e).__name__}: {e}"
+        log(f"[notify] 画像の作成に失敗（テキストに切り替える）: {failure}")
 
     if images:
+        # caption は付けない。付けると Worker がテキストも 1 通 push する（worker.js）
         results = []
-        for i, path in enumerate(images):
-            # キャプションは1枚目にだけ付ける（2枚とも付けるとテキストが2通流れる）
-            res = line_send.push_image(path, caption=text if i == 0 else "")
+        for i, img in enumerate(images):
+            res = line_send.push_image(img)
             log(f"[notify] 画像{i + 1}: {res['reason']}")
             results.append(res)
         if all(r["sent"] for r in results):
             return {"sent": True, "status": 200,
                     "reason": f"画像{len(results)}枚を送信", "mode": "image"}
-        log("[notify] 画像の送信に失敗したためテキストに切り替える")
+        if any(r["status"] is None for r in results):
+            # WORKER_URL 未設定（ローカル・DRYRUN）。失敗ではないのでテキストに落とさない
+            return {"sent": False, "status": None,
+                    "reason": "WORKER_URL 未設定のため送信しない", "mode": "image"}
+        failure = "画像の送信に失敗"
+        log(f"[notify] {failure}したためテキストに切り替える")
 
+    text = message.build_message(delivered, summary, fallback=bool(failure))
+    log(f"[notify] テキスト {len(text)}文字")
     for line in text.splitlines():
         log(f"[notify]   {line}")
     result = line_send.push_text(text)

@@ -13,10 +13,18 @@ import pandas as pd
 
 from . import _path  # noqa: F401
 from stockbot.notify import line_send
-from stockbot.notify.message import MA_LABELS, MAX_TEXT, TOP_FAILS, build_message
+from stockbot.notify.line_send import push_image
+from stockbot.notify.message import (
+    FALLBACK_NOTE,
+    MA_LABELS,
+    MAX_TEXT,
+    TOP_FAILS,
+    build_message,
+)
 from stockbot.screener.conditions import CONDITION_IDS, CONDITION_LABELS, SELF_CONTAINED_IDS
 from stockbot.screener.record import (
     DELIVERED_COLS,
+    RECORD_MISMATCH_NOTE,
     load_delivered,
     records_to_frame,
     save_delivered,
@@ -96,7 +104,7 @@ class MatchesDeliveredTest(unittest.TestCase):
         rec = make_record()
         direct = build_message(frame([rec]), make_summary())
         with tempfile.TemporaryDirectory() as tmp:
-            path = save_delivered(frame([rec]), Path(tmp), DELIVERED_ON)
+            path, _w = save_delivered(frame([rec]), Path(tmp), DELIVERED_ON, ASOF)
             from_csv = build_message(load_delivered(path), make_summary())
         self.assertEqual(direct, from_csv)
 
@@ -292,3 +300,55 @@ class EarningsCoverageTest(unittest.TestCase):
                           pd.Timestamp("2026-09-01"))
         self.assertEqual(s["earnings_known"], 0)
         self.assertIsNone(s["earnings_coverage"])
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, text: str = "ok"):
+        self.status_code = status_code
+        self.text = text
+
+
+class ImageOnlyDeliveryTest(unittest.TestCase):
+    """通常配信は画像2枚だけ（docs/SCREENER.md §4.5）。
+
+    Worker の /upload は caption を付けると画像とは別にテキストを 1 通 push する
+    （`src/worker.js`）。2026-09-04 はこれで本文と画像の両方が届いていた。
+    """
+
+    def test_push_image_sends_no_caption_field_when_empty(self):
+        calls = []
+
+        def fake_post(url, files=None, data=None, headers=None, timeout=None):
+            calls.append({"url": url, "data": data})
+            return _FakeResponse(200)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp) / "a.png"
+            img.write_bytes(b"x")
+            res = push_image(img, url="https://example.test", post=fake_post)
+        self.assertTrue(res["sent"])
+        self.assertEqual(calls[0]["url"], "https://example.test/upload")
+        # caption が空なら multipart に caption を入れない → Worker はテキストを流さない
+        self.assertEqual(calls[0]["data"], {})
+
+
+class FallbackTextTest(unittest.TestCase):
+    def test_fallback_prefix_is_first_line(self):
+        summary = {"delivered_on": "2026-09-04", "asof": "2026-09-03",
+                   "regime_level": "強", "regime_score": 6, "n_evaluated": 1327,
+                   "n_pool": 5, "e1_skipped": True, "fail_counts": {"D2": 1150}}
+        plain = build_message(None, summary)
+        fell = build_message(None, summary, fallback=True)
+        self.assertFalse(plain.startswith(FALLBACK_NOTE))
+        self.assertEqual(fell.splitlines()[0], FALLBACK_NOTE)
+        # 本文そのものは変わらない（先頭の 1 行が足されるだけ）
+        self.assertEqual("\n".join(fell.splitlines()[1:]), plain)
+
+    def test_mismatch_note_appears_when_ledger_was_not_written(self):
+        summary = {"delivered_on": "2026-09-04", "asof": "2026-09-03",
+                   "regime_level": "強", "regime_score": 6, "n_evaluated": 1327,
+                   "n_pool": 5, "e1_skipped": True, "delivered_written": False,
+                   "fail_counts": {"D2": 1150}}
+        self.assertIn(RECORD_MISMATCH_NOTE, build_message(None, summary))
+        summary["delivered_written"] = True
+        self.assertNotIn(RECORD_MISMATCH_NOTE, build_message(None, summary))

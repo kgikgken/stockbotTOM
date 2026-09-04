@@ -1,8 +1,8 @@
 """結果付け（docs/SCREENER.md §3.3）。
 
 配信記録（screener/record.py）に、配信の 5 営業日後の結果を付けて
-`daily/outcome_YYYY-MM-DD.csv` に保存する。ファイル名の日付は配信日で、
-配信記録と 1 対 1 に対応する。
+`daily/outcome_<配信日>_asof<判定日>.csv` に保存する。**配信記録と同じ命名規則**なので、
+同じ配信日に判定が 2 つある日でも結果ファイルが 1 対 1 で対応する。
 
 **CLAUDE.md の未来参照禁止について**: このモジュールと validation/labels.py だけが
 T+1 以降のデータを見てよい。ここで見るのは「配信したあとに実際に何が起きたか」で
@@ -25,7 +25,13 @@ import pandas as pd
 from ..data.store import IDX_TICKER
 from ..features.dimensions import LANDING_MA_NAMES
 from ..features.indicators import sma
-from .record import DELIVERED_COLS, list_delivered, load_delivered
+from .record import (
+    DELIVERED_COLS,
+    as_calendar_date,
+    list_delivered,
+    load_delivered,
+    stamped_name,
+)
 
 HORIZON_DAYS = 5  # docs/SCREENER.md §3.3。運用の記録単位であり、探索するパラメータではない
 
@@ -190,15 +196,14 @@ def resolve_delivered(delivered: pd.DataFrame, ohlcv: Dict[str, pd.DataFrame],
 
 
 # ------------------------------------------------------------------ ファイル操作
-def outcome_path(daily_dir: Path, delivered_on) -> Path:
-    d = pd.Timestamp(delivered_on).strftime("%Y-%m-%d")
-    return Path(daily_dir) / f"{OUTCOME_PREFIX}{d}{OUTCOME_SUFFIX}"
+def outcome_path(daily_dir: Path, delivered_on, asof) -> Path:
+    return Path(daily_dir) / stamped_name(OUTCOME_PREFIX, delivered_on, asof, OUTCOME_SUFFIX)
 
 
-def save_outcome(df: pd.DataFrame, daily_dir: Path, delivered_on) -> Path:
+def save_outcome(df: pd.DataFrame, daily_dir: Path, delivered_on, asof) -> Path:
     daily_dir = Path(daily_dir)
     daily_dir.mkdir(parents=True, exist_ok=True)
-    path = outcome_path(daily_dir, delivered_on)
+    path = outcome_path(daily_dir, delivered_on, asof)
     out = df.copy()
     for col in DATE_COLS:
         if col in out.columns:
@@ -242,22 +247,24 @@ def resolve_pending(daily_dir: Path, ohlcv: Dict[str, pd.DataFrame],
         calendar = trading_calendar(ohlcv)
     written: list[Path] = []
     n_pending = 0
-    for delivered_on, path in list_delivered(daily_dir):
-        if outcome_path(daily_dir, delivered_on).exists():
-            continue
-        delivered = load_delivered(path)
+    for f in list_delivered(daily_dir):
+        delivered = load_delivered(f.path)
         if len(delivered) == 0:
-            continue
+            continue   # 候補0件の日。結果を付ける対象が無い
         asof_values = pd.to_datetime(delivered["asof"]).dropna().unique()
+        # 判定日はファイル名から採るのが正だが、旧名のファイルは中身から補う
+        asof = f.asof if f.asof is not None else as_calendar_date(asof_values[0])
+        if outcome_path(daily_dir, f.delivered_on, asof).exists():
+            continue
         dues = [due_date(calendar, a, horizon) for a in asof_values]
         if not dues or any(d is None for d in dues):
             n_pending += 1
             continue
         stamp = resolved_on if resolved_on is not None else max(dues)
         outcome = resolve_delivered(delivered, ohlcv, horizon, stamp)
-        written.append(save_outcome(outcome, daily_dir, delivered_on))
+        written.append(save_outcome(outcome, daily_dir, f.delivered_on, asof))
         n_success = int(outcome["success"].fillna(False).astype(bool).sum())
-        log(f"[resolve] {path.name} → {written[-1].name} "
+        log(f"[resolve] {f.path.name} → {written[-1].name} "
             f"{len(outcome)}件 / 成功 {n_success} / "
             f"打ち切り {int(outcome['censored'].astype(bool).sum())}")
     if n_pending:
@@ -270,12 +277,16 @@ def load_journal(daily_dir: Path) -> pd.DataFrame:
     """配信記録と結果を結合した運用の台帳を返す（結果が未付与の行は結果列が欠損）。"""
     daily_dir = Path(daily_dir)
     frames = []
-    for delivered_on, path in list_delivered(daily_dir):
-        delivered = load_delivered(path)
+    for f in list_delivered(daily_dir):
+        delivered = load_delivered(f.path)
         if len(delivered) == 0:
             continue
-        op = outcome_path(daily_dir, delivered_on)
-        if op.exists():
+        asof = f.asof
+        if asof is None:
+            values = pd.to_datetime(delivered["asof"], errors="coerce").dropna()
+            asof = as_calendar_date(values.iloc[0]) if len(values) else None
+        op = outcome_path(daily_dir, f.delivered_on, asof) if asof is not None else Path("")
+        if op.name and op.exists():
             outcome = load_outcome(op).drop(columns=["delivered_on", "asof"], errors="ignore")
             delivered = delivered.merge(outcome, on="ticker", how="left")
         frames.append(delivered)
