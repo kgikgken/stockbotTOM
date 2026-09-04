@@ -150,8 +150,8 @@ class TestSaveLoad(unittest.TestCase):
         self.assertEqual(list(df.columns), DELIVERED_COLS)
         with tempfile.TemporaryDirectory() as tmp:
             daily = Path(tmp)
-            path = save_delivered(df, daily, "2024-12-31")
-            self.assertEqual(path.name, "delivered_2024-12-31.csv")
+            path, _written = save_delivered(df, daily, "2024-12-31", "2024-12-30")
+            self.assertEqual(path.name, "delivered_2024-12-31_asof2024-12-30.csv")
             back = load_delivered(path)
             self.assertEqual(len(back), 1)
             self.assertEqual(back["ticker"].iloc[0], "1234.T")
@@ -159,16 +159,21 @@ class TestSaveLoad(unittest.TestCase):
             self.assertEqual(back["asof"].iloc[0], rec["asof"])
             self.assertAlmostEqual(back["lp"].iloc[0], rec["lp"])
             files = list_delivered(daily)
-            self.assertEqual([d.strftime("%Y-%m-%d") for d, _p in files], ["2024-12-31"])
+            self.assertEqual([f.delivered_on.strftime("%Y-%m-%d") for f in files],
+                             ["2024-12-31"])
+            self.assertEqual([f.asof.strftime("%Y-%m-%d") for f in files], ["2024-12-30"])
 
     def test_existing_file_is_not_overwritten(self):
         rec, _pb, _close = TestBuildRecord()._record()
         with tempfile.TemporaryDirectory() as tmp:
             daily = Path(tmp)
-            save_delivered(records_to_frame([rec]), daily, "2024-12-31")
+            save_delivered(records_to_frame([rec]), daily, "2024-12-31", "2024-12-30")
             other = dict(rec, ticker="9999.T")
-            save_delivered(records_to_frame([other]), daily, "2024-12-31")
-            back = load_delivered(daily / "delivered_2024-12-31.csv")
+            _p, written = save_delivered(records_to_frame([other]), daily,
+                                         "2024-12-31", "2024-12-30")
+            # 「書かなかった」が呼び出し側に返る（2026-09-03 はこれが無くて気づけなかった）
+            self.assertFalse(written)
+            back = load_delivered(daily / "delivered_2024-12-31_asof2024-12-30.csv")
             self.assertEqual(back["ticker"].tolist(), ["1234.T"])
 
     def test_empty_frame_has_columns(self):
@@ -185,7 +190,7 @@ class TestSaveLoad(unittest.TestCase):
         self.assertEqual(rec["landing_ma"], "")
         self.assertTrue(pd.isna(rec["lp_date"]))
         with tempfile.TemporaryDirectory() as tmp:
-            path = save_delivered(records_to_frame([rec]), Path(tmp), "2024-12-31")
+            path, _written = save_delivered(records_to_frame([rec]), Path(tmp), "2024-12-31", "2024-12-30")
             back = load_delivered(path)
             self.assertEqual(back["landing_ma"].iloc[0], "")
             self.assertTrue(pd.isna(back["lp"].iloc[0]))
@@ -205,7 +210,7 @@ class LookbackStatsTest(unittest.TestCase):
         for t in tickers:
             rec, _pb, _c = TestBuildRecord()._record()
             recs.append(dict(rec, ticker=t, delivered_on=pd.Timestamp(date)))
-        save_delivered(records_to_frame(recs), daily, date)
+        save_delivered(records_to_frame(recs), daily, date, recs[0]["asof"])
 
     def test_first_appearance_is_streak_one(self):
         from stockbot.screener.record import lookback_stats
@@ -256,7 +261,7 @@ class LookbackStatsTest(unittest.TestCase):
         rec, _pb, _c = TestBuildRecord()._record()
         rec = dict(rec, streak=3, prev_delivered_on=pd.Timestamp("2026-09-02"))
         with tempfile.TemporaryDirectory() as tmp:
-            path = save_delivered(records_to_frame([rec]), Path(tmp), "2026-09-03")
+            path, _written = save_delivered(records_to_frame([rec]), Path(tmp), "2026-09-03", "2026-09-02")
             back = load_delivered(path)
             self.assertEqual(int(back["streak"].iloc[0]), 3)
             self.assertEqual(back["prev_delivered_on"].iloc[0], pd.Timestamp("2026-09-02"))
@@ -308,10 +313,11 @@ class TimezoneTest(unittest.TestCase):
         aware = self._aware("2026-09-02 08:48")
         with tempfile.TemporaryDirectory() as tmp:
             daily = Path(tmp)
-            self.assertEqual(delivered_path(daily, aware).name, "delivered_2026-09-02.csv")
+            self.assertEqual(delivered_path(daily, aware, "2026-09-01").name,
+                             "delivered_2026-09-02_asof2026-09-01.csv")
             rec["delivered_on"] = aware
-            path = save_delivered(records_to_frame([rec]), daily, aware)
-            self.assertEqual(path.name, "delivered_2026-09-02.csv")
+            path, _written = save_delivered(records_to_frame([rec]), daily, aware, "2026-09-01")
+            self.assertEqual(path.name, "delivered_2026-09-02_asof2026-09-01.csv")
             back = load_delivered(path)
             self.assertEqual(back["delivered_on"].iloc[0], pd.Timestamp("2026-09-02"))
 
@@ -326,3 +332,75 @@ class TimezoneTest(unittest.TestCase):
                            delivered_on=self._aware("2026-09-02 08:48"))
         self.assertIsNone(rec["delivered_on"].tzinfo)
         self.assertEqual(rec["delivered_on"], pd.Timestamp("2026-09-02"))
+
+
+class AsofInFilenameTest(unittest.TestCase):
+    """同じ配信日に判定日の違う 2 つの判定があっても両方残ること（docs/SCREENER.md §3.2）。
+
+    2026-09-03 の再発防止。引け前（判定 09-02・0件）と引け後（判定 09-03・5件）が
+    同じ `delivered_2026-09-03.csv` を取り合い、引け後の 5 件が保存されなかった。
+    """
+
+    def _rec(self, ticker, asof):
+        rec, _pb, _close = TestBuildRecord()._record()
+        return dict(rec, ticker=ticker, asof=pd.Timestamp(asof))
+
+    def test_two_judgements_on_one_day_both_survive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            morning, w1 = save_delivered(records_to_frame([]), daily,
+                                         "2026-09-03", "2026-09-02")
+            evening, w2 = save_delivered(
+                records_to_frame([self._rec("1234.T", "2026-09-03")]),
+                daily, "2026-09-03", "2026-09-03")
+            self.assertTrue(w1)
+            self.assertTrue(w2)
+            self.assertNotEqual(morning, evening)
+            self.assertEqual(morning.name, "delivered_2026-09-03_asof2026-09-02.csv")
+            self.assertEqual(evening.name, "delivered_2026-09-03_asof2026-09-03.csv")
+            self.assertEqual(len(load_delivered(morning)), 0)
+            self.assertEqual(len(load_delivered(evening)), 1)
+
+            # 0 件の記録でも判定日がファイル名にあるので失われない（中身からは取れない）
+            files = list_delivered(daily)
+            self.assertEqual([f.asof.strftime("%Y-%m-%d") for f in files],
+                             ["2026-09-02", "2026-09-03"])
+
+    def test_same_asof_twice_keeps_the_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            _p, first = save_delivered(
+                records_to_frame([self._rec("1111.T", "2026-09-03")]),
+                daily, "2026-09-04", "2026-09-03")
+            path, second = save_delivered(
+                records_to_frame([self._rec("9999.T", "2026-09-03")]),
+                daily, "2026-09-04", "2026-09-03")
+            self.assertTrue(first)
+            self.assertFalse(second)
+            self.assertEqual(load_delivered(path)["ticker"].tolist(), ["1111.T"])
+
+    def test_old_style_name_still_readable(self):
+        """判定日を持たない旧名も読めて、判定日は中身から補う（移行の安全網）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            frame = records_to_frame([self._rec("1234.T", "2026-08-31")])
+            frame = frame.assign(**{c: pd.to_datetime(frame[c]).dt.strftime("%Y-%m-%d")
+                                    for c in ("delivered_on", "asof")})
+            (daily / "delivered_2026-09-01.csv").write_text(
+                frame.to_csv(index=False), encoding="utf-8")
+            files = list_delivered(daily)
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].delivered_on, pd.Timestamp("2026-09-01"))
+            self.assertEqual(files[0].asof, pd.Timestamp("2026-08-31"))
+
+    def test_streak_counts_a_day_once_even_with_two_judgements(self):
+        """同じ配信日に判定が 2 つあっても、連続点灯は 1 日として数える（§3.2）。"""
+        from stockbot.screener.record import lookback_stats
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            for asof in ("2026-09-02", "2026-09-03"):
+                save_delivered(records_to_frame([self._rec("1234.T", asof)]),
+                               daily, "2026-09-03", asof)
+            streak, prev = lookback_stats(daily, ["1234.T"], "2026-09-04")
+            self.assertEqual(streak["1234.T"], 2)   # 今日 + 09-03 の 1 日ぶん
+            self.assertEqual(prev["1234.T"], pd.Timestamp("2026-09-03"))

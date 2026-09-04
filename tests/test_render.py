@@ -174,7 +174,7 @@ class HtmlTest(unittest.TestCase):
         rec = make_record()
         direct = html(records_to_frame([rec]), make_summary())
         with tempfile.TemporaryDirectory() as tmp:
-            path = save_delivered(records_to_frame([rec]), Path(tmp), DELIVERED_ON)
+            path, _w = save_delivered(records_to_frame([rec]), Path(tmp), DELIVERED_ON, ASOF)
             from_csv = html(load_delivered(path), make_summary())
         self.assertEqual(direct, from_csv)
 

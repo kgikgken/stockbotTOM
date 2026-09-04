@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from ..screener.conditions import CONDITION_LABELS
+from ..screener.record import RECORD_MISMATCH_NOTE
 
 TOP_FAILS = 3
 MA_LABELS = {"SMA5": "5日線", "SMA25": "25日線", "SMA75": "75日線", "SMA200": "200日線"}
@@ -159,6 +160,9 @@ def build_context(delivered: Optional[pd.DataFrame], summary: dict) -> dict:
         # 候補0件の日は E1 の注記を出さない（適用する対象が無い、§4.2）
         "e1_note": (f"E1（相対力の上位10%除外）は母集団 {summary.get('n_pool', 0)}件のため本日は未適用"
                     if n and summary.get("e1_skipped") else None),
+        # 台帳に書けなかった日（想定外の衝突）。カード側にも出す（§3.2）
+        "mismatch_note": (RECORD_MISMATCH_NOTE
+                          if summary.get("delivered_written") is False else None),
         "cards": cards,
         "zero_day": None if n else build_zero_day(summary),
         "order_note": ORDER_NOTE,

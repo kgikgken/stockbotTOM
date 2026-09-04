@@ -62,6 +62,7 @@ class ScreenerEndToEndTest(unittest.TestCase):
             cls.records.append(build_record(ticker, high, low, close, pb, t_pos,
                                             delivered_on=df.index[t_pos + 1]))
         cls.delivered_on = cls.ohlcv[tickers[0]].index[N_BARS - T_OFFSET]
+        cls.asof = cls.records[0]["asof"] if cls.records else cls.delivered_on
 
     def test_some_candidates_exist(self):
         self.assertGreater(len(self.records), 0)
@@ -80,7 +81,7 @@ class ScreenerEndToEndTest(unittest.TestCase):
     def test_full_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             daily = Path(tmp)
-            save_delivered(records_to_frame(self.records), daily, self.delivered_on)
+            save_delivered(records_to_frame(self.records), daily, self.delivered_on, self.asof)
             written = resolve_pending(daily, self.ohlcv, log=lambda *_a: None)
             self.assertEqual(len(written), 1)
 
@@ -177,7 +178,7 @@ class ScreenToJournalTest(unittest.TestCase):
             daily = Path(tmp)
             delivered = records_to_frame(records)
             self.assertEqual(list(delivered.columns), DELIVERED_COLS)
-            save_delivered(delivered, daily, self.delivered_on)
+            save_delivered(delivered, daily, self.delivered_on, self.asof)
             written = resolve_pending(daily, self.after, log=lambda *_a: None)
             self.assertEqual(len(written), 1)
 

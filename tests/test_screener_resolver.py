@@ -168,7 +168,7 @@ class TestCalendarAndPending(unittest.TestCase):
     def _write_delivered(self, daily, ticker="1234.T", landing_ma="SMA25"):
         df = records_to_frame([make_record(ticker=ticker, landing_ma=landing_ma)])
         self.assertEqual(list(df.columns), DELIVERED_COLS)
-        return save_delivered(df, daily, DELIVERED_ON)
+        return save_delivered(df, daily, DELIVERED_ON, ASOF)[0]
 
     def test_resolve_pending_writes_outcome_when_due(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,7 +177,7 @@ class TestCalendarAndPending(unittest.TestCase):
             ohlcv = calendar_ohlcv({"1234.T": make_frame([101, 103, 105, 107, 109])})
             written = resolve_pending(daily, ohlcv, log=lambda *_a: None)
             self.assertEqual([p.name for p in written],
-                             [f"outcome_{DELIVERED_ON.strftime('%Y-%m-%d')}.csv"])
+                             [f"outcome_{DELIVERED_ON:%Y-%m-%d}_asof{ASOF:%Y-%m-%d}.csv"])
             out = load_outcome(written[0])
             self.assertEqual(len(out), 1)
             self.assertTrue(bool(out["success"].iloc[0]))
@@ -191,7 +191,7 @@ class TestCalendarAndPending(unittest.TestCase):
             ohlcv = {IDX_TICKER: make_frame(np.full(3, 100.0), n_after=3),
                      "1234.T": make_frame([101, 103, 105], n_after=3)}
             self.assertEqual(resolve_pending(daily, ohlcv, log=lambda *_a: None), [])
-            self.assertFalse(outcome_path(daily, DELIVERED_ON).exists())
+            self.assertFalse(outcome_path(daily, DELIVERED_ON, ASOF).exists())
 
     def test_resolve_pending_does_not_redo_existing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,11 +199,11 @@ class TestCalendarAndPending(unittest.TestCase):
             self._write_delivered(daily)
             ohlcv = calendar_ohlcv({"1234.T": make_frame([101, 103, 105, 107, 109])})
             resolve_pending(daily, ohlcv, log=lambda *_a: None)
-            before = outcome_path(daily, DELIVERED_ON).read_text()
+            before = outcome_path(daily, DELIVERED_ON, ASOF).read_text()
             # 値が動く別データで再実行しても、確定済みのファイルは作り直さない
             ohlcv2 = calendar_ohlcv({"1234.T": make_frame([90, 80, 70, 60, 50])})
             self.assertEqual(resolve_pending(daily, ohlcv2, log=lambda *_a: None), [])
-            self.assertEqual(outcome_path(daily, DELIVERED_ON).read_text(), before)
+            self.assertEqual(outcome_path(daily, DELIVERED_ON, ASOF).read_text(), before)
 
     def test_resolve_pending_on_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,7 +214,7 @@ class TestJournal(unittest.TestCase):
     def _build(self, daily):
         records = [make_record(ticker="1111.T", landing_ma="SMA25"),
                    make_record(ticker="2222.T", landing_ma="SMA75")]
-        save_delivered(records_to_frame(records), daily, DELIVERED_ON)
+        save_delivered(records_to_frame(records), daily, DELIVERED_ON, ASOF)
         ohlcv = calendar_ohlcv({
             "1111.T": make_frame([101, 103, 105, 107, 109]),   # 成功
             "2222.T": make_frame([98, 94, 96, 97, 99]),        # 押し安値割れ
@@ -235,7 +235,7 @@ class TestJournal(unittest.TestCase):
     def test_journal_keeps_unresolved_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             daily = Path(tmp)
-            save_delivered(records_to_frame([make_record()]), daily, DELIVERED_ON)
+            save_delivered(records_to_frame([make_record()]), daily, DELIVERED_ON, ASOF)
             j = load_journal(daily)
             self.assertEqual(len(j), 1)
             self.assertNotIn("success", j.columns)
@@ -263,7 +263,7 @@ class TestJournal(unittest.TestCase):
             daily = Path(tmp)
             far = dict(make_record(ticker="3333.T", landing_ma="SMA200"), landing_dist_atr=9.0)
             save_delivered(records_to_frame([make_record(ticker="1111.T"), far]),
-                           daily, DELIVERED_ON)
+                           daily, DELIVERED_ON, ASOF)
             j = load_journal(daily)
             self.assertEqual(summarize_by_landing_ma(j)["n"].tolist(), [0, 1, 0, 1])
             # 距離で絞ると SMA200 の1件が落ちるが、行は n=0 で残る
@@ -288,7 +288,7 @@ class TestJournal(unittest.TestCase):
             daily = Path(tmp)
             recs = [make_record(ticker="1111.T", landing_ma="SMA25"),
                     dict(make_record(ticker="4444.T"), landing_ma="")]
-            save_delivered(records_to_frame(recs), daily, DELIVERED_ON)
+            save_delivered(records_to_frame(recs), daily, DELIVERED_ON, ASOF)
             s = summarize_by_landing_ma(load_journal(daily))
             self.assertEqual(s["landing_ma"].tolist(),
                              ["SMA5", "SMA25", "SMA75", "SMA200", NO_LINE])
@@ -300,7 +300,7 @@ class TestJournal(unittest.TestCase):
             delivered = records_to_frame([make_record()])
             ohlcv = {"1234.T": make_frame([101, 103, 105, 107, 109])}
             out = resolve_delivered(delivered, ohlcv, resolved_on=DATES[ASOF_POS + 5])
-            path = save_outcome(out, daily, DELIVERED_ON)
+            path = save_outcome(out, daily, DELIVERED_ON, ASOF)
             back = load_outcome(path)
             self.assertEqual(back["ticker"].iloc[0], "1234.T")
             self.assertTrue(bool(back["success"].iloc[0]))
@@ -310,3 +310,44 @@ class TestJournal(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TwoJudgementsOneDayTest(unittest.TestCase):
+    """同じ配信日に判定が 2 つある日を resolver が正しく辿れること（§3.2・§3.3）。"""
+
+    def _daily_with_two(self, tmp):
+        daily = Path(tmp)
+        # 引け前（判定は前営業日・候補0件）と引け後（判定は当日・候補1件）
+        early = DATES[ASOF_POS - 1]
+        save_delivered(records_to_frame([]), daily, DELIVERED_ON, early)
+        save_delivered(records_to_frame([make_record(ticker="1234.T")]),
+                       daily, DELIVERED_ON, ASOF)
+        return daily
+
+    def test_outcome_is_written_per_judgement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = self._daily_with_two(tmp)
+            ohlcv = calendar_ohlcv({"1234.T": make_frame([101, 103, 105, 107, 109])})
+            written = resolve_pending(daily, ohlcv, log=lambda *_a: None)
+            # 0 件の記録には結果を付けない。判定日つきの名前で 1 本だけ出る
+            self.assertEqual([p.name for p in written],
+                             [f"outcome_{DELIVERED_ON:%Y-%m-%d}_asof{ASOF:%Y-%m-%d}.csv"])
+            self.assertTrue(outcome_path(daily, DELIVERED_ON, ASOF).exists())
+
+    def test_second_run_does_not_redo_the_finished_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = self._daily_with_two(tmp)
+            ohlcv = calendar_ohlcv({"1234.T": make_frame([101, 103, 105, 107, 109])})
+            resolve_pending(daily, ohlcv, log=lambda *_a: None)
+            again = resolve_pending(daily, ohlcv, log=lambda *_a: None)
+            self.assertEqual(again, [])
+
+    def test_journal_joins_the_right_outcome_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = self._daily_with_two(tmp)
+            ohlcv = calendar_ohlcv({"1234.T": make_frame([101, 103, 105, 107, 109])})
+            resolve_pending(daily, ohlcv, log=lambda *_a: None)
+            j = load_journal(daily)
+            self.assertEqual(len(j), 1)
+            self.assertEqual(j["ticker"].iloc[0], "1234.T")
+            self.assertTrue(bool(j["success"].iloc[0]))

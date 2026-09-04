@@ -29,6 +29,7 @@
   .box.regime { border: 2px solid #e6b8b0; background: #fdf3f1; }
   .box h3 { font-size: 17px; margin-bottom: 4px; }
   .box .sub { font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .box .sub.warn { color: var(--warn); font-weight: 700; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
@@ -80,6 +81,7 @@
 <div class="box regime">
   <h3>地合い {{ ctx.regime.text }} ／ 本日の候補 {{ ctx.n_candidates }}件</h3>
   {% if ctx.e1_note %}<div class="sub">※ {{ ctx.e1_note }}</div>{% endif %}
+  {% if ctx.mismatch_note %}<div class="sub warn">※ {{ ctx.mismatch_note }}</div>{% endif %}
 </div>
 {% endmacro %}
 

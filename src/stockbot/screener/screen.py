@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -18,7 +18,7 @@ import pandas as pd
 from ..features import pullback, swings
 from ..features.dimensions import LANDING_MA_NAMES
 from ..features.indicators import atr_wilder, sma
-from .record import as_calendar_date
+from .record import as_calendar_date, parse_stamped_name, stamped_name
 from .conditions import (
     CONDITION_IDS,
     DIAGNOSTIC_COLS,
@@ -211,9 +211,41 @@ def _earnings_coverage(evaluated: pd.DataFrame) -> Optional[float]:
     return round(_earnings_known(evaluated) / n, 4) if n else None
 
 
+def sector_breakdown(candidates: pd.DataFrame) -> Dict[str, int]:
+    """候補の 33 業種内訳（件数の多い順）。docs/SCREENER.md §3.6。
+
+    同一業種 3 件までの上限（SECTOR_CAP）が実際にどれだけ効いているか、候補が特定の
+    業種に偏っていないかを日次で残す。**集計するだけで、条件にも並び順にも使わない。**
+    """
+    if candidates is None or len(candidates) == 0 or "sector33" not in candidates:
+        return {}
+    counts = (candidates["sector33"].fillna("").replace("", "（未分類）")
+              .value_counts().sort_values(ascending=False))
+    return {str(k): int(v) for k, v in counts.items()}
+
+
+def adv_stats(candidates: pd.DataFrame) -> Dict[str, Optional[float]]:
+    """候補の売買代金の分布（最大・最小・中央値）。docs/SCREENER.md §3.6。
+
+    並び順の根拠である売買代金が、候補の中でどれだけ開いているかを日次で残す
+    （A1 の下限 3 億円ちょうどの銘柄と数百億円の銘柄が同じ表に並ぶため）。
+    **集計するだけで、条件にも並び順にも使わない。** 候補0件の日は全て None。
+    """
+    empty: Dict[str, Optional[float]] = {"max": None, "min": None, "median": None}
+    if candidates is None or len(candidates) == 0 or "adv_jpy" not in candidates:
+        return empty
+    vals = pd.to_numeric(candidates["adv_jpy"], errors="coerce").dropna()
+    if len(vals) == 0:
+        return empty
+    return {"max": float(vals.max()), "min": float(vals.min()),
+            "median": float(vals.median())}
+
+
 def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
                   asof, delivered_on, gauge: Optional[dict] = None,
-                  fetch_meta: Optional[dict] = None) -> dict:
+                  fetch_meta: Optional[dict] = None,
+                  delivered_written: bool = True,
+                  delivered_n: Optional[int] = None) -> dict:
     """その日のスクリーニングの要約（docs/SCREENER.md §3.6）。
 
     Actions のログは 90 日で消えるが、E1 のスキップ率や条件別の不成立件数は
@@ -243,22 +275,82 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
         "fail_counts": fail_counts(evaluated),
         "landing_ma_all": landing_ma_breakdown(evaluated),
         "landing_ma_candidates": landing_ma_breakdown(candidates),
+        # 候補の偏りを日次で残す（§3.6）。条件にも並び順にも使わない
+        "sector_candidates": sector_breakdown(candidates),
+        "adv_candidates": adv_stats(candidates),
+        # 台帳に実際に書けたか（§3.2）。False の日は配信本文とカードに注記を出す
+        "delivered_written": bool(delivered_written),
+        "delivered_n": (int(delivered_n) if delivered_n is not None else int(len(candidates))),
     }
 
 
-def summary_path(daily_dir: Path, delivered_on) -> Path:
-    d = as_calendar_date(delivered_on).strftime("%Y-%m-%d")
-    return Path(daily_dir) / f"{SUMMARY_PREFIX}{d}{SUMMARY_SUFFIX}"
+def summary_path(daily_dir: Path, delivered_on, asof) -> Path:
+    return Path(daily_dir) / stamped_name(SUMMARY_PREFIX, delivered_on, asof, SUMMARY_SUFFIX)
 
 
-def save_summary(summary: dict, daily_dir: Path, delivered_on) -> Path:
-    """daily/screen_summary_YYYY-MM-DD.json に保存する（毎日上書きしてよい）。
+def save_summary(summary: dict, daily_dir: Path, delivered_on, asof) -> Path:
+    """要約を `screen_summary_<配信日>_asof<判定日>.json` に保存する。
 
-    配信記録（delivered_*.csv）と違って上書きしてよい —— これは判断の記録ではなく、
-    その日のスクリーニングがどう動いたかの観測値だから。
+    判定日ごとに別ファイルなので、同じ日に引け前と引け後の 2 回走っても両方残る。
+    **以前は配信日だけの名前で毎回上書きしていた。** 配信記録（上書きしない）と
+    向きが逆だったため、2026-09-03 は朝の台帳と引け後の要約が組み合わさって、
+    「候補0件・母集団5件」という存在しない日が配信された（§3.2）。
+    同じ配信日・同じ判定日での再実行は同じ結果なので、そこは上書きしてよい。
     """
     daily_dir = Path(daily_dir)
     daily_dir.mkdir(parents=True, exist_ok=True)
-    path = summary_path(daily_dir, delivered_on)
+    path = summary_path(daily_dir, delivered_on, asof)
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
+
+
+class SummaryFile(NamedTuple):
+    delivered_on: pd.Timestamp
+    asof: Optional[pd.Timestamp]
+    path: Path
+
+
+def _asof_from_summary(path: Path) -> Optional[pd.Timestamp]:
+    """旧名の要約から判定日を補う（中身の asof キーを見る）。"""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("asof")
+    except (OSError, ValueError):
+        return None
+    if not value:
+        return None
+    try:
+        return as_calendar_date(value)
+    except ValueError:
+        return None
+
+
+def list_summaries(daily_dir: Path) -> list[SummaryFile]:
+    """daily/ にある要約を (配信日, 判定日) の昇順で返す。旧名は中身から判定日を補う。"""
+    daily_dir = Path(daily_dir)
+    if not daily_dir.exists():
+        return []
+    out: list[SummaryFile] = []
+    for f in sorted(daily_dir.glob(f"{SUMMARY_PREFIX}*{SUMMARY_SUFFIX}")):
+        parsed = parse_stamped_name(f.name, SUMMARY_PREFIX, SUMMARY_SUFFIX)
+        if parsed is None:
+            continue
+        delivered_on, asof = parsed
+        if asof is None:
+            asof = _asof_from_summary(f)
+        out.append(SummaryFile(delivered_on, asof, f))
+    out.sort(key=lambda x: (x.delivered_on,
+                            x.asof if x.asof is not None else x.delivered_on))
+    return out
+
+
+def latest_summary(daily_dir: Path, delivered_on=None) -> Optional[SummaryFile]:
+    """その配信日で最も新しい判定の要約（delivered_on 省略時は全体で最新）。
+
+    同じ日に引け前と引け後の 2 回走った日は、**判定日が新しい方**（引け後）を返す。
+    配信は「今いちばん新しい判定」を流すのが正しく、古い方は記録として残る。
+    """
+    files = list_summaries(daily_dir)
+    if delivered_on is not None:
+        target = as_calendar_date(delivered_on)
+        files = [f for f in files if f.delivered_on == target]
+    return files[-1] if files else None

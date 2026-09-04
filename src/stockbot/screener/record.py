@@ -1,7 +1,10 @@
 """配信記録（docs/SCREENER.md §3.2）。
 
-配信した銘柄を 1 行 1 銘柄で `daily/delivered_YYYY-MM-DD.csv` に保存する。
-ファイル名の日付は配信日（LINE に流した日）で、判定日 T は列 `asof` に持つ。
+配信した銘柄を 1 行 1 銘柄で `daily/delivered_<配信日>_asof<判定日>.csv` に保存する。
+**ファイル名は配信日と判定日 T の両方を持つ。** 同じ JST の日に引け前（T = 前営業日）と
+引け後（T = 当日）の 2 回走ると、配信日だけでは 2 つの判定が同じ名前になり、片方が
+必ず失われる（2026-09-03 に発生。朝の 0 件が残り、引け後の 5 件が保存されなかった）。
+判定ごとに別ファイルにすれば両方残り、§3.2「台帳は後から作り直さない」を守れる。
 
 **このモジュールは T の引けまでのデータしか参照しない。** 結果（T+1 以降）を付ける
 のは screener/resolver.py の役割で、書き込むファイルも分ける。配信記録を後から
@@ -14,7 +17,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -24,6 +27,11 @@ from ..features.indicators import atr_wilder
 
 DELIVERED_PREFIX = "delivered_"
 DELIVERED_SUFFIX = ".csv"
+ASOF_MARK = "_asof"   # ファイル名で配信日と判定日を区切る印
+
+# 台帳と今回の判定が食い違ったときの注記（§3.2）。配信本文と画像カードの両方に出す。
+# ファイル名に判定日が入ったので通常は起きないが、想定外の衝突に気づけるよう残す
+RECORD_MISMATCH_NOTE = "記録の不一致: 本日分の配信記録は既にあり、今回の判定は保存していません"
 
 CORE_COLS = [
     "delivered_on",       # 配信日（LINE に流した日）
@@ -143,29 +151,72 @@ def records_to_frame(records: Iterable[dict]) -> pd.DataFrame:
     return df[DELIVERED_COLS]
 
 
-def delivered_path(daily_dir: Path, delivered_on) -> Path:
+def stamped_name(prefix: str, delivered_on, asof, suffix: str) -> str:
+    """`<prefix><配信日>_asof<判定日><suffix>` を組み立てる（§3.2）。
+
+    delivered / screen_summary / outcome の 3 種類とも同じ形にして、同じ判定に属する
+    ファイルがファイル名だけで対応づくようにする。
+    """
     d = as_calendar_date(delivered_on).strftime("%Y-%m-%d")
-    return Path(daily_dir) / f"{DELIVERED_PREFIX}{d}{DELIVERED_SUFFIX}"
+    a = as_calendar_date(asof).strftime("%Y-%m-%d")
+    return f"{prefix}{d}{ASOF_MARK}{a}{suffix}"
 
 
-def save_delivered(df: pd.DataFrame, daily_dir: Path, delivered_on) -> Path:
-    """daily/delivered_YYYY-MM-DD.csv に保存する（既存ファイルは上書きしない）。
+def parse_stamped_name(name: str, prefix: str, suffix: str
+                       ) -> Optional[tuple[pd.Timestamp, Optional[pd.Timestamp]]]:
+    """ファイル名から (配信日, 判定日) を取り出す。読めない名前は None。
 
-    同じ日に 2 回実行しても最初の記録が正なので、既にあるファイルはそのまま残す
-    （配信記録は「その日に何を出したか」の台帳であり、後から作り直さない）。
+    **判定日を持たない旧名（`delivered_2026-09-01.csv`）も受け取る。** その場合は
+    判定日を None で返す —— 呼び出し側がファイルの中身（`asof` 列 / `asof` キー）から
+    補える。古い成果物やロールバックした版が混ざっても黙って消えないようにするため。
+    """
+    if not (name.startswith(prefix) and name.endswith(suffix)):
+        return None
+    stem = name[len(prefix):len(name) - len(suffix)]
+    head, mark, tail = stem.partition(ASOF_MARK)
+    try:
+        delivered_on = as_calendar_date(head)
+    except ValueError:
+        return None
+    if not mark:
+        return delivered_on, None
+    try:
+        return delivered_on, as_calendar_date(tail)
+    except ValueError:
+        return None
+
+
+def delivered_path(daily_dir: Path, delivered_on, asof) -> Path:
+    return Path(daily_dir) / stamped_name(DELIVERED_PREFIX, delivered_on, asof,
+                                          DELIVERED_SUFFIX)
+
+
+def save_delivered(df: pd.DataFrame, daily_dir: Path, delivered_on,
+                   asof) -> tuple[Path, bool]:
+    """配信記録を保存する（既存ファイルは上書きしない）。
+
+    戻り値は `(パス, 書いたか)`。**「書かなかった」を呼び出し側に返すのが要点。**
+    以前は Path だけを返していたため、既存ファイルを残して何も書かなかった場合でも
+    呼び出し側は「保存した」とログに出していた（2026-09-03 に発生。ログには「5件を
+    保存」と出たが、ファイルには 0 件のまま残っていた）。
+
+    同じ配信日・同じ判定日で 2 回走ったときは最初の記録が正なので、既にあるファイルは
+    そのまま残す（配信記録は台帳であり、後から作り直さない。§3.2）。判定日が違えば
+    ファイル名が違うので、そもそも衝突しない。
+
     件数が少ないので圧縮しない（人が git の差分で読めるようにする）。
     """
     daily_dir = Path(daily_dir)
     daily_dir.mkdir(parents=True, exist_ok=True)
-    path = delivered_path(daily_dir, delivered_on)
+    path = delivered_path(daily_dir, delivered_on, asof)
     if path.exists():
-        return path
+        return path, False
     out = df.copy()
     for col in DATE_COLS:
         if col in out.columns:
             out[col] = pd.to_datetime(out[col]).dt.strftime("%Y-%m-%d")
     out.to_csv(path, index=False, encoding="utf-8")
-    return path
+    return path, True
 
 
 def load_delivered(path: Path) -> pd.DataFrame:
@@ -197,19 +248,46 @@ def _coerce_bool(v) -> object:
     return pd.NA
 
 
-def list_delivered(daily_dir: Path) -> list[tuple[pd.Timestamp, Path]]:
-    """daily/ にある配信記録を (配信日, パス) の昇順で返す。"""
+class DeliveredFile(NamedTuple):
+    """配信記録 1 ファイル。判定日を持つので、同じ配信日に 2 件あっても区別できる。"""
+
+    delivered_on: pd.Timestamp
+    asof: Optional[pd.Timestamp]
+    path: Path
+
+
+def _asof_from_file(path: Path) -> Optional[pd.Timestamp]:
+    """旧名のファイルから判定日を補う（中身の asof 列を見る）。0 件の記録は None。"""
+    try:
+        df = load_delivered(path)
+    except Exception:
+        return None
+    if "asof" not in df.columns or len(df) == 0:
+        return None
+    values = pd.to_datetime(df["asof"], errors="coerce").dropna()
+    return as_calendar_date(values.iloc[0]) if len(values) else None
+
+
+def list_delivered(daily_dir: Path) -> list[DeliveredFile]:
+    """daily/ にある配信記録を (配信日, 判定日) の昇順で返す。
+
+    判定日をファイル名に持たない旧名のファイルは、中身の `asof` 列から補う。
+    0 件の旧名ファイルだけは判定日が分からないので asof=None のまま返す
+    （結果付けの対象にならないので実害は無い）。
+    """
     daily_dir = Path(daily_dir)
     if not daily_dir.exists():
         return []
-    out: list[tuple[pd.Timestamp, Path]] = []
+    out: list[DeliveredFile] = []
     for f in sorted(daily_dir.glob(f"{DELIVERED_PREFIX}*{DELIVERED_SUFFIX}")):
-        stem = f.name[len(DELIVERED_PREFIX):-len(DELIVERED_SUFFIX)]
-        try:
-            out.append((pd.Timestamp(stem), f))
-        except ValueError:
+        parsed = parse_stamped_name(f.name, DELIVERED_PREFIX, DELIVERED_SUFFIX)
+        if parsed is None:
             continue
-    out.sort(key=lambda x: x[0])
+        delivered_on, asof = parsed
+        if asof is None:
+            asof = _asof_from_file(f)
+        out.append(DeliveredFile(delivered_on, asof, f))
+    out.sort(key=lambda x: (x.delivered_on, x.asof if x.asof is not None else x.delivered_on))
     return out
 
 
@@ -237,15 +315,22 @@ def lookback_stats(daily_dir: Path, tickers, delivered_on,
         return streak, prev_seen
 
     delivered_on = as_calendar_date(delivered_on)
-    past = [(d, f) for d, f in list_delivered(daily_dir) if d < delivered_on]
-    past.sort(key=lambda x: x[0], reverse=True)
+    # 連続点灯は「配信日」で数える（§3.2）。同じ配信日に判定が 2 つある日は、その日の
+    # 全ファイルの和集合を「その日に出た銘柄」とする —— 1 日を 2 日と数えないため
+    by_day: dict = {}
+    for f in list_delivered(daily_dir):
+        if f.delivered_on < delivered_on:
+            by_day.setdefault(f.delivered_on, []).append(f.path)
+    past = sorted(by_day.items(), key=lambda kv: kv[0], reverse=True)
 
     unbroken = set(tickers)   # まだ連続が途切れていない銘柄
-    for d, f in past[:max_files]:
-        try:
-            present = set(load_delivered(f)["ticker"].astype(str))
-        except Exception:
-            present = set()   # 読めないファイルは「出なかった」扱い（例外にしない）
+    for d, paths in past[:max_files]:
+        present: set = set()
+        for f in paths:
+            try:
+                present |= set(load_delivered(f)["ticker"].astype(str))
+            except Exception:
+                continue   # 読めないファイルは「出なかった」扱い（例外にしない）
         for t in tickers:
             if prev_seen[t] is None and t in present:
                 prev_seen[t] = d
@@ -264,4 +349,4 @@ def latest_delivered(daily_dir: Path) -> Optional[pd.DataFrame]:
     files = list_delivered(daily_dir)
     if not files:
         return None
-    return load_delivered(files[-1][1])
+    return load_delivered(files[-1].path)
