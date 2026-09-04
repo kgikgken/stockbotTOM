@@ -521,6 +521,10 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
                                    fetch_meta=fetch_meta, delivered_written=written,
                                    delivered_n=delivered_n)
     screen.save_summary(summary, cfg.daily_dir, delivered_on, asof)
+    # D-1 の観測日数。判定日 1 つにつき 1 日で数える（§8 D-3）。判定はまだしない
+    days = screen.observation_days(cfg.daily_dir)
+    log(f"[screen] 観測 {len(days)}日目（判定日ユニーク） / "
+        f"E1 スキップ {sum(1 for d in days if d.e1_skipped)}日")
     # 候補の偏りは日次で残す（§3.6）。集計するだけで条件にも並び順にも使わない
     if summary["sector_candidates"]:
         adv = summary["adv_candidates"]
