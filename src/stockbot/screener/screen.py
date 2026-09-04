@@ -343,6 +343,40 @@ def list_summaries(daily_dir: Path) -> list[SummaryFile]:
     return out
 
 
+class ObservationDay(NamedTuple):
+    """観測 1 日分。**判定日（asof）が単位**で、配信日でもファイル数でもない。"""
+
+    asof: pd.Timestamp
+    delivered_on: pd.Timestamp
+    e1_skipped: bool
+    path: Path
+
+
+def observation_days(daily_dir: Path) -> list[ObservationDay]:
+    """観測日を判定日の昇順で返す（docs/SCREENER.md §8 D-3）。
+
+    **判定日 1 つにつき 1 日**として数える。同じ判定日の要約が複数ある場合は配信日が
+    最も新しいものを採る（引け後の実行と翌朝の実行は同じ市場日を判定するため、
+    2 日と数えると同じ 1 日を二重に数えることになる）。
+
+    D-1 の「10 営業日分」を機械的に数えるためのもので、判定そのものはしない。
+    """
+    by_asof: dict = {}
+    for f in list_summaries(daily_dir):
+        if f.asof is None:
+            continue   # 判定日が分からない要約は数えられない
+        prev = by_asof.get(f.asof)
+        if prev is not None and prev.delivered_on >= f.delivered_on:
+            continue
+        try:
+            data = json.loads(f.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        by_asof[f.asof] = ObservationDay(f.asof, f.delivered_on,
+                                         bool(data.get("e1_skipped", False)), f.path)
+    return [by_asof[k] for k in sorted(by_asof)]
+
+
 def latest_summary(daily_dir: Path, delivered_on=None) -> Optional[SummaryFile]:
     """その配信日で最も新しい判定の要約（delivered_on 省略時は全体で最新）。
 

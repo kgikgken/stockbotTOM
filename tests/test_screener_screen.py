@@ -26,6 +26,7 @@ from stockbot.screener.screen import (
     landing_ma_breakdown,
     latest_summary,
     list_summaries,
+    observation_days,
     save_summary,
     sector_breakdown,
     select_candidates,
@@ -320,3 +321,53 @@ class SummaryListingTest(unittest.TestCase):
                 json.dumps({"asof": "2026-08-31"}), encoding="utf-8")
             found = latest_summary(daily, "2026-09-01")
             self.assertEqual(found.asof, pd.Timestamp("2026-08-31"))
+
+
+class ObservationDaysTest(unittest.TestCase):
+    """D-1 の観測日数は判定日ユニークで数える（docs/SCREENER.md §8 D-3）。"""
+
+    def _write(self, daily, delivered_on, asof, e1_skipped=True):
+        save_summary({"delivered_on": delivered_on, "asof": asof,
+                      "e1_skipped": e1_skipped}, daily, delivered_on, asof)
+
+    def test_same_asof_twice_counts_as_one_day(self):
+        """引け後の実行と翌朝の実行は同じ市場日を判定するので 1 日。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self._write(daily, "2026-09-03", "2026-09-03")
+            self._write(daily, "2026-09-04", "2026-09-03")
+            days = observation_days(daily)
+            self.assertEqual([d.asof.strftime("%Y-%m-%d") for d in days], ["2026-09-03"])
+            # 同じ判定日では配信日が新しい方を採る
+            self.assertEqual(days[0].delivered_on, pd.Timestamp("2026-09-04"))
+
+    def test_two_asofs_on_one_delivery_day_count_as_two(self):
+        """引け前と引け後は別の市場日を判定しているので 2 日。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self._write(daily, "2026-09-03", "2026-09-02")
+            self._write(daily, "2026-09-03", "2026-09-03")
+            days = observation_days(daily)
+            self.assertEqual([d.asof.strftime("%Y-%m-%d") for d in days],
+                             ["2026-09-02", "2026-09-03"])
+
+    def test_e1_skip_tally_uses_the_newest_summary_for_an_asof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self._write(daily, "2026-09-03", "2026-09-03", e1_skipped=True)
+            self._write(daily, "2026-09-04", "2026-09-03", e1_skipped=False)
+            days = observation_days(daily)
+            self.assertEqual(len(days), 1)
+            self.assertFalse(days[0].e1_skipped)
+
+    def test_sorted_by_asof_not_by_delivery_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            self._write(daily, "2026-09-04", "2026-09-03")
+            self._write(daily, "2026-09-01", "2026-08-31")
+            self.assertEqual([d.asof.strftime("%Y-%m-%d") for d in observation_days(daily)],
+                             ["2026-08-31", "2026-09-03"])
+
+    def test_empty_directory_is_zero_days(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(observation_days(Path(tmp)), [])
