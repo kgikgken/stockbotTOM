@@ -24,7 +24,8 @@ EXIT_RULE = "押し安値割れで撤退／5日線回復で手仕舞い"
 # 健全性ブロックの注記。A4 のカバー率が低い日でも読み手が誤解しないように固定で出す
 EARNINGS_NOTE = "決算日が取れない銘柄は、決算前でも候補に出ます。"
 DISCLAIMER = "AI候補提示で投資助言ではない。最終判断と結果責任はユーザーにある。"
-ORDER_NOTE = "並びは20日平均売買代金の降順。順位ではありません。"
+ORDER_NOTE = ("並びは業種の5日リターン順位（昇順）→20日平均売買代金（降順）。"
+              "優劣ではありません。")
 
 
 def _f(value) -> Optional[float]:
@@ -79,7 +80,16 @@ def _streak(row) -> Optional[str]:
     return f"連続{n}日目" if n > 1 else None
 
 
-def build_card(rank: int, row) -> dict:
+def _sector_rank(row, n_sectors: Optional[int]) -> str:
+    """業種の 5 日順位を「銀行業 3/33位」の形に（§2.9）。取れなければ空。"""
+    value = row.get("sector_rank_5d")
+    r = _f(value)
+    if r is None or not n_sectors:
+        return ""
+    return f"{int(r)}/{int(n_sectors)}位"
+
+
+def build_card(rank: int, row, n_sectors: Optional[int] = None) -> dict:
     """1銘柄ぶんの表示内容。値はすべて配信記録の列から来る（§4.3）。"""
     close = _f(row.get("close_t"))
     lp, h0 = _f(row.get("lp")), _f(row.get("h0_high"))
@@ -88,6 +98,7 @@ def build_card(rank: int, row) -> dict:
         "ticker": str(row.get("ticker") or ""),
         "name": str(row.get("name") or ""),
         "sector33": str(row.get("sector33") or ""),
+        "sector_rank": _sector_rank(row, n_sectors),
         "state": str(row.get("state") or "—"),
         "close": _yen(close),
         "landing_ma": MA_LABELS.get(str(row.get("landing_ma") or ""), "—"),
@@ -144,8 +155,10 @@ def build_context(delivered: Optional[pd.DataFrame], summary: dict) -> dict:
     """
     n = 0 if delivered is None else len(delivered)
     score = summary.get("regime_score")
-    cards = ([build_card(i, row) for i, (_idx, row) in enumerate(delivered.iterrows(), start=1)]
-             if n else [])
+    ranking = summary.get("sector_ranking") or []
+    n_sectors = len(ranking) or None
+    cards = ([build_card(i, row, n_sectors)
+              for i, (_idx, row) in enumerate(delivered.iterrows(), start=1)] if n else [])
     return {
         "delivered_on": str(summary.get("delivered_on") or ""),
         "asof": str(summary.get("asof") or ""),

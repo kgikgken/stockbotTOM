@@ -21,6 +21,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .config import Settings
@@ -36,7 +37,7 @@ from .data.jpx_lists import (
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
-from .features import indicators, pullback, regime, swings
+from .features import indicators, pullback, regime, sector as sector_mod, swings
 from .pipeline import (
     DAILY_FEATURES_COLS,
     compute_daily_features,
@@ -410,6 +411,18 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
     return df
 
 
+def _sector_extra(info: dict | None) -> dict:
+    """業種の強弱を配信記録の列に移す（§2.9）。順位表に無い業種は欠損のまま。"""
+    info = info or {}
+    return {
+        "sector_rank_5d": info.get("rank_5d") if info.get("rank_5d") is not None else pd.NA,
+        "sector_rank_20d": info.get("rank_20d") if info.get("rank_20d") is not None else pd.NA,
+        "sector_ret_5d": info.get("ret_5d", np.nan) if info.get("ret_5d") is not None else np.nan,
+        "sector_ret_20d": (info.get("ret_20d", np.nan)
+                           if info.get("ret_20d") is not None else np.nan),
+    }
+
+
 def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -> pd.DataFrame:
     """19 条件で候補を選び、配信記録に保存する（docs/SCREENER.md §2）。
 
@@ -454,9 +467,19 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     gauge = regime.regime_gauge(idx_close, len(idx_close) - 1, breadth_75, breadth_200)
     log(f"[screen] 地合い={gauge['level']}({gauge['score']}/6)")
     sector_by_ticker = dict(zip(universe["ticker"], universe["sector33"].fillna("")))
-    candidates = screen.select_candidates(evaluated, sector_by_ticker)
-    log(f"[screen] 候補 {len(candidates)} 件（売買代金降順・同一33業種は"
-        f"{screen.SECTOR_CAP}件まで。順位ではない）")
+    # 33業種の強弱（§2.9）。並び順にだけ使う。条件にも除外にも使わない
+    strength = sector_mod.sector_strength(ohlcv, tickers, sector_by_ticker, asof)
+    sector_rank = sector_mod.rank_lookup(strength)
+    if len(strength):
+        top = " ".join(f"{r['sector33']}:{r['ret_5d'] * 100:+.1f}%"
+                       for _i, r in strength.head(3).iterrows())
+        log(f"[screen] 業種強弱 {len(strength)}業種（5日・等加重）。上位: {top}")
+    else:
+        log("[screen] 業種強弱が計算できない（5日ぶんの履歴が無い）→ 並びは売買代金のみ")
+    candidates = screen.select_candidates(evaluated, sector_by_ticker,
+                                          sector_rank=sector_rank)
+    log(f"[screen] 候補 {len(candidates)} 件（業種の5日順位→売買代金降順・"
+        f"同一33業種は{screen.SECTOR_CAP}件まで。優劣ではない）")
     log(f"[screen] 候補の止まった線: "
         f"{screen.format_counts(screen.landing_ma_breakdown(candidates), sort=False)}")
 
@@ -486,7 +509,8 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
                    "e1_skipped": meta["e1_skipped"],
                    "earnings_days": float(cand["earnings_days"]),
                    "streak": int(streaks.get(ticker, 1)),
-                   "prev_delivered_on": prev_seen.get(ticker) or pd.NaT},
+                   "prev_delivered_on": prev_seen.get(ticker) or pd.NaT,
+                   **_sector_extra(sector_rank.get(str(cand["sector33"])))},
         ))
     delivered = record.records_to_frame(rows)
     path, written = record.save_delivered(delivered, cfg.daily_dir, delivered_on, asof)
@@ -519,7 +543,8 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
             fetch_meta = {}
     summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on, gauge,
                                    fetch_meta=fetch_meta, delivered_written=written,
-                                   delivered_n=delivered_n)
+                                   delivered_n=delivered_n,
+                                   sector_ranking=sector_mod.ranking_table(strength))
     screen.save_summary(summary, cfg.daily_dir, delivered_on, asof)
     # D-1 の観測日数。判定日 1 つにつき 1 日で数える（§8 D-3）。判定はまだしない
     days = screen.observation_days(cfg.daily_dir)

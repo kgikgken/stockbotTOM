@@ -62,6 +62,12 @@ EXTRA_DEFAULTS: dict = {
     "earnings_days": np.nan,       # 決算発表までの営業日数（取れなければ NaN）。カードに出す
     "streak": 1,                   # 連続点灯日数。今日が初日なら 1（§3.2）
     "prev_delivered_on": pd.NaT,   # 前回この銘柄が候補になった配信日（無ければ空）
+    # 所属業種の強弱（§2.9）。並び順の根拠であり、条件にも除外にも使っていない。
+    # あとから「その日どの業種が強かったか」と成績を突き合わせるために記録する
+    "sector_rank_5d": pd.NA,       # 5日リターンの業種順位（1 が最強。順位表に無ければ空）
+    "sector_rank_20d": pd.NA,      # 20日リターンの業種順位
+    "sector_ret_5d": np.nan,       # 業種の5日等加重リターン
+    "sector_ret_20d": np.nan,      # 業種の20日等加重リターン
 }
 EXTRA_COLS = list(EXTRA_DEFAULTS)
 

@@ -30,6 +30,9 @@
   .box h3 { font-size: 17px; margin-bottom: 4px; }
   .box .sub { font-size: 13px; color: var(--muted); line-height: 1.6; }
   .box .sub.warn { color: var(--warn); font-weight: 700; }
+  .secrank { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 9px;
+             background: #f1ece3; border: 1px solid var(--line); font-size: 11px;
+             font-weight: 700; color: var(--accent); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
@@ -107,7 +110,8 @@
         <span class="tag">{{ c.state }}</span>
         {% if c.streak %}<span class="tag streak">{{ c.streak }}</span>{% endif %}
       </div>
-      <div class="meta">{{ c.sector33 }}</div>
+      <div class="meta">{{ c.sector33 }}{% if c.sector_rank %}
+        <span class="secrank">{{ c.sector_rank }}</span>{% endif %}</div>
       <div class="vals">
         <div class="val">
           <div class="k">終値</div><div class="v">{{ c.close }}円</div>

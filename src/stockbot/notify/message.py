@@ -82,12 +82,23 @@ def _streak(row) -> str:
     return f"（連続{n}日目）" if n > 1 else ""
 
 
-def _card(i: int, row) -> list[str]:
+def _sector(row, n_sectors: Optional[int]) -> str:
+    """業種と 5 日順位（§2.9）。順位が取れなければ業種名だけ。"""
+    name = str(row.get("sector33") or "")
+    r = row.get("sector_rank_5d")
+    try:
+        rank = int(r)
+    except (TypeError, ValueError):
+        return name or "—"
+    return f"{name} {rank}/{n_sectors}位" if n_sectors else name or "—"
+
+
+def _card(i: int, row, n_sectors: Optional[int] = None) -> list[str]:
     ma = MA_LABELS.get(str(row.get("landing_ma") or ""), "—")
     return [
         f"{i}. {row['ticker']} {row.get('name') or ''}{_streak(row)}".rstrip(),
-        f"   終値 {_num(row['close_t'])}円 ／ {row.get('state') or '—'}"
-        f" ／ {_oku(row.get('adv_jpy'))}",
+        f"   {_sector(row, n_sectors)} ／ {row.get('state') or '—'}",
+        f"   終値 {_num(row['close_t'])}円 ／ {_oku(row.get('adv_jpy'))}",
         f"   止まった線 {ma}（{_num(row.get('landing_dist_atr'), 2)} ATR）",
         f"   撤退ライン（押し安値） {_num(row['lp'])}円",
         f"   目標の目安（直近高値） {_num(row['h0_high'])}円",
@@ -112,7 +123,8 @@ def _zero_day(summary: dict) -> list[str]:
 
 
 DISCLAIMER = "この配信は監視候補の一覧です。売買の判断はご自身で行ってください。"
-ORDER_NOTE = "並びは20日平均売買代金の降順です。順位ではありません。"
+ORDER_NOTE = ("並びは業種の5日リターン順位（昇順）→20日平均売買代金（降順）です。"
+              "優劣ではありません。")
 
 
 def build_message(delivered: Optional[pd.DataFrame], summary: dict,
@@ -136,7 +148,9 @@ def build_message(delivered: Optional[pd.DataFrame], summary: dict,
     if n == 0:
         return "\n".join(head + [""] + _zero_day(summary) + foot)
 
-    cards = [_card(i, row) for i, (_idx, row) in enumerate(delivered.iterrows(), start=1)]
+    n_sectors = len(summary.get("sector_ranking") or []) or None
+    cards = [_card(i, row, n_sectors)
+             for i, (_idx, row) in enumerate(delivered.iterrows(), start=1)]
 
     def render(keep: int) -> str:
         lines = head + [ORDER_NOTE]

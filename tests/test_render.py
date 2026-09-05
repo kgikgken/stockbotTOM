@@ -140,7 +140,7 @@ class HtmlTest(unittest.TestCase):
                          "1,790.5", "-2.4%", "1,867.5", "+1.8%", "4.12%", "6日",
                          "反発開始", "70.1億円", "決算日未取得", EXIT_RULE,
                          "3,663/3,786", "決算前でも候補に出ます",
-                         "順位ではありません", "未適用"):
+                         "優劣ではありません", "未適用"):
             self.assertIn(expected, out, expected)
 
     def test_excluded_items_are_absent(self):
