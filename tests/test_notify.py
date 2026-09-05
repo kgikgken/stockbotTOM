@@ -128,9 +128,15 @@ class HeaderTest(unittest.TestCase):
         self.assertIn("判定 2026-08-31 の引け", text)
 
     def test_not_a_ranking(self):
+        """並び順に業種順位を使うようになっても、優劣ではないと断り続ける（§2.9）。
+
+        「順位ではありません」とは書けない —— 並びに業種の 5 日順位を実際に使うので、
+        それは事実に反する。断るべきは「その順が成績の良し悪しを表さない」ことの方。
+        """
         text = build_message(frame([make_record()]), make_summary())
-        self.assertIn("順位ではありません", text)
-        self.assertIn("売買代金の降順", text)
+        self.assertIn("優劣ではありません", text)
+        self.assertIn("業種の5日リターン順位", text)
+        self.assertIn("売買代金", text)
 
     def test_e1_skipped_line(self):
         text = build_message(frame([make_record()]), make_summary(e1_skipped=True, n_pool=1))

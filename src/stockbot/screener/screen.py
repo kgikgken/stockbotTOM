@@ -167,22 +167,38 @@ def apply_e1(df: pd.DataFrame, top_pctl: float = E1_TOP_PCTL,
     return out, meta
 
 
-def select_candidates(df: pd.DataFrame, sector_by_ticker: Optional[Dict[str, str]] = None,
-                      sector_cap: int = SECTOR_CAP) -> pd.DataFrame:
-    """通過銘柄を売買代金の降順に並べ、同一 33 業種を sector_cap 件までに絞る。
+NO_SECTOR_RANK = 10_000   # 業種順位が取れない銘柄。並びの最後に置くための番兵
 
-    並び順は売買代金であって優劣ではない（順位を付けない、docs/SCREENER.md §2.5）。
-    売買代金が同じ場合は銘柄コード順（実行のたびに並びが変わらないようにするため）。
+
+def select_candidates(df: pd.DataFrame, sector_by_ticker: Optional[Dict[str, str]] = None,
+                      sector_cap: int = SECTOR_CAP,
+                      sector_rank: Optional[Dict[str, dict]] = None) -> pd.DataFrame:
+    """通過銘柄を並べ、同一 33 業種を sector_cap 件までに絞る。
+
+    並び順は **所属業種の 5 日順位（昇順）→ 20 日平均売買代金（降順）** で、同じなら
+    銘柄コード順（実行のたびに並びが変わらないようにするため）。順位表が無い日は
+    売買代金の降順だけになる（docs/SCREENER.md §2.8・§2.9）。
+
+    **並び順は優劣ではない。** 業種の 5 日リターンで先に並べるが、その順が成績に効く
+    という裏付けは無い（§2.9）。業種順位は並び順にだけ使い、**候補の集合は変えない** ——
+    上限は業種ごとの件数なので、同じ業種の中では売買代金の降順で選ばれる点が
+    並べ替えの前後で変わらないため。
+
     業種が取れない銘柄は上限の対象外（互いに別業種として扱う）。
     """
     if len(df) == 0:
         out = df.copy()
         out["sector33"] = pd.Series(dtype=str)
+        out["sector_rank_5d"] = pd.Series(dtype="float")
         return out
     passed = df[df["passes"].astype(bool)].copy()
     sector_by_ticker = sector_by_ticker or {}
+    sector_rank = sector_rank or {}
     passed["sector33"] = passed["ticker"].map(lambda t: str(sector_by_ticker.get(t, "") or ""))
-    passed = passed.sort_values(["adv_jpy", "ticker"], ascending=[False, True])
+    passed["sector_rank_5d"] = passed["sector33"].map(
+        lambda s: (sector_rank.get(s) or {}).get("rank_5d") or NO_SECTOR_RANK)
+    passed = passed.sort_values(["sector_rank_5d", "adv_jpy", "ticker"],
+                                ascending=[True, False, True])
 
     counts: Dict[str, int] = {}
     keep = []
@@ -245,7 +261,8 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
                   asof, delivered_on, gauge: Optional[dict] = None,
                   fetch_meta: Optional[dict] = None,
                   delivered_written: bool = True,
-                  delivered_n: Optional[int] = None) -> dict:
+                  delivered_n: Optional[int] = None,
+                  sector_ranking: Optional[list] = None) -> dict:
     """その日のスクリーニングの要約（docs/SCREENER.md §3.6）。
 
     Actions のログは 90 日で消えるが、E1 のスキップ率や条件別の不成立件数は
@@ -275,9 +292,11 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
         "fail_counts": fail_counts(evaluated),
         "landing_ma_all": landing_ma_breakdown(evaluated),
         "landing_ma_candidates": landing_ma_breakdown(candidates),
-        # 候補の偏りを日次で残す（§3.6）。条件にも並び順にも使わない
+        # 候補の偏りを日次で残す（§3.6）。集計するだけで条件には使わない
         "sector_candidates": sector_breakdown(candidates),
         "adv_candidates": adv_stats(candidates),
+        # 33業種の順位表（§2.9）。並び順の根拠なので、その日の表をそのまま残す
+        "sector_ranking": sector_ranking or [],
         # 台帳に実際に書けたか（§3.2）。False の日は配信本文とカードに注記を出す
         "delivered_written": bool(delivered_written),
         "delivered_n": (int(delivered_n) if delivered_n is not None else int(len(candidates))),
