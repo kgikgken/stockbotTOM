@@ -140,17 +140,8 @@
     {% endfor %}
   {% else %}
     <div class="box zero">
-      <div class="lead">本日は19条件を全て満たす銘柄がありませんでした。</div>
-      <table>
-        {% for r in ctx.zero_day.rows %}
-        <tr><td>{{ r.cid }}</td><td>{{ r.label }}</td>
-            <td class="n">{{ "{:,}".format(r.n) }}件</td></tr>
-        {% endfor %}
-      </table>
-      <div class="sub" style="margin-top:9px">
-        落ちた条件の上位{{ ctx.zero_day.rows|length }}件（評価 {{ "{:,}".format(ctx.zero_day.n_evaluated) }}銘柄・延べ件数・多い順）。
-        1銘柄が複数の条件で落ちるため、合計は評価銘柄数を超えます。
-      </div>
+      <div class="lead">本日の候補はありません。</div>
+      <div class="sub" style="margin-top:9px">判定対象 {{ "{:,}".format(ctx.zero_day.n_evaluated) }}銘柄。</div>
     </div>
   {% endif %}
 
@@ -172,8 +163,7 @@
     {% endfor %}
   </div>
   {% else %}
-  <div class="box zero"><div class="lead">本日の候補はありません。</div>
-    <div class="sub">落ちた条件の内訳は1枚目を参照。</div></div>
+  <div class="box zero"><div class="lead">本日の候補はありません。</div></div>
   {% endif %}
   <div class="foot">詳細（撤退ライン・目標の目安・深さ・決算）は1枚目を参照。<br>{{ ctx.disclaimer }}</div>
 </div>

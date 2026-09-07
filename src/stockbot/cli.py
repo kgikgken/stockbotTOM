@@ -8,7 +8,6 @@
   python -m stockbot.cli references  # 決算発表予定日・上場廃止銘柄一覧の更新のみ
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
   python -m stockbot.cli features    # 保存済みデータから日次特徴量を再計算・保存
-  python -m stockbot.cli screen      # 19条件で候補を選び、配信記録に保存（docs/SCREENER.md §2）
   python -m stockbot.cli resolve     # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）
   python -m stockbot.cli notify      # その日の配信記録を LINE に流す（docs/SCREENER.md §4）
 
@@ -37,7 +36,7 @@ from .data.jpx_lists import (
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
-from .features import indicators, pullback, regime, sector as sector_mod, swings
+from .features import indicators, pullback, regime, sector as sector_mod, swings  # noqa: F401
 from .pipeline import (
     DAILY_FEATURES_COLS,
     compute_daily_features,
@@ -46,7 +45,7 @@ from .pipeline import (
 )
 from .notify import line_send, message
 from .render import render as render_images_mod
-from .screener import record, resolver, screen
+from .screener import record, resolver
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -411,160 +410,6 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
     return df
 
 
-def _sector_extra(info: dict | None) -> dict:
-    """業種の強弱を配信記録の列に移す（§2.9）。順位表に無い業種は欠損のまま。"""
-    info = info or {}
-    return {
-        "sector_rank_5d": info.get("rank_5d") if info.get("rank_5d") is not None else pd.NA,
-        "sector_rank_20d": info.get("rank_20d") if info.get("rank_20d") is not None else pd.NA,
-        "sector_ret_5d": info.get("ret_5d", np.nan) if info.get("ret_5d") is not None else np.nan,
-        "sector_ret_20d": (info.get("ret_20d", np.nan)
-                           if info.get("ret_20d") is not None else np.nan),
-    }
-
-
-def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -> pd.DataFrame:
-    """19 条件で候補を選び、配信記録に保存する（docs/SCREENER.md §2）。
-
-    ユニバース通過銘柄を母集団として A〜D・E2・E3 を銘柄ごとに判定し、その通過集合に
-    E1（当日候補内で rs60 の上位10%を落とす）を掛け、売買代金の降順・同一33業種3件までに
-    絞る。順位は付けない。結果を daily/delivered_<配信日>_asof<判定日>.csv に書く（§3.2）。
-
-    配信記録は「その日に何を出したか」の台帳なので、同じ配信日・同じ判定日で 2 回
-    実行しても最初の記録が正（save_delivered が上書きしない）。判定日が違えば
-    ファイル名が違うので、引け前と引け後の実行は別の記録として両方残る（§3.2）。
-    """
-    cfg.ensure_dirs()
-    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
-    idx_df = from_long(store.load()).get(IDX_TICKER)
-    if idx_df is None or len(idx_df) == 0:
-        log("[screen] 指数データが無いためスキップ（E1 の rs60 が計算できない）")
-        return pd.DataFrame(columns=record.DELIVERED_COLS)
-
-    earnings_schedule = None
-    p = cfg.reference_dir / "earnings_schedule.csv"
-    if p.exists():
-        earnings_schedule = load_earnings_schedule(p)
-    else:
-        log("[screen] 決算発表予定日が無い → A4 は全銘柄で「決算日未取得」扱い")
-
-    tickers = universe[universe["passes"]]["ticker"].tolist()
-    evaluated = screen.evaluate_universe(ohlcv, tickers, idx_df["Close"], cfg.k,
-                                         earnings_schedule=earnings_schedule, log=log)
-    evaluated, meta = screen.apply_e1(evaluated, log=log)
-
-    # 判定日 T。ファイル名にも入るので、記録を書く前に確定させる（§3.2）。
-    # 評価が 0 件の日は銘柄側から取れないので、営業日軸（指数）の最終日で代用する
-    asof = record.as_calendar_date(evaluated["date"].max()) if len(evaluated) \
-        else record.as_calendar_date(idx_df.index[-1])
-    log(f"[screen] 判定日 {asof:%Y-%m-%d}")
-
-    # 地合いゲージ（DESIGN.md §8.1）。条件にも順位にも使わない。配信の見出しに出すだけ
-    idx_close = idx_df["Close"]
-    asof_idx = idx_close.index[-1]
-    breadth_75, breadth_200, _n = regime.compute_breadth(
-        {t: ohlcv[t] for t in tickers if t in ohlcv and ohlcv[t] is not None}, asof_idx)
-    gauge = regime.regime_gauge(idx_close, len(idx_close) - 1, breadth_75, breadth_200)
-    log(f"[screen] 地合い={gauge['level']}({gauge['score']}/6)")
-    sector_by_ticker = dict(zip(universe["ticker"], universe["sector33"].fillna("")))
-    # 33業種の強弱（§2.9）。並び順にだけ使う。条件にも除外にも使わない
-    strength = sector_mod.sector_strength(ohlcv, tickers, sector_by_ticker, asof)
-    sector_rank = sector_mod.rank_lookup(strength)
-    if len(strength):
-        top = " ".join(f"{r['sector33']}:{r['ret_5d'] * 100:+.1f}%"
-                       for _i, r in strength.head(3).iterrows())
-        log(f"[screen] 業種強弱 {len(strength)}業種（5日・等加重）。上位: {top}")
-    else:
-        log("[screen] 業種強弱が計算できない（5日ぶんの履歴が無い）→ 並びは売買代金のみ")
-    candidates = screen.select_candidates(evaluated, sector_by_ticker,
-                                          sector_rank=sector_rank)
-    log(f"[screen] 候補 {len(candidates)} 件（業種の5日順位→売買代金降順・"
-        f"同一33業種は{screen.SECTOR_CAP}件まで。優劣ではない）")
-    log(f"[screen] 候補の止まった線: "
-        f"{screen.format_counts(screen.landing_ma_breakdown(candidates), sort=False)}")
-
-    name_by_ticker = dict(zip(universe["ticker"], universe["name"].fillna("")))
-    # 配信日は「JST のその日」というカレンダー日であって時刻ではない。tz を落として
-    # 過去の配信記録（ファイル名由来で tz なし）と比較できるようにする
-    delivered_on = record.as_calendar_date(_now())
-    # 連続点灯日数と前回点灯日は、過去の配信記録から記録時点で確定させる（§3.2）
-    streaks, prev_seen = record.lookback_stats(
-        cfg.daily_dir, [str(t) for t in candidates["ticker"]], delivered_on)
-    rows = []
-    for _i, cand in candidates.iterrows():
-        ticker = str(cand["ticker"])
-        df = ohlcv[ticker]
-        high, low, close = df["High"], df["Low"], df["Close"]
-        t_pos = len(df) - 1
-        alt = swings.alternate_swings(swings.detect_raw_swings(high, low, cfg.k))
-        pb = pullback.pullback_state(high, low, close, indicators.sma(close, 5),
-                                     indicators.sma(close, 200),
-                                     indicators.atr_wilder(high, low, close, 14),
-                                     alt, t_pos, cfg.k)
-        rows.append(record.build_record(
-            ticker, high, low, close, pb, t_pos, delivered_on,
-            name=str(name_by_ticker.get(ticker, "")),
-            extra={"adv_jpy": float(cand["adv_jpy"]), "sector33": str(cand["sector33"]),
-                   "a4_earnings_unknown": bool(cand["a4_earnings_unknown"]),
-                   "e1_skipped": meta["e1_skipped"],
-                   "earnings_days": float(cand["earnings_days"]),
-                   "streak": int(streaks.get(ticker, 1)),
-                   "prev_delivered_on": prev_seen.get(ticker) or pd.NaT,
-                   **_sector_extra(sector_rank.get(str(cand["sector33"])))},
-        ))
-    delivered = record.records_to_frame(rows)
-    path, written = record.save_delivered(delivered, cfg.daily_dir, delivered_on, asof)
-    if written:
-        delivered_n = len(delivered)
-        log(f"[screen] 配信記録 {delivered_n} 件を {path.name} に保存"
-            + ("（E1 スキップ日）" if meta["e1_skipped"] else ""))
-    else:
-        # 台帳は上書きしない。**「保存した」と書かない** —— 以前はメモリ上の件数を
-        # そのままログに出していたため、書けていないことが誰にも見えなかった（§3.2）
-        existing = record.load_delivered(path)
-        delivered_n = len(existing)
-        log(f"[screen] 警告: {path.name} は既にある。今回の判定 {len(delivered)}件は"
-            f"保存していない（ファイルにある {delivered_n}件が正）")
-    repeats = [f"{r['ticker']}:{int(r['streak'])}日目" for _i, r in delivered.iterrows()
-               if int(r["streak"]) > 1]
-    if repeats:
-        log(f"[screen] 連続点灯: {' '.join(repeats)}")
-
-    # Actions のログは 90 日で消える。E1 のスキップ率や条件別の不成立件数は
-    # 数週間かけて見るものなので、リポジトリ側にも残す（docs/SCREENER.md §3.6）
-    # 取得成功率は fetch_meta.json（step_fetch が書く）から。描画側は screen_summary と
-    # delivered しか読まないので、必要な値はここで要約に畳んでおく（docs/SCREENER.md §4.5）
-    fetch_meta = {}
-    fm = cfg.store_dir / "fetch_meta.json"
-    if fm.exists():
-        try:
-            fetch_meta = json.loads(fm.read_text())
-        except (OSError, ValueError):
-            fetch_meta = {}
-    summary = screen.build_summary(evaluated, candidates, meta, asof, delivered_on, gauge,
-                                   fetch_meta=fetch_meta, delivered_written=written,
-                                   delivered_n=delivered_n,
-                                   sector_ranking=sector_mod.ranking_table(strength))
-    screen.save_summary(summary, cfg.daily_dir, delivered_on, asof)
-    # D-1 の観測日数。判定日 1 つにつき 1 日で数える（§8 D-3）。判定はまだしない
-    days = screen.observation_days(cfg.daily_dir)
-    log(f"[screen] 観測 {len(days)}日目（判定日ユニーク） / "
-        f"E1 スキップ {sum(1 for d in days if d.e1_skipped)}日")
-    alert = summary["small_sector_top5"]
-    if alert["flag"]:
-        detail = " ".join(f"{a['sector33']}(n={a['n']}・{a['rank_5d']}位・候補{a['n_candidates']}件)"
-                          for a in alert["sectors"])
-        log(f"[screen] 注意: 構成銘柄の薄い業種が上位に来て候補も出ている → {detail}")
-    # 候補の偏りは日次で残す（§3.6）。集計するだけで条件にも並び順にも使わない
-    if summary["sector_candidates"]:
-        adv = summary["adv_candidates"]
-        log(f"[screen] 候補の業種内訳: "
-            f"{screen.format_counts(summary['sector_candidates'], sort=False)}")
-        log(f"[screen] 候補の売買代金: 最大 {adv['max'] / 1e8:,.1f}億 / "
-            f"中央 {adv['median'] / 1e8:,.1f}億 / 最小 {adv['min'] / 1e8:,.1f}億")
-    return delivered
-
-
 def step_resolve(cfg: Settings, log=print) -> list[Path]:
     """配信記録（daily/delivered_<配信日>_asof<判定日>.csv）に 5 営業日後の結果を付ける
     （docs/SCREENER.md §3.3）。
@@ -599,9 +444,12 @@ def step_notify(cfg: Settings, log=print) -> dict:
     """
     cfg.ensure_dirs()
     delivered_on = record.as_calendar_date(_now())
-    found = screen.latest_summary(cfg.daily_dir, delivered_on)
+    found = record.latest_summary(cfg.daily_dir, delivered_on)
     if found is None:
-        log(f"[notify] {delivered_on:%Y-%m-%d} の要約が無いためスキップ（先に screen を実行）")
+        # スクリーナー撤去後はこれが通常の経路。空の配信を送らないための止め方その 2
+        # （その 1 はワークフローから Notify ステップを外したこと）。SCREENER_CLOSING.md
+        log(f"[notify] {delivered_on:%Y-%m-%d} の要約が無いため配信しない"
+            "（19条件のスクリーナーは撤去済み。docs/SCREENER_CLOSING.md）")
         return {"sent": False, "status": None, "reason": "要約が無い"}
 
     summary = json.loads(found.path.read_text(encoding="utf-8"))
@@ -652,7 +500,7 @@ def step_notify(cfg: Settings, log=print) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
-                                       "references", "universe", "features", "screen",
+                                       "references", "universe", "features",
                                        "resolve", "notify", "refetch-recent-splits"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
@@ -673,14 +521,6 @@ def main(argv: list[str] | None = None) -> int:
             step_refetch_recent_splits(cfg, log)
         elif args.command == "references":
             step_references(cfg, log)
-        elif args.command == "screen":
-            store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
-            ohlcv = from_long(store.load())
-            u = load_latest_universe(cfg.universe_dir)
-            if u is None:
-                log("[screen] ユニバースが無いためスキップ（先に universe を実行）")
-            else:
-                step_screen(cfg, u, ohlcv, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":

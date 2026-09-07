@@ -14,11 +14,9 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ..screener.conditions import CONDITION_LABELS
 from ..screener.record import RECORD_MISMATCH_NOTE
 
 MAX_TEXT = 4900  # Worker 側で切られる上限（src/worker.js）。ここで超えないようにする
-TOP_FAILS = 3    # 候補0件の日に添える「落ちた条件」の件数
 
 # 通常は画像カード2枚だけを送る（§4.5）。この本文が流れるのは描画か送信に失敗した日
 # だけなので、受け取った側が「いつもと違う」と分かるように先頭で断る（§4.4）
@@ -108,18 +106,13 @@ def _card(i: int, row, n_sectors: Optional[int] = None) -> list[str]:
 
 
 def _zero_day(summary: dict) -> list[str]:
-    """候補0件の日。落ちた条件の上位を添える（§4.2）。"""
-    lines = ["本日は19条件を全て満たす銘柄がありませんでした。"]
-    fails = summary.get("fail_counts") or {}
-    if fails:
-        top = sorted(fails.items(), key=lambda kv: -kv[1])[:TOP_FAILS]
-        # 1銘柄が複数の条件で落ちるので、合計は評価銘柄数を超える。「延べ」と明記しないと
-        # 数字が矛盾しているように読める
-        lines.append(f"落ちた条件（評価 {summary.get('n_evaluated', 0):,}銘柄・"
-                     "延べ件数・多い順）:")
-        for cid, n in top:
-            lines.append(f"   {cid} {CONDITION_LABELS.get(cid, '')} … {n:,}件")
-    return lines
+    """候補0件の日（§4.2）。
+
+    以前は「落ちた条件の上位3つ」を添えていたが、19 条件のスクリーナーごと撤去したので
+    出す中身が無くなった（SCREENER_CLOSING.md）。条件名の対応表は conditions.py に
+    あったもので、条件が無い今それを残すと存在しない判定を説明することになる。
+    """
+    return ["本日の候補はありません。"]
 
 
 DISCLAIMER = "この配信は監視候補の一覧です。売買の判断はご自身で行ってください。"
