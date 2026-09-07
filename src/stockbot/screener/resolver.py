@@ -58,6 +58,11 @@ OUTCOME_COLS = [
     "recovered_sma5",       # 5 日線を回復したか（Close > SMA5 の日があるか）
     "recovered_sma5_day",
     "success",              # 押し安値を割る前に直近高値を更新したか（SPEC §1 成功の定義）
+    # 配信時点の上下の距離（docs/SCREENER.md §3.3・§7 Q-2）。**T の引けの値だけで決まる**
+    "up_pct",               # (直近高値 − 終値[T]) / 終値[T]。目標までの距離
+    "down_pct",             # (押し安値 − 終値[T]) / 終値[T]。撤退までの距離（負）
+    "rr",                   # up_pct / |down_pct|。1 未満なら目標のほうが近い
+    "breakeven_win_rate",   # 1 / (1 + rr)。これを上回る勝率が無いと期待値が負になる
 ]
 
 DATE_COLS = ["delivered_on", "asof", "resolved_on"]
@@ -100,6 +105,43 @@ def _first_day(mask: np.ndarray) -> Optional[int]:
     return int(hits[0]) + 1 if hits.size else None
 
 
+def _risk_reward(row: pd.Series) -> Dict[str, float]:
+    """配信時点の上下の距離と損益分岐勝率（docs/SCREENER.md §3.3・§7 Q-2）。
+
+    **配信記録に書いてある T の引けの値だけで決まる。** 結果ではなく、配信した時点で
+    その 1 件がどういう賭けだったかを表す量なので、outcome を付けるたびに同じ値が出る。
+    ここで計算するのは、実現勝率と並べて読めるようにするため（§7 Q-2 の判定規則）。
+
+    - `up_pct`   = (直近高値 − 終値[T]) / 終値[T]
+    - `down_pct` = (押し安値 − 終値[T]) / 終値[T]（負）
+    - `rr`       = up_pct / |down_pct|。**1 未満なら目標のほうが撤退より近い**
+    - `breakeven_win_rate` = 1 / (1 + rr)。手数料・滑りは含めない（下限の目安）
+
+    2026-09-07 の 9 件は rr が 0.21〜0.93、損益分岐勝率の中央値が 72% だった。
+    """
+    nan = {"up_pct": np.nan, "down_pct": np.nan, "rr": np.nan,
+           "breakeven_win_rate": np.nan}
+    try:
+        close = float(row["close_t"])
+        lp = float(row["lp"])
+        h0 = float(row["h0_high"])
+    except (KeyError, TypeError, ValueError):
+        return nan
+    if not (np.isfinite(close) and close > 0 and np.isfinite(lp) and np.isfinite(h0)):
+        return nan
+    up = h0 / close - 1.0
+    down = lp / close - 1.0
+    out = {"up_pct": float(up), "down_pct": float(down), "rr": np.nan,
+           "breakeven_win_rate": np.nan}
+    # 押し安値が終値以上（既に割れている等）だと損失幅が定義できない。距離だけ残す
+    if down >= 0 or up <= 0:
+        return out
+    rr = up / -down
+    out["rr"] = float(rr)
+    out["breakeven_win_rate"] = float(1.0 / (1.0 + rr))
+    return out
+
+
 def resolve_row(row: pd.Series, df: Optional[pd.DataFrame],
                 horizon: int = HORIZON_DAYS, resolved_on=None) -> dict:
     """配信記録 1 行に結果を付ける（docs/SCREENER.md §3.3）。
@@ -121,6 +163,7 @@ def resolve_row(row: pd.Series, df: Optional[pd.DataFrame],
         "reached_h0": pd.NA, "reached_h0_day": pd.NA,
         "recovered_sma5": pd.NA, "recovered_sma5_day": pd.NA,
         "success": pd.NA,
+        **_risk_reward(row),
     }
     if df is None or len(df) == 0:
         return out

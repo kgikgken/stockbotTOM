@@ -351,3 +351,61 @@ class TwoJudgementsOneDayTest(unittest.TestCase):
             self.assertEqual(len(j), 1)
             self.assertEqual(j["ticker"].iloc[0], "1234.T")
             self.assertTrue(bool(j["success"].iloc[0]))
+
+
+class RiskRewardTest(unittest.TestCase):
+    """配信時点の上下の距離と損益分岐勝率（docs/SCREENER.md §3.3・§7 Q-2）。
+
+    **結果ではなく、配信した時点でその 1 件がどういう賭けだったかを表す量。**
+    T の引けの値だけで決まるので、結果が付く前でも付いたあとでも同じ値になる。
+    """
+
+    def test_values_match_a_hand_computation(self):
+        rec = make_record(lp=95.0, h0_high=102.0)   # close_t = 100.0
+        out = resolve_row(pd.Series(rec), make_frame([101, 103, 105, 107, 109]))
+        self.assertAlmostEqual(out["up_pct"], 0.02, places=9)
+        self.assertAlmostEqual(out["down_pct"], -0.05, places=9)
+        self.assertAlmostEqual(out["rr"], 0.4, places=9)
+        self.assertAlmostEqual(out["breakeven_win_rate"], 1 / 1.4, places=9)
+
+    def test_rr_below_one_means_target_is_nearer(self):
+        near = resolve_row(pd.Series(make_record(lp=90.0, h0_high=102.0)), None)
+        far = resolve_row(pd.Series(make_record(lp=98.0, h0_high=120.0)), None)
+        self.assertLess(near["rr"], 1.0)
+        self.assertGreater(far["rr"], 1.0)
+        self.assertGreater(near["breakeven_win_rate"], 0.5)
+        self.assertLess(far["breakeven_win_rate"], 0.5)
+
+    def test_computed_even_when_no_bars_are_available(self):
+        """結果が付けられない行でも距離は出る（T の値だけで決まるため）。"""
+        out = resolve_row(pd.Series(make_record(lp=95.0, h0_high=102.0)), None)
+        self.assertEqual(out["n_bars"], 0)
+        self.assertTrue(out["censored"])
+        self.assertAlmostEqual(out["rr"], 0.4, places=9)
+
+    def test_identical_regardless_of_what_happened_after(self):
+        rec = pd.Series(make_record(lp=95.0, h0_high=102.0))
+        win = resolve_row(rec, make_frame([101, 103, 105, 107, 109]))
+        lose = resolve_row(rec, make_frame([98, 94, 92, 90, 88]))
+        for col in ("up_pct", "down_pct", "rr", "breakeven_win_rate"):
+            self.assertAlmostEqual(win[col], lose[col], places=12)
+
+    def test_stop_above_close_leaves_ratio_missing(self):
+        """押し安値が終値以上だと損失幅が定義できない。距離だけ残す。"""
+        out = resolve_row(pd.Series(make_record(lp=105.0, h0_high=110.0)), None)
+        self.assertAlmostEqual(out["down_pct"], 0.05, places=9)
+        self.assertTrue(pd.isna(out["rr"]))
+        self.assertTrue(pd.isna(out["breakeven_win_rate"]))
+
+    def test_columns_are_in_the_outcome_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            daily = Path(tmp)
+            save_delivered(records_to_frame([make_record(lp=95.0, h0_high=102.0)]),
+                           daily, DELIVERED_ON, ASOF)
+            ohlcv = calendar_ohlcv({"1234.T": make_frame([101, 103, 105, 107, 109])})
+            written = resolve_pending(daily, ohlcv, log=lambda *_a: None)
+            back = load_outcome(written[0])
+            for col in ("up_pct", "down_pct", "rr", "breakeven_win_rate"):
+                self.assertIn(col, back.columns)
+            self.assertAlmostEqual(float(back["breakeven_win_rate"].iloc[0]),
+                                   1 / 1.4, places=6)

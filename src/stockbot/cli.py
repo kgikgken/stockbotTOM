@@ -550,6 +550,11 @@ def step_screen(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print) -
     days = screen.observation_days(cfg.daily_dir)
     log(f"[screen] 観測 {len(days)}日目（判定日ユニーク） / "
         f"E1 スキップ {sum(1 for d in days if d.e1_skipped)}日")
+    alert = summary["small_sector_top5"]
+    if alert["flag"]:
+        detail = " ".join(f"{a['sector33']}(n={a['n']}・{a['rank_5d']}位・候補{a['n_candidates']}件)"
+                          for a in alert["sectors"])
+        log(f"[screen] 注意: 構成銘柄の薄い業種が上位に来て候補も出ている → {detail}")
     # 候補の偏りは日次で残す（§3.6）。集計するだけで条件にも並び順にも使わない
     if summary["sector_candidates"]:
         adv = summary["adv_candidates"]

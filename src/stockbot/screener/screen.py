@@ -257,6 +257,43 @@ def adv_stats(candidates: pd.DataFrame) -> Dict[str, Optional[float]]:
             "median": float(vals.median())}
 
 
+# 業種順位が薄い母集団で決まった日を拾うための監視用の値（docs/SCREENER.md §3.6）。
+# **条件でも閾値でもない。** 記録に印を付けるだけで、候補の集合にも並び順にも影響しない
+SMALL_SECTOR_N = 10    # これ未満の構成銘柄数を「薄い業種」とする
+SMALL_SECTOR_TOP = 5   # 5日順位がこの位以内に入ったら拾う
+
+
+def small_sector_alert(sector_ranking: Optional[list],
+                       candidates: pd.DataFrame) -> Dict[str, object]:
+    """薄い業種が上位に来て、しかもそこから候補が出た日に印を付ける（§3.6）。
+
+    条件は 3 つの積: `n` < SMALL_SECTOR_N かつ 5 日順位 ≤ SMALL_SECTOR_TOP かつ
+    その業種に候補がある。**その日の並びが少数銘柄の値動きで決まった可能性がある**
+    ということで、間違いという意味ではない。§2.9 の測定で 5 銘柄の業種は 1 銘柄を
+    抜くだけで 8 位動くと分かっているので、あとから振り返れるように印だけ残す。
+
+    集計するだけで、条件にも並び順にも使わない。閾値 2 つは監視の粒度であって、
+    候補の判定には一切入らない。
+    """
+    out: Dict[str, object] = {"flag": False, "sectors": []}
+    if not sector_ranking:
+        return out
+    counts = sector_breakdown(candidates)
+    rows = []
+    for row in sector_ranking:
+        name = str(row.get("sector33") or "")
+        n_cand = int(counts.get(name, 0))
+        if (int(row.get("n") or 0) < SMALL_SECTOR_N
+                and int(row.get("rank_5d") or 10**6) <= SMALL_SECTOR_TOP
+                and n_cand > 0):
+            rows.append({"sector33": name, "n": int(row["n"]),
+                         "rank_5d": int(row["rank_5d"]), "ret_5d": row.get("ret_5d"),
+                         "n_candidates": n_cand})
+    out["flag"] = bool(rows)
+    out["sectors"] = rows
+    return out
+
+
 def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
                   asof, delivered_on, gauge: Optional[dict] = None,
                   fetch_meta: Optional[dict] = None,
@@ -297,6 +334,8 @@ def build_summary(evaluated: pd.DataFrame, candidates: pd.DataFrame, meta: dict,
         "adv_candidates": adv_stats(candidates),
         # 33業種の順位表（§2.9）。並び順の根拠なので、その日の表をそのまま残す
         "sector_ranking": sector_ranking or [],
+        # 薄い業種が上位に来て、そこから候補が出た日（§3.6）。監視用の印
+        "small_sector_top5": small_sector_alert(sector_ranking, candidates),
         # 台帳に実際に書けたか（§3.2）。False の日は配信本文とカードに注記を出す
         "delivered_written": bool(delivered_written),
         "delivered_n": (int(delivered_n) if delivered_n is not None else int(len(candidates))),

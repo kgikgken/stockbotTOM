@@ -17,6 +17,8 @@ from stockbot.screener.screen import (
     E1_MIN_POOL,
     SCREEN_COLS,
     SECTOR_CAP,
+    SMALL_SECTOR_N,
+    SMALL_SECTOR_TOP,
     adv_stats,
     apply_e1,
     build_summary,
@@ -29,6 +31,7 @@ from stockbot.screener.screen import (
     observation_days,
     save_summary,
     sector_breakdown,
+    small_sector_alert,
     select_candidates,
     summary_path,
 )
@@ -371,3 +374,69 @@ class ObservationDaysTest(unittest.TestCase):
     def test_empty_directory_is_zero_days(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(observation_days(Path(tmp)), [])
+
+
+class SmallSectorAlertTest(unittest.TestCase):
+    """薄い業種が上位に来て候補も出た日の印（docs/SCREENER.md §3.6）。
+
+    印を付けるだけで、候補の集合にも並び順にも影響しない。
+    """
+
+    def _ranking(self):
+        return [
+            {"sector33": "石油・石炭製品", "n": 3, "rank_5d": 1, "ret_5d": 0.040},
+            {"sector33": "電気・ガス業", "n": 19, "rank_5d": 2, "ret_5d": 0.035},
+            {"sector33": "保険業", "n": 8, "rank_5d": 3, "ret_5d": 0.013},
+            {"sector33": "空運業", "n": 2, "rank_5d": 9, "ret_5d": -0.004},
+            {"sector33": "小売業", "n": 105, "rank_5d": 12, "ret_5d": -0.011},
+        ]
+
+    def _cands(self, sectors):
+        return pd.DataFrame({"ticker": [f"{i}.T" for i in range(len(sectors))],
+                             "sector33": sectors})
+
+    def test_fires_when_thin_sector_is_top5_and_has_a_candidate(self):
+        out = small_sector_alert(self._ranking(), self._cands(["石油・石炭製品", "小売業"]))
+        self.assertTrue(out["flag"])
+        self.assertEqual(len(out["sectors"]), 1)
+        self.assertEqual(out["sectors"][0]["sector33"], "石油・石炭製品")
+        self.assertEqual(out["sectors"][0]["n"], 3)
+        self.assertEqual(out["sectors"][0]["n_candidates"], 1)
+
+    def test_silent_when_thin_sector_is_top5_but_has_no_candidate(self):
+        """2026-09-07 がこれ。石油・石炭（n=3）が1位だが候補は出ていない。"""
+        out = small_sector_alert(self._ranking(), self._cands(["小売業", "小売業"]))
+        self.assertFalse(out["flag"])
+        self.assertEqual(out["sectors"], [])
+
+    def test_silent_when_thin_sector_is_not_top5(self):
+        out = small_sector_alert(self._ranking(), self._cands(["空運業"]))
+        self.assertFalse(out["flag"])
+
+    def test_silent_for_a_large_top5_sector(self):
+        out = small_sector_alert(self._ranking(), self._cands(["電気・ガス業"]))
+        self.assertFalse(out["flag"])
+
+    def test_counts_multiple_candidates_and_sectors(self):
+        out = small_sector_alert(self._ranking(),
+                                 self._cands(["石油・石炭製品", "石油・石炭製品", "保険業"]))
+        self.assertTrue(out["flag"])
+        self.assertEqual([s["sector33"] for s in out["sectors"]],
+                         ["石油・石炭製品", "保険業"])
+        self.assertEqual(out["sectors"][0]["n_candidates"], 2)
+
+    def test_no_ranking_or_no_candidates(self):
+        self.assertFalse(small_sector_alert([], self._cands(["小売業"]))["flag"])
+        self.assertFalse(small_sector_alert(self._ranking(),
+                                            self._cands([]))["flag"])
+
+    def test_summary_carries_the_flag(self):
+        summary = build_summary(pd.DataFrame(columns=SCREEN_COLS),
+                                self._cands(["石油・石炭製品"]),
+                                {"e1_pool_n": 1, "e1_skipped": False},
+                                pd.Timestamp("2026-09-04"), pd.Timestamp("2026-09-07"),
+                                sector_ranking=self._ranking())
+        self.assertTrue(summary["small_sector_top5"]["flag"])
+
+    def test_thresholds_are_monitoring_only(self):
+        self.assertEqual((SMALL_SECTOR_N, SMALL_SECTOR_TOP), (10, 5))
