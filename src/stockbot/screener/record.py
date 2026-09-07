@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Iterable, NamedTuple, Optional
 
 import numpy as np
@@ -24,6 +25,9 @@ import pandas as pd
 
 from ..features.dimensions import landing_ma, ma_values_at
 from ..features.indicators import atr_wilder
+
+SUMMARY_PREFIX = "screen_summary_"
+SUMMARY_SUFFIX = ".json"
 
 DELIVERED_PREFIX = "delivered_"
 DELIVERED_SUFFIX = ".csv"
@@ -356,3 +360,68 @@ def latest_delivered(daily_dir: Path) -> Optional[pd.DataFrame]:
     if not files:
         return None
     return load_delivered(files[-1].path)
+
+
+# ---------------------------------------------------- その日の要約ファイル
+def summary_path(daily_dir: Path, delivered_on, asof) -> Path:
+    """その日の要約ファイルのパス。**書く側は 2026-09-08 に撤去した**（SCREENER_CLOSING.md）。
+
+    19 条件のスクリーナーを外したので `screen_summary_*.json` は新しく作られない。
+    残っている 4 ファイルを読むためだけにこの一群を screen.py から移してきた ——
+    ファイル名の規約は記録側の関心事で、条件とは無関係だから。
+    """
+    return Path(daily_dir) / stamped_name(SUMMARY_PREFIX, delivered_on, asof, SUMMARY_SUFFIX)
+
+
+class SummaryFile(NamedTuple):
+    delivered_on: pd.Timestamp
+    asof: Optional[pd.Timestamp]
+    path: Path
+
+
+def _asof_from_summary(path: Path) -> Optional[pd.Timestamp]:
+    """旧名の要約から判定日を補う（中身の asof キーを見る）。"""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("asof")
+    except (OSError, ValueError):
+        return None
+    if not value:
+        return None
+    try:
+        return as_calendar_date(value)
+    except ValueError:
+        return None
+
+
+def list_summaries(daily_dir: Path) -> list[SummaryFile]:
+    """daily/ にある要約を (配信日, 判定日) の昇順で返す。旧名は中身から判定日を補う。"""
+    daily_dir = Path(daily_dir)
+    if not daily_dir.exists():
+        return []
+    out: list[SummaryFile] = []
+    for f in sorted(daily_dir.glob(f"{SUMMARY_PREFIX}*{SUMMARY_SUFFIX}")):
+        parsed = parse_stamped_name(f.name, SUMMARY_PREFIX, SUMMARY_SUFFIX)
+        if parsed is None:
+            continue
+        delivered_on, asof = parsed
+        if asof is None:
+            asof = _asof_from_summary(f)
+        out.append(SummaryFile(delivered_on, asof, f))
+    out.sort(key=lambda x: (x.delivered_on,
+                            x.asof if x.asof is not None else x.delivered_on))
+    return out
+
+
+def latest_summary(daily_dir: Path, delivered_on=None) -> Optional[SummaryFile]:
+    """その配信日で最も新しい判定の要約（delivered_on 省略時は全体で最新）。
+
+    同じ日に引け前と引け後の 2 回走った日は、**判定日が新しい方**（引け後）を返す。
+
+    スクリーナー撤去後は「今日の配信日」で呼ぶと必ず None になる（新しい要約が
+    作られないため）。配信が止まっているのはこの性質による（SCREENER_CLOSING.md）。
+    """
+    files = list_summaries(daily_dir)
+    if delivered_on is not None:
+        target = as_calendar_date(delivered_on)
+        files = [f for f in files if f.delivered_on == target]
+    return files[-1] if files else None

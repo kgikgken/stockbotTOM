@@ -18,10 +18,8 @@ from stockbot.notify.message import (
     FALLBACK_NOTE,
     MA_LABELS,
     MAX_TEXT,
-    TOP_FAILS,
     build_message,
 )
-from stockbot.screener.conditions import CONDITION_IDS, CONDITION_LABELS, SELF_CONTAINED_IDS
 from stockbot.screener.record import (
     DELIVERED_COLS,
     RECORD_MISMATCH_NOTE,
@@ -56,10 +54,9 @@ def make_summary(n_candidates=1, n_pool=1, e1_skipped=True, fails=None, level="�
         "regime_level": level, "regime_score": score,
         "n_evaluated": 1330, "n_pool": n_pool, "n_candidates": n_candidates,
         "e1_skipped": e1_skipped, "e1_threshold": None,
-        "fail_counts": fails if fails is not None else {
-            cid: n for cid, n in zip(SELF_CONTAINED_IDS,
-                                     [192, 12, 0, 8, 498, 303, 334, 329,
-                                      1086, 678, 967, 316, 491, 945, 796, 712, 305, 1053])},
+        # 撤去済みのスクリーナーが残した既存の要約ファイルにはこの列がある。
+        # 描画側が古い記録を読んでも落ちないことを確かめるために残してある
+        "fail_counts": fails if fails is not None else {"C1": 1086, "E3": 1053, "C3": 967},
         "landing_ma_all": {"SMA5": 514, "SMA25": 277, "SMA75": 219, "SMA200": 252},
         "landing_ma_candidates": {"SMA5": 1, "SMA25": 0, "SMA75": 0, "SMA200": 0},
     }
@@ -167,24 +164,15 @@ class ZeroCandidateTest(unittest.TestCase):
     def test_zero_day_message(self):
         text = build_message(frame([]), make_summary(n_candidates=0, n_pool=0))
         self.assertIn("候補 0件", text)
-        self.assertIn("19条件を全て満たす銘柄がありませんでした", text)
+        self.assertIn("本日の候補はありません", text)
 
-    def test_fail_counts_are_labelled_as_cumulative(self):
-        """1銘柄が複数条件で落ちるので合計は評価銘柄数を超える。「延べ」と明記する。"""
-        s = make_summary(n_candidates=0)
-        text = build_message(frame([]), s)
-        self.assertIn("延べ件数", text)
-        total = sum(s["fail_counts"].values())
-        self.assertGreater(total, s["n_evaluated"])   # 実際に超えている
-
-    def test_top_three_failed_conditions(self):
+    def test_zero_day_does_not_mention_conditions(self):
+        """条件名は出さない。19 条件ごと撤去したので、説明する判定が存在しない。"""
         text = build_message(frame([]), make_summary(n_candidates=0))
-        # 上位3つ: C1(1086) E3(1053) C3(967)
+        self.assertIn("本日の候補はありません", text)
         for cid in ("C1", "E3", "C3"):
-            self.assertIn(cid, text)
-            self.assertIn(CONDITION_LABELS[cid], text)
-        self.assertNotIn("A3", text)   # 0件の条件は上位に入らない
-        self.assertEqual(text.count(" … "), TOP_FAILS)
+            self.assertNotIn(f"{cid} ", text)
+        self.assertNotIn(" … ", text)
 
     def test_zero_day_with_none_delivered(self):
         text = build_message(None, make_summary(n_candidates=0))
@@ -194,10 +182,7 @@ class ZeroCandidateTest(unittest.TestCase):
         s = make_summary(n_candidates=0)
         s["fail_counts"] = {}
         text = build_message(frame([]), s)
-        self.assertIn("ありませんでした", text)
-
-    def test_condition_labels_cover_all_ids(self):
-        self.assertEqual(set(CONDITION_LABELS), set(CONDITION_IDS))
+        self.assertIn("本日の候補はありません", text)
 
 
 class LengthTest(unittest.TestCase):
@@ -282,30 +267,9 @@ class StreakDisplayTest(unittest.TestCase):
         self.assertIn("2801.T", text)
 
 
-class EarningsCoverageTest(unittest.TestCase):
-    """§3.6: 決算日のカバー率を日次で残す。"""
-
-    def test_summary_carries_coverage(self):
-        from stockbot.screener.screen import apply_e1, build_summary, select_candidates
-        from tests.test_screener_screen import make_rows
-
-        df = make_rows(10)
-        df["a4_earnings_unknown"] = [False] * 3 + [True] * 7
-        evaluated, meta = apply_e1(df, log=lambda *_a: None)
-        s = build_summary(evaluated, select_candidates(evaluated, {}), meta,
-                          pd.Timestamp("2026-08-31"), pd.Timestamp("2026-09-01"))
-        self.assertEqual(s["earnings_known"], 3)
-        self.assertAlmostEqual(s["earnings_coverage"], 0.3)
-
-    def test_coverage_is_none_on_empty_day(self):
-        from stockbot.screener.screen import apply_e1, build_summary, select_candidates
-        from tests.test_screener_screen import make_rows
-
-        evaluated, meta = apply_e1(make_rows(0), log=lambda *_a: None)
-        s = build_summary(evaluated, select_candidates(evaluated, {}), meta, None,
-                          pd.Timestamp("2026-09-01"))
-        self.assertEqual(s["earnings_known"], 0)
-        self.assertIsNone(s["earnings_coverage"])
+# EarningsCoverageTest は screen.build_summary ごと撤去した（SCREENER_CLOSING.md）。
+# 決算カバー率は 19 条件の A4 がどれだけ効いたかを見るためのもので、条件が無い今は
+# 計算する相手がいない。既存の要約ファイルに残っている値はそのまま保全している。
 
 
 class _FakeResponse:

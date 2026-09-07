@@ -1,6 +1,7 @@
 """33 業種の強弱（docs/SCREENER.md §2.9）。
 
-順位そのものより、**候補の集合が変わらないこと**と**未来を見ないこと**を固定する。
+**未来を見ないこと**と**等加重であること**を固定する。並び順への利用は
+スクリーナー撤去に伴って無くなったが、業種リターンの計算自体は維持している。
 """
 import unittest
 
@@ -17,7 +18,6 @@ from stockbot.features.sector import (
     ranking_table,
     sector_strength,
 )
-from stockbot.screener.screen import NO_SECTOR_RANK, SECTOR_CAP, select_candidates
 
 DATES = pd.bdate_range("2026-08-03", periods=40)
 ASOF = DATES[30]
@@ -126,56 +126,9 @@ class SectorStrengthTest(unittest.TestCase):
         self.assertEqual(table[0]["rank_5d"], 1)
 
 
-class OrderingTest(unittest.TestCase):
-    """並び順は変わるが、**候補の集合は変わらない**（§2.9）。"""
-
-    def _passed(self, rows):
-        return pd.DataFrame([{"ticker": t, "passes": True, "adv_jpy": adv}
-                             for t, adv in rows])
-
-    def setUp(self):
-        # 銀行業は上限 3 件を超える 4 銘柄。機械は 1 銘柄
-        self.df = self._passed([("B1.T", 90e8), ("B2.T", 80e8), ("B3.T", 70e8),
-                                ("B4.T", 60e8), ("M1.T", 10e8)])
-        self.sectors = {"B1.T": "銀行業", "B2.T": "銀行業", "B3.T": "銀行業",
-                        "B4.T": "銀行業", "M1.T": "機械"}
-
-    def test_candidate_set_is_identical_with_and_without_sector_rank(self):
-        without = select_candidates(self.df, self.sectors)
-        with_rank = select_candidates(self.df, self.sectors,
-                                      sector_rank={"機械": {"rank_5d": 1},
-                                                   "銀行業": {"rank_5d": 2}})
-        self.assertEqual(set(without["ticker"]), set(with_rank["ticker"]))
-        self.assertEqual(len(with_rank), SECTOR_CAP + 1)
-        # 上限は業種ごとなので、同じ業種の中の選ばれ方（売買代金の降順）は変わらない
-        self.assertEqual(sorted(without["ticker"]), sorted(with_rank["ticker"]))
-
-    def test_order_follows_sector_rank_then_adv(self):
-        out = select_candidates(self.df, self.sectors,
-                                sector_rank={"機械": {"rank_5d": 1},
-                                             "銀行業": {"rank_5d": 2}})
-        self.assertEqual(out["ticker"].tolist(), ["M1.T", "B1.T", "B2.T", "B3.T"])
-
-    def test_order_flips_when_sector_rank_flips(self):
-        out = select_candidates(self.df, self.sectors,
-                                sector_rank={"機械": {"rank_5d": 9},
-                                             "銀行業": {"rank_5d": 1}})
-        self.assertEqual(out["ticker"].tolist(), ["B1.T", "B2.T", "B3.T", "M1.T"])
-
-    def test_without_ranking_it_is_adv_descending(self):
-        out = select_candidates(self.df, self.sectors, sector_rank={})
-        self.assertEqual(out["ticker"].tolist(), ["B1.T", "B2.T", "B3.T", "M1.T"])
-        self.assertTrue((out["sector_rank_5d"] == NO_SECTOR_RANK).all())
-
-    def test_sector_without_rank_goes_last(self):
-        out = select_candidates(self.df, self.sectors,
-                                sector_rank={"銀行業": {"rank_5d": 5}})
-        self.assertEqual(out["ticker"].tolist()[-1], "M1.T")
-
-    def test_empty_input_keeps_columns(self):
-        out = select_candidates(self.df.iloc[0:0], self.sectors)
-        self.assertIn("sector33", out.columns)
-        self.assertIn("sector_rank_5d", out.columns)
+# OrderingTest（並び順が業種順位に従うこと）は select_candidates ごと撤去した。
+# 19 条件のスクリーナーを外して候補が出なくなったため、並べる相手がいない
+# （SCREENER_CLOSING.md）。sector_strength 自体は維持しており、上のテストで固定している。
 
 
 if __name__ == "__main__":

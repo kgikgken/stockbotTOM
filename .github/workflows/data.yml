@@ -1,9 +1,11 @@
 name: data-daily
 
 # 平日 7:00 JST に 取得 → 整合性検査 → 保存 → 日次スナップショット → ユニバース
-# → 19条件のスクリーニングと配信記録（docs/SCREENER.md §2・§3.2）
-# → 配信記録の結果付け（§3.3）→ LINE 配信（§4）。
-# 配信は画像カード2枚（Cloudflare Worker 経由）。描画に失敗した日はテキストに落ちる。
+# → 既存の配信記録の結果付け（docs/SCREENER.md §3.3）。
+#
+# **19条件のスクリーニングと LINE 配信は 2026-09-08 に停止した**
+# （docs/SCREENER_CLOSING.md）。候補が出ないので空の配信を送らない。
+# 取得・保存・ユニバースと、既に配信済み15件の結果付けだけを続ける。
 
 on:
   schedule:
@@ -42,8 +44,8 @@ jobs:
           pip install -r requirements.txt
           pip install -e .
 
-      # 画像カードの描画（docs/SCREENER.md §4.5）。Chromium と日本語フォントが要る。
-      # ここが失敗しても notify はテキストに落ちるので、ジョブ全体は止めない。
+      # 画像カードの描画（docs/SCREENER.md §4.5）。配信は停止中だが描画コードは
+      # 維持しているので、環境ごと壊れないよう導入は続ける（continue-on-error）。
       - name: Install Chromium and CJK fonts (for image cards)
         continue-on-error: true
         run: |
@@ -81,13 +83,6 @@ jobs:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli references
 
-      # 19条件で候補を選び、配信記録に保存する（docs/SCREENER.md §2）。
-      # references（決算発表予定日）の後に置く —— A4 の判定に使うため。
-      - name: Screen
-        env:
-          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
-        run: python -m stockbot.cli screen
-
       # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）。references と同じく
       # daily とは別ステップにして、ここが失敗しても取得・保存の成果を失わないようにする。
       - name: Resolve delivered records
@@ -106,18 +101,13 @@ jobs:
             git pull --rebase && git push
           fi
 
-      # LINE 配信（docs/SCREENER.md §4）。**コミットより後ろに置く。**
-      # 配信が失敗しても screen と resolve の結果は既に main に push 済みで失われない。
-      # continue-on-error にはしない（失敗を握り潰すと配信されない原因が分からなくなる）。
-      # 画像の描画に失敗した場合はテキスト配信に落ちる（§4.4）。ステップは赤にならないが
-      # ログに「画像の作成に失敗（テキストに切り替える）」が出る。
-      - name: Notify (LINE)
-        if: always()
-        env:
-          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
-          WORKER_URL: ${{ secrets.WORKER_URL }}
-          WORKER_AUTH_TOKEN: ${{ secrets.WORKER_AUTH_TOKEN }}
-        run: python -m stockbot.cli notify
+      # LINE 配信は停止中（2026-09-08）。19 条件のスクリーナーを外して候補が
+      # 出なくなったので、空の配信を送らないためにステップごと外してある
+      # （docs/SCREENER_CLOSING.md）。**配信経路そのものは消していない** ——
+      # worker.js・Secrets・notify コマンド・画像カードの描画はすべて残っており、
+      # パターン実装が入ったらこのステップを戻すだけで再開できる。
+      # なお `cli notify` は「今日の配信日の要約」が無いと何も送らないので、
+      # 手で叩いても古い候補が流れることはない。
 
       - name: Upload artifacts
         if: always()

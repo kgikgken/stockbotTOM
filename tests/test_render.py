@@ -39,7 +39,6 @@ def make_record(ticker="2801.T", name="キッコーマン", landing_ma="SMA5", c
 
 def make_summary(n_candidates=1, n_pool=1, e1_skipped=True, fails=None,
                  level="中", score=3, fetch_ok=3663, fetch_total=3786):
-    from stockbot.screener.conditions import SELF_CONTAINED_IDS
     return {
         "delivered_on": "2026-09-01", "asof": "2026-08-31",
         "regime_level": level, "regime_score": score,
@@ -47,10 +46,8 @@ def make_summary(n_candidates=1, n_pool=1, e1_skipped=True, fails=None,
         "n_pool": n_pool, "n_candidates": n_candidates,
         "earnings_known": 35, "earnings_coverage": 0.0263,
         "e1_skipped": e1_skipped, "e1_threshold": None,
-        "fail_counts": fails if fails is not None else {
-            cid: n for cid, n in zip(SELF_CONTAINED_IDS,
-                                     [192, 12, 0, 8, 498, 303, 334, 329,
-                                      1086, 678, 967, 316, 491, 945, 796, 712, 305, 1053])},
+        # 撤去済みのスクリーナーが残した既存の要約にある列。読んでも落ちないことの確認用
+        "fail_counts": fails if fails is not None else {"C1": 1086, "E3": 1053, "C3": 967},
         "landing_ma_all": {"SMA5": 514, "SMA25": 277, "SMA75": 219, "SMA200": 252},
         "landing_ma_candidates": {"SMA5": 1, "SMA25": 0, "SMA75": 0, "SMA200": 0},
     }
@@ -118,8 +115,10 @@ class ContextTest(unittest.TestCase):
         ctx = build_context(records_to_frame([]), make_summary(n_candidates=0, n_pool=0))
         self.assertEqual(ctx["cards"], [])
         self.assertIsNone(ctx["e1_note"])
-        self.assertEqual([r["cid"] for r in ctx["zero_day"]["rows"]], ["C1", "E3", "C3"])
-        self.assertGreater(ctx["zero_day"]["total"], ctx["zero_day"]["n_evaluated"])
+        # 落ちた条件の行は出さない。19 条件ごと撤去したので説明する判定が無い
+        self.assertEqual(ctx["zero_day"]["rows"], [])
+        self.assertEqual(ctx["zero_day"]["total"], 0)
+        self.assertEqual(ctx["zero_day"]["n_evaluated"], 1330)
 
     def test_e1_note_when_candidates_exist(self):
         ctx = build_context(records_to_frame([make_record()]), make_summary())
@@ -161,9 +160,9 @@ class HtmlTest(unittest.TestCase):
 
     def test_zero_day_html(self):
         out = html(records_to_frame([]), make_summary(n_candidates=0, n_pool=0))
-        self.assertIn("19条件を全て満たす銘柄がありませんでした", out)
-        self.assertIn("延べ件数", out)
-        self.assertIn("深さ3〜8%", out)
+        # 条件名も「落ちた条件」の表も出ない（SCREENER_CLOSING.md）
+        for gone in ("19条件", "延べ件数", "深さ3〜8%", "C1", "E3"):
+            self.assertNotIn(gone, out, gone)
         # 銘柄カードそのものが出ない（2枚目のフッタには「撤退ライン」の語が残る）
         self.assertNotIn('class="val stop"', out)
         self.assertNotIn("終値から", out)

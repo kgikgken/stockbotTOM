@@ -13,10 +13,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ..screener.conditions import CONDITION_LABELS
 from ..screener.record import RECORD_MISMATCH_NOTE
 
-TOP_FAILS = 3
 MA_LABELS = {"SMA5": "5日線", "SMA25": "25日線", "SMA75": "75日線", "SMA200": "200日線"}
 
 # 各カードに固定で載せる出口ルール（SPEC.md §1 の出口④に対応。銘柄ごとに変えない）
@@ -136,14 +134,15 @@ def build_health(summary: dict) -> dict:
 
 
 def build_zero_day(summary: dict) -> dict:
-    """候補0件の日に出す内訳。落ちた条件の上位3つと延べ件数（§4.2）。"""
-    fails = summary.get("fail_counts") or {}
-    top = sorted(fails.items(), key=lambda kv: -kv[1])[:TOP_FAILS]
+    """候補0件の日に出す内訳（§4.2）。
+
+    以前は「落ちた条件の上位3つ」を並べていたが、19 条件のスクリーナーごと撤去したので
+    出す行が無くなった（SCREENER_CLOSING.md）。判定対象の件数だけ残す。
+    """
     return {
         "n_evaluated": int(summary.get("n_evaluated") or 0),
-        "total": int(sum(fails.values())) if fails else 0,
-        "rows": [{"cid": cid, "label": CONDITION_LABELS.get(cid, ""), "n": int(n)}
-                 for cid, n in top],
+        "total": 0,
+        "rows": [],
     }
 
 
