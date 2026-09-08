@@ -1,0 +1,2 @@
+delivered_on,asof,ticker,resolved_on,horizon_days,n_bars,censored,entry_open,close_h,max_high,min_low,ret_h,broke_lp,broke_lp_day,reached_h0,reached_h0_day,recovered_sma5,recovered_sma5_day,success,up_pct,down_pct,rr,breakeven_win_rate
+2026-09-01,2026-08-31,2801.T,2026-09-07,5,5,False,1827.5,1726.5,1846.5,1724.0,-0.055266757865937044,True,4,False,,True,1,False,0.017711171662125436,-0.02425068119891005,0.7303370786516902,0.5779220779220764
