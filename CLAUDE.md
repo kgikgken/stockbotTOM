@@ -6,34 +6,39 @@
 ## 正の情報源（この順で優先）
 
 **19 条件のスクリーナーは 2026-09-08 に撤去した**（`docs/SCREENER_CLOSING.md`）。
-次のパターン実装は調査結果待ちで、**仕様がまだ無い。** 検証プロジェクト（v8 順張り押し目）は
-2026-08-30 に終了している（`docs/CLOSING.md`）。
+現在の作業対象は 7 パターンの検出（`docs/PATTERN.md`）。ただし**判定式はまだ揃っていない**
+（PATTERN.md §4 Q-1）。検証プロジェクト（v8 順張り押し目）は 2026-08-30 に終了している
+（`docs/CLOSING.md`）。
 
-1. `docs/SCREENER_CLOSING.md` — 撤去の範囲・保全した記録・未達だった判定。いま生きて
+1. `docs/PATTERN.md` — **現在の作業対象。** 7 パターンの仕様と事前登録パラメータ。
+   質問ログもここ（§4）
+2. `docs/SCREENER_CLOSING.md` — 撤去の範囲・保全した記録・未達だった判定。いま生きて
    いるコードの範囲はここに書いてある
-2. `docs/SPEC.md` — 決定事項。ここに無いことは決まっていない
-3. `docs/RESEARCH.md` — 根拠。設計を変える根拠にはしない（変えるのは設計責任者）
+3. `docs/SPEC.md` — 決定事項。ここに無いことは決まっていない
+4. `docs/RESEARCH.md` — 根拠。設計を変える根拠にはしない（変えるのは設計責任者）
 
 終了済みで**編集しない**もの: `docs/DESIGN.md`、`docs/TASKS.md`、`docs/CLOSING.md`、
 `docs/FUTURE_HYPOTHESIS.md`、`docs/SCREENER.md`。DESIGN.md と SCREENER.md はコードの式や
 記録の列が何かを引くために読んでよいが、そこの条件・閾値・検定数・停止規則・撤退基準を
 新しい作業に引き継がない。
 
-**新しいパターンの条件をこちらで作らない。** 仕様が来るまで、条件に関する実装はしない。
+**パターンの判定式をこちらで作らない。** PATTERN.md §2 が「判定式待ち」の間は、
+検出の実装をしない（§4 Q-1）。事前登録パラメータ（§1）は決まっているので動かさない。
 
 チャットの指示と文書が食い違ったら、文書を正として指摘する。
 
 ## 作業の進め方
 - 実装前に受け入れ条件と必須テストを読み、テストを先に書く
-- SCREENER.md に書いていない判断が必要になったら、実装せず SCREENER.md の質問ログ（§6）に追記して止まる。推測で埋めない
-- 完了報告には次を含める: 変更ファイル一覧、テスト結果（件数）、SCREENER.md のどの節を実装したか、設計責任者のレビュー対象箇所（スイング確定ラグ・時点整合に触れた場合は必ず明記）
+- PATTERN.md に書いていない判断が必要になったら、実装せず PATTERN.md の質問ログ（§4）に追記して止まる。推測で埋めない
+- 完了報告には次を含める: 変更ファイル一覧、テスト結果（件数）、PATTERN.md のどの節を実装したか、設計責任者のレビュー対象箇所（スイング確定ラグ・時点整合に触れた場合は必ず明記）
 
 ## 絶対に守ること
 - **未来参照の禁止**: すべての量は T の引けまでのデータで計算する。スイングは確定ラグ k 本後にしか使えない。週足は T を含む週を使わない。ラベルだけが T+1 以降を見る
 - **再計算一致テスト**（DESIGN.md §11）を新しい特徴量・指標すべてに適用する。これが落ちたら他が通っていてもマージしない
 - **パラメータを増やさない**: 新しい閾値が欲しければ質問ログへ
-- **閾値を勝手に動かさない**: 条件・閾値は撤去済み。新しいものを推測で作らない
+- **閾値を勝手に動かさない**: PATTERN.md §1 の事前登録パラメータ（ε・旗竿・タッチ点数・±1.5%）は検出数を見てから動かさない。新しいものを推測で作らない
 - **スコアを作らない**: スコア計算・F 除外・プール百分位を使わない（SCREENER.md §2.2 の方針を引き継ぐ）
+- **±1.5% を ATR 連動にしない**: 銘柄のボラティリティで許容幅が変わると、同じパターン名が銘柄ごとに別の形を指す（PATTERN.md §1）
 - **ホールドアウト（2026-02〜2026-08）を見ない**: 検証 L1 や設計途中で参照するコードを書かない。`validation/replay.py` はホールドアウト生成を明示フラグなしで行わない
 - **LINE 経路を変えない**: `src/worker.js`、`wrangler.toml`、Secrets 名（`LINE_CHANNEL_ACCESS_TOKEN` / `LINE_TO` / `WORKER_URL` / `WORKER_AUTH_TOKEN`）
 - **保存データをコミットしない**: `data/store/` は `.gitignore`。`data/daily/`、`data/universe/`、`data/reference/` はコミットする
@@ -57,6 +62,7 @@
     data/        yf_fetch.py  adjust.py  store.py  jpx_lists.py  synthetic.py
     universe/    build.py
     features/    indicators.py  swings.py  pullback.py  dimensions.py  regime.py  sector.py
+                 pattern.py（未着手。PATTERN.md §4 Q-1 の判定式待ち）
     scoring/     composite.py  template.py  ranking.py
     validation/  labels.py  replay.py  layer1.py  report.py  calibration.py
     render/      context.py  template.html  render.py

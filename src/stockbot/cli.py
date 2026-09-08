@@ -8,6 +8,7 @@
   python -m stockbot.cli references  # 決算発表予定日・上場廃止銘柄一覧の更新のみ
   python -m stockbot.cli universe    # 保存済みデータからユニバースを再計算
   python -m stockbot.cli features    # 保存済みデータから日次特徴量を再計算・保存
+  python -m stockbot.cli pattern     # 反転系パターンの検出数を数える（docs/PATTERN.md §2.1）
   python -m stockbot.cli resolve     # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）
   python -m stockbot.cli notify      # その日の配信記録を LINE に流す（docs/SCREENER.md §4）
 
@@ -36,7 +37,14 @@ from .data.jpx_lists import (
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
-from .features import indicators, pullback, regime, sector as sector_mod, swings  # noqa: F401
+from .features import (  # noqa: F401
+    indicators,
+    pattern as pattern_mod,
+    pullback,
+    regime,
+    sector as sector_mod,
+    swings,
+)
 from .pipeline import (
     DAILY_FEATURES_COLS,
     compute_daily_features,
@@ -410,6 +418,68 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
     return df
 
 
+def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
+                 log=print) -> pd.DataFrame:
+    """反転系パターンの検出数を数える（docs/PATTERN.md §2.1）。
+
+    **数えて出すだけで、何も保存しないし配信もしない。** 事前登録した数値どおりに
+    実装できているかを実データで確かめるためのもの（D-3・D-5 の「検出数を見てから
+    動かさない」に対する、最初の 1 回の観測）。
+
+    判定日 T は各銘柄の最終足。T の引けまでのデータしか読まない。
+
+    **「形は揃ったがネックライン未抜け」の件数も出す。** 成立が 0 件だったときに、
+    条件が厳しいのか実装が間違っているのかを 1 回で切り分けるため（設計責任者の指示）。
+    """
+    tickers = universe[universe["passes"]]["ticker"].tolist()
+    rows = []
+    n_eval = 0
+    n_swings_short = 0
+    for ticker in tickers:
+        df = ohlcv.get(ticker)
+        if df is None or len(df) < pattern_mod.SEARCH_WINDOW + cfg.k * 2:
+            continue
+        n_eval += 1
+        t_pos = len(df) - 1
+        # **形だけ揃った行も取る**（include_pending）。検出 0 件だったときに
+        # 「条件が厳しい」のか「実装が間違っている」のかを 1 回で切り分けるため
+        hits = pattern_mod.detect_patterns(df["High"], df["Low"], df["Close"],
+                                           t_pos, cfg.k, include_pending=True)
+        if len(hits) == 0:
+            n_swings_short += 1
+        for _i, r in hits.iterrows():
+            rows.append({"ticker": ticker, "asof": df.index[t_pos], **r.to_dict()})
+
+    out = pd.DataFrame(rows, columns=["ticker", "asof"] + pattern_mod.PATTERN_COLS)
+    done = out[out["breakout"].astype(bool)] if len(out) else out
+    pending = out[~out["breakout"].astype(bool)] if len(out) else out
+    log(f"[pattern] 評価 {n_eval} 銘柄")
+    log(f"[pattern] 成立（ネックライン上抜け済み）: {len(done)} 件")
+    log(f"[pattern] 形は揃ったが未抜け: {len(pending)} 件")
+    log(f"[pattern] 形も揃わなかった銘柄: {n_swings_short} 銘柄")
+
+    for label, part in (("成立", done), ("未抜け", pending)):
+        if not len(part):
+            continue
+        counts = part["pattern"].value_counts()
+        log(f"[pattern] {label}の内訳: "
+            + " ".join(f"{k}:{int(v)}" for k, v in counts.items()))
+        log(f"[pattern] {label}の span（最初の極値から T まで）: 中央 "
+            f"{part['span'].median():.0f}本 / 最小 {part['span'].min():.0f} / "
+            f"最大 {part['span'].max():.0f}")
+
+    if len(done):
+        multi = done.groupby("ticker")["pattern"].nunique()
+        log(f"[pattern] 同じ銘柄で複数パターンに該当: {int((multi > 1).sum())} 銘柄")
+        for _i, r in done.head(20).iterrows():
+            log(f"[pattern]   {r['ticker']:<9} {r['pattern']:<14} "
+                f"ネックライン {r['neckline']:.1f} / 終値 {r['close_t']:.1f} / "
+                f"span {int(r['span'])}本")
+        if len(done) > 20:
+            log(f"[pattern]   ... 他 {len(done) - 20} 件")
+    return out
+
+
 def step_resolve(cfg: Settings, log=print) -> list[Path]:
     """配信記録（daily/delivered_<配信日>_asof<判定日>.csv）に 5 営業日後の結果を付ける
     （docs/SCREENER.md §3.3）。
@@ -500,7 +570,7 @@ def step_notify(cfg: Settings, log=print) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
-                                       "references", "universe", "features",
+                                       "references", "universe", "features", "pattern",
                                        "resolve", "notify", "refetch-recent-splits"])
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
@@ -521,6 +591,14 @@ def main(argv: list[str] | None = None) -> int:
             step_refetch_recent_splits(cfg, log)
         elif args.command == "references":
             step_references(cfg, log)
+        elif args.command == "pattern":
+            store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+            ohlcv = from_long(store.load())
+            u = load_latest_universe(cfg.universe_dir)
+            if u is None:
+                log("[pattern] ユニバースが無いためスキップ（先に universe を実行）")
+            else:
+                step_pattern(cfg, u, ohlcv, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":
