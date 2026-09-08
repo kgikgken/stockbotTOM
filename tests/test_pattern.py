@@ -190,6 +190,55 @@ class BothPatternsTest(unittest.TestCase):
         self.assertEqual(names_at(df, t), ["inverse_hs", "triple_bottom"])
 
 
+class PendingTest(unittest.TestCase):
+    """形は揃ったがネックライン未抜けの行（docs/PATTERN.md §2.1）。
+
+    検出 0 件だったときの切り分け用。**成立の定義は変えていない** ——
+    既定では成立した行だけが返る。
+    """
+
+    def test_pending_row_appears_only_when_asked(self):
+        df = double_bottom(breakout=False)
+        # 形が揃う日を探す（上抜けは起きない系列）
+        found = None
+        for t in range(K + 1, len(df)):
+            out = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                                  include_pending=True)
+            if len(out):
+                found = (t, out)
+                break
+        self.assertIsNotNone(found, "形が揃う日が無い")
+        t, out = found
+        self.assertFalse(bool(out["breakout"].iloc[0]))
+        # 既定では返らない
+        self.assertEqual(len(detect_patterns(df["High"], df["Low"], df["Close"],
+                                             t, k=K)), 0)
+
+    def test_confirmed_rows_have_breakout_true(self):
+        df = double_bottom()
+        t, _row = first_hit(df)
+        out = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K)
+        self.assertTrue(bool(out["breakout"].iloc[0]))
+
+    def test_pending_includes_confirmed(self):
+        """include_pending は成立行も落とさない（合計＝成立＋未抜け）。"""
+        df = double_bottom()
+        t, _row = first_hit(df)
+        both = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                               include_pending=True)
+        only = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K)
+        self.assertEqual(len(both), len(only))
+        self.assertTrue(bool(both["breakout"].iloc[0]))
+
+    def test_shape_conditions_still_apply_to_pending(self):
+        """未抜けでも形の条件は同じ。間隔が足りなければ行は出ない。"""
+        df = double_bottom(gap=14, breakout=False)
+        for t in range(K + 1, len(df)):
+            out = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                                  include_pending=True)
+            self.assertEqual(len(out), 0)
+
+
 class PointInTimeTest(unittest.TestCase):
     """CLAUDE.md 未来参照の禁止。"""
 

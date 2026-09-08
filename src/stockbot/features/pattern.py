@@ -44,6 +44,10 @@ PATTERN_COLS = [
     "h1_pos", "h1",     # 左のネックライン点
     "h2_pos", "h2",     # 右のネックライン点（ダブルボトムでは欠損）
     "span",         # 使った極値の最初から T までの本数
+    # 形は揃っているか、ネックラインも抜けたか。**形だけ揃った行を数えるための列。**
+    # 検出 0 件だったときに「条件が厳しい」のか「実装が間違っている」のかを
+    # 1 回で切り分けるために置いた（設計責任者の指示、docs/PATTERN.md §2.1）
+    "breakout",
 ]
 
 
@@ -79,7 +83,12 @@ def _tail_extremes(swings: pd.DataFrame, n: int) -> Optional[list]:
 
 def _row(pattern: str, t_pos: int, neckline: float, close_t: float,
          lows: list, highs: list) -> dict:
-    """PATTERN_COLS の 1 行。使わない列は欠損にする。"""
+    """PATTERN_COLS の 1 行。使わない列は欠損にする。
+
+    `breakout` はここで決める —— 形の判定（極値の並び・等値・間隔・ウィンドウ）を
+    通ったあと、終値がネックラインを上抜けたかだけを見る。**形が揃っただけの行も
+    作る**ので、呼び出し側が数え分けられる。
+    """
     def at(seq, i):
         return seq[i] if i < len(seq) else (np.nan, np.nan)
 
@@ -92,6 +101,7 @@ def _row(pattern: str, t_pos: int, neckline: float, close_t: float,
         "l1_pos": l1p, "l1": l1, "l2_pos": l2p, "l2": l2, "l3_pos": l3p, "l3": l3,
         "h1_pos": h1p, "h1": h1, "h2_pos": h2p, "h2": h2,
         "span": int(t_pos - first),
+        "breakout": bool(close_t > neckline),
     }
 
 
@@ -106,8 +116,6 @@ def _double_bottom(swings: pd.DataFrame, t_pos: int, close_t: float) -> Optional
     if not _within([l1, l2]):
         return None
     if t_pos - l1p > SEARCH_WINDOW:
-        return None
-    if not close_t > h:
         return None
     return _row(DOUBLE_BOTTOM, t_pos, h, close_t, [(l1p, l1), (l2p, l2)], [(hp, h)])
 
@@ -134,8 +142,6 @@ def _triple_bottom(swings: pd.DataFrame, t_pos: int, close_t: float) -> Optional
     if not _within([e1, e3, e5]):
         return None
     neck = max(e2, e4)
-    if not close_t > neck:
-        return None
     return _row(TRIPLE_BOTTOM, t_pos, neck, close_t,
                 [(e1p, e1), (e3p, e3), (e5p, e5)], [(e2p, e2), (e4p, e4)])
 
@@ -153,21 +159,24 @@ def _inverse_hs(swings: pd.DataFrame, t_pos: int, close_t: float) -> Optional[di
     if not (e3 < e1 and e3 < e5):
         return None          # 頭。深さの下限は設けない（§2.1 R3）
     neck = max(e2, e4)
-    if not close_t > neck:
-        return None
     return _row(INVERSE_HS, t_pos, neck, close_t,
                 [(e1p, e1), (e3p, e3), (e5p, e5)], [(e2p, e2), (e4p, e4)])
 
 
 def detect_patterns(high: pd.Series, low: pd.Series, close: pd.Series, t_pos: int,
-                    k: int = 3, alternated: Optional[pd.DataFrame] = None
-                    ) -> pd.DataFrame:
+                    k: int = 3, alternated: Optional[pd.DataFrame] = None,
+                    include_pending: bool = False) -> pd.DataFrame:
     """T 時点で成立している反転系パターンを返す（docs/PATTERN.md §2.1）。
 
     high/low/close は 0 始まりの位置で扱う整列済み Series（features 内の他モジュールと
     同じ規約）。t_pos は判定日 T の位置。**読むのは T までのデータだけ。**
 
     alternated を渡すと `alternate_swings` を再実行しない（多数の T を回すとき用）。
+
+    **既定では成立した行だけを返す**（`breakout` が True）。`include_pending=True` に
+    すると、形は揃っているがネックラインをまだ抜けていない行も返す。検出 0 件だった
+    ときに「条件が厳しい」のか「実装が間違っている」のかを切り分けるためのもので、
+    **配信や記録には使わない**（成立の定義は §2.1 共通のまま変えていない）。
 
     **同じ 5 極値が R2 と R3 の両方に該当したら両方返す**（§2.1）。どちらかに寄せない。
     戻り値は PATTERN_COLS の順で、pattern 名の昇順。
@@ -187,6 +196,8 @@ def detect_patterns(high: pd.Series, low: pd.Series, close: pd.Series, t_pos: in
     rows = [f(swings, t_pos, close_t)
             for f in (_double_bottom, _triple_bottom, _inverse_hs)]
     hits = [r for r in rows if r is not None]
+    if not include_pending:
+        hits = [r for r in hits if r["breakout"]]
     if not hits:
         return pd.DataFrame(columns=PATTERN_COLS)
     out = pd.DataFrame(hits)[PATTERN_COLS]
