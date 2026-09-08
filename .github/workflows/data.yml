@@ -83,6 +83,15 @@ jobs:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli references
 
+      # 反転系パターンの検出数を数える（docs/PATTERN.md §2.1）。
+      # **数えてログに出すだけ。何も保存しないし配信もしない。**
+      # 事前登録した数値どおりに実装できているかを実データで確かめるためのもので、
+      # 最初の観測が済んだら外してよい。continue-on-error にはしない（落ちたら気づく）。
+      - name: Detect patterns (report only)
+        env:
+          SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
+        run: python -m stockbot.cli pattern
+
       # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）。references と同じく
       # daily とは別ステップにして、ここが失敗しても取得・保存の成果を失わないようにする。
       - name: Resolve delivered records
