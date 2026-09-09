@@ -84,9 +84,13 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(len(out), 0)
 
     def test_pre_registered_numbers(self):
-        """§1 の事前登録値。検出数を見てから動かさない。"""
+        """§1 の事前登録値。検出数を見てから動かさない。
+
+        文献値: ±1.5%（LMW）・22 営業日（LMW）・63 営業日（Savin et al. 2007）。
+        裁量値: 隣接間隔 10 営業日（文献に数値が無いことを確認済み）。
+        """
         self.assertEqual(EQUAL_TOL, 0.015)
-        self.assertEqual(SEARCH_WINDOW, 60)
+        self.assertEqual(SEARCH_WINDOW, 63)
         self.assertEqual(DOUBLE_BOTTOM_GAP, 22)
         self.assertEqual(ADJACENT_TROUGH_GAP, 10)
 
@@ -119,7 +123,7 @@ class DoubleBottomTest(unittest.TestCase):
         self.assertIsNone(first_hit(double_bottom(gap=14))[0])
 
     def test_search_window_excludes_old_extremes(self):
-        """60 営業日より前に外れた極値は使わない。"""
+        """63 営業日より前に外れた極値は使わない。"""
         df = double_bottom(gap=30)
         t, _row = first_hit(df)
         # 同じ形でも、成立日をずっと後ろにすると極値がウィンドウから外れる
