@@ -24,9 +24,11 @@ from .swings import SWING_HIGH, SWING_LOW, alternate_swings, detect_raw_swings, 
 
 # ------------------------------------------------------------------ 事前登録の値
 # docs/PATTERN.md §1。**検出数を見てから動かさない**（D-3・D-5）
+# 出典のある値（文献値）
 EQUAL_TOL = 0.015           # 等値とみなす幅 ±1.5%（LMW）。ATR 連動にしない
-SEARCH_WINDOW = 60          # 探索ウィンドウ（営業日）。全極値がここに収まること
+SEARCH_WINDOW = 63          # 探索ウィンドウ（営業日・Savin-Weller-Zvingelis 2007）
 DOUBLE_BOTTOM_GAP = 22      # ダブルボトムの 2 安値の最小間隔（営業日・LMW）
+# 裁量値（文献に数値が無いことを確認済み。docs/PATTERN.md §1）
 ADJACENT_TROUGH_GAP = 10    # トリプル／逆三尊の隣接する谷の最小間隔（営業日）
 
 DOUBLE_BOTTOM = "double_bottom"
