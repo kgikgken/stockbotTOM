@@ -441,6 +441,33 @@ def _dates(row, keys) -> str:
     return " / ".join(parts) if parts else "—"
 
 
+def _log_slopes(label: str, part: pd.DataFrame, log) -> None:
+    """保ち合い系の上辺・下辺の傾きの分布（docs/PATTERN.md §5 D-11）。
+
+    **観測であって判定ではない。** 上昇三角（C1）の `下辺傾き > 0` に下限が無いので、
+    わずかでも正なら通る —— 実質「上辺が水平」だけで通っていないかを切り分けるため
+    の表示である。**下辺傾きが ε 未満の件数**を併記する（ε 未満なら「上向き」では
+    なく「水平」で、その行は実質ボックスに近い）。
+
+    件数を見て閾値を足すためのものではない（§1 の感度分析はしない方針はそのまま）。
+    """
+    eps_pct = pattern_mod.EPSILON_SLOPE * 100
+    for name in pattern_mod.CONSOLIDATION_PATTERNS:
+        sub = part[part["pattern"] == name]
+        if not len(sub):
+            continue
+        for side, col in (("上辺", "upper_slope"), ("下辺", "lower_slope")):
+            v = sub[col].dropna() * 100
+            if not len(v):
+                continue
+            line = (f"[pattern] {label}の{name} {side}傾き: 中央 {v.median():+.4f}%/日 / "
+                    f"最小 {v.min():+.4f} / 最大 {v.max():+.4f}")
+            if col == "lower_slope":
+                # ε 未満 ＝「上向き」ではなく「水平」。C1 が実質ボックスになっていないか
+                line += f" / |傾き| < ε({eps_pct:.1f}%) が {int((v.abs() < eps_pct).sum())} 件"
+            log(line)
+
+
 def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                  log=print) -> pd.DataFrame:
     """7 パターンの検出数を数える（docs/PATTERN.md §2.1 反転系・§2.2 保ち合い系）。
@@ -519,6 +546,7 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
             be = part["breakeven_win_rate"].dropna()
             log(f"[pattern] {label}の損益分岐勝率: 中央 {be.median():.1%} / "
                 f"最小 {be.min():.1%} / 最大 {be.max():.1%}")
+        _log_slopes(label, part, log)
 
     if len(out):
         multi = out.groupby("ticker")["pattern"].nunique()

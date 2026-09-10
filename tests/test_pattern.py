@@ -687,3 +687,58 @@ class ConsolidationPointInTimeTest(unittest.TestCase):
         df = series_from([(0, 120.0), (40, 100.0), (60, 110.0), (80, 101.0),
                           (199, 101.0)])
         self.assertEqual(_any_pending(df), [])
+
+
+class SlopeDistributionTest(unittest.TestCase):
+    """保ち合い系の傾きの分布（docs/PATTERN.md §5 D-11）。
+
+    **観測であって判定ではない。** C1 の `下辺傾き > 0` に下限が無いので、実質
+    「上辺が水平」だけで通っていないかを切り分けるための表示。
+    """
+
+    def _lines(self, df, tickers=("1234.T",)):
+        from stockbot.cli import step_pattern
+        from stockbot.config import Settings
+
+        universe = pd.DataFrame({"ticker": list(tickers),
+                                 "passes": [True] * len(tickers)})
+        lines = []
+        step_pattern(Settings.from_env(), universe, {t: df for t in tickers},
+                     log=lines.append)
+        return "\n".join(lines)
+
+    def test_both_slopes_are_reported_for_consolidation(self):
+        df = ascending_triangle()
+        df = df.iloc[:first_hit(df)[0] + 1]
+        text = self._lines(df)
+        self.assertIn("ascending_triangle 上辺傾き", text)
+        self.assertIn("ascending_triangle 下辺傾き", text)
+        self.assertIn("%/日", text)
+
+    def test_flat_lower_edge_is_counted_against_epsilon(self):
+        """**下辺傾きが ε 未満なら「上向き」ではなく「水平」。** その件数を出す。
+
+        C1 の件数が突出したときに、下辺が実質水平で通っていないかを見るため。
+        """
+        # 下辺がほぼ水平（+0.0003%/日 程度）だが正なので C1 は通る
+        flatish = ascending_triangle(lows=(100.0, 100.05, 100.02))
+        t, row = first_hit(flatish)
+        self.assertIsNotNone(t)
+        self.assertGreater(float(row["lower_slope"]), 0)
+        self.assertLess(abs(float(row["lower_slope"])), EPSILON_SLOPE)
+        text = self._lines(flatish.iloc[:t + 1])
+        self.assertIn("が 1 件", text)
+
+    def test_rising_lower_edge_is_not_counted(self):
+        """はっきり上向きの下辺は ε 未満に数えない。"""
+        df = ascending_triangle()          # 下辺 +0.2%/日 程度
+        t, row = first_hit(df)
+        self.assertGreater(abs(float(row["lower_slope"])), EPSILON_SLOPE)
+        self.assertIn("が 0 件", self._lines(df.iloc[:t + 1]))
+
+    def test_reversal_patterns_have_no_slope_line(self):
+        """反転系に上辺・下辺は無い。傾きの行を出さない。"""
+        df = double_bottom()
+        text = self._lines(df.iloc[:first_hit(df)[0] + 1])
+        self.assertNotIn("上辺傾き", text)
+        self.assertNotIn("下辺傾き", text)
