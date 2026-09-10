@@ -274,3 +274,69 @@ class PointInTimeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VisualCheckListingTest(unittest.TestCase):
+    """目視確認用の列挙（docs/PATTERN.md §5 D-4）。
+
+    極値の位置を日付に直して出す。**閾値の判断には使わない** —— 形をチャートで
+    確かめるための表示であって、絞り込みでも並び替えの根拠でもない。
+    """
+
+    def _trim(self, df):
+        """形が揃う最初の日で切る。step_pattern は最終足を T にするため。"""
+        for t in range(K + 1, len(df)):
+            out = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                                  include_pending=True)
+            if len(out):
+                return df.iloc[:t + 1]
+        raise AssertionError("形が揃う日が無い")
+
+    def _run(self, df, tickers=("1234.T",), confirmed=False):
+        from stockbot.cli import step_pattern
+        from stockbot.config import Settings
+
+        # confirmed=True なら上抜けた日で切る。既定は形が揃った最初の日（未抜け）
+        df = df.iloc[:first_hit(df)[0] + 1] if confirmed else self._trim(df)
+        cfg = Settings.from_env()
+        universe = pd.DataFrame({"ticker": list(tickers),
+                                 "passes": [True] * len(tickers)})
+        lines = []
+        out = step_pattern(cfg, universe, {t: df for t in tickers},
+                           log=lines.append)
+        return out, "\n".join(lines)
+
+    def test_pending_rows_are_listed_with_dates(self):
+        df = double_bottom(breakout=False)
+        out, text = self._run(df)
+        self.assertEqual(len(out), 1)
+        self.assertFalse(bool(out["breakout"].iloc[0]))
+        self.assertIn("未抜け 1件", text)
+        self.assertIn("1234.T", text)
+        # 極値が日付で出る（バー位置ではチャートで探せない）
+        l1 = pd.Timestamp(out["l1_date"].iloc[0])
+        self.assertIn(f"{l1:%m-%d}", text)
+        self.assertIn("谷 ", text)
+        self.assertIn("山 ", text)
+
+    def test_missing_extreme_is_skipped_not_printed_as_nan(self):
+        """ダブルボトムに 3 つ目の谷は無い。欠損を nan と書かない。"""
+        out, text = self._run(double_bottom(breakout=False))
+        self.assertTrue(pd.isna(out["l3_date"].iloc[0]))
+        self.assertNotIn("nan", text.lower())
+        self.assertNotIn("NaT", text)
+
+    def test_distance_to_neckline_is_signed(self):
+        """未抜けは正（まだ上）、成立は負（もう抜けた）。"""
+        pending, _t = self._run(double_bottom(breakout=False))
+        done, _t2 = self._run(double_bottom(), confirmed=True)
+        self.assertGreater(float(pending["to_neck_pct"].iloc[0]), 0)
+        self.assertLess(float(done["to_neck_pct"].iloc[0]), 0)
+
+    def test_both_patterns_are_listed_separately(self):
+        """同じ 5 極値が両方に該当したら、2 行とも列挙する（§2.1）。"""
+        df = inverse_hs(shoulders=(100.0, 100.4), head=99.2, necks=(108.0, 108.5))
+        out, text = self._run(df)
+        self.assertEqual(sorted(out["pattern"]), ["inverse_hs", "triple_bottom"])
+        self.assertIn("inverse_hs", text)
+        self.assertIn("triple_bottom", text)
