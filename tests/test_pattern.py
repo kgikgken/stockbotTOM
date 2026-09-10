@@ -13,9 +13,11 @@ from stockbot.features.pattern import (
     ADJACENT_TROUGH_GAP,
     DOUBLE_BOTTOM_GAP,
     EQUAL_TOL,
+    MEASURED_MOVE_COLS,
     PATTERN_COLS,
     SEARCH_WINDOW,
     detect_patterns,
+    measured_move,
 )
 
 K = 3   # swings.py の確定ラグ。PATTERN.md §2.1 共通
@@ -340,3 +342,62 @@ class VisualCheckListingTest(unittest.TestCase):
         self.assertEqual(sorted(out["pattern"]), ["inverse_hs", "triple_bottom"])
         self.assertIn("inverse_hs", text)
         self.assertIn("triple_bottom", text)
+
+
+class MeasuredMoveTest(unittest.TestCase):
+    """測定目標と比率（docs/PATTERN.md §2.3）。
+
+    **文献上の目安であって統計的裏付けは無い。** 比率を併記して読み手が判断できる
+    ようにするための量で、判定には一切使わない。
+    """
+
+    def test_ratio_follows_the_algebra(self):
+        """比率 = (1 − b) / (1 + b)。b は高さに対する抜け幅。"""
+        neck, low = 110.0, 100.0
+        h = neck - low
+        for b, expected in [(0.0, 1.0), (0.05, 0.905), (0.10, 0.818), (0.20, 0.667)]:
+            m = measured_move(neck, neck + b * h, [low, low])
+            self.assertAlmostEqual(m["rr"], expected, places=3, msg=f"b={b}")
+            self.assertAlmostEqual(m["breakeven_win_rate"], 1 / (1 + expected),
+                                   places=3, msg=f"b={b}")
+
+    def test_target_is_neckline_plus_height(self):
+        m = measured_move(110.0, 111.0, [100.0, 100.5])
+        self.assertAlmostEqual(m["pattern_low"], 100.0)
+        self.assertAlmostEqual(m["height"], 10.0)
+        self.assertAlmostEqual(m["target"], 120.0)
+
+    def test_stop_is_the_lowest_low(self):
+        """撤退はパターンの最安値。逆三尊なら頭になる。"""
+        m = measured_move(110.0, 111.0, [100.0, 92.0, 100.6])
+        self.assertAlmostEqual(m["pattern_low"], 92.0)
+        self.assertAlmostEqual(m["height"], 18.0)
+
+    def test_breakout_pct_is_negative_while_pending(self):
+        pending = measured_move(110.0, 105.0, [100.0])
+        done = measured_move(110.0, 111.0, [100.0])
+        self.assertLess(pending["breakout_pct"], 0)
+        self.assertGreater(done["breakout_pct"], 0)
+
+    def test_degenerate_inputs(self):
+        """高さが定義できない・値が壊れている場合は比率を出さない。"""
+        flat = measured_move(100.0, 101.0, [100.0])       # 高さ 0
+        self.assertTrue(pd.isna(flat["rr"]))
+        self.assertTrue(pd.isna(measured_move(110.0, 0.0, [100.0])["rr"]))
+        self.assertTrue(pd.isna(measured_move(np.nan, 111.0, [100.0])["rr"]))
+        self.assertTrue(pd.isna(measured_move(110.0, 111.0, [])["rr"]))
+
+    def test_rows_carry_the_columns(self):
+        df = double_bottom()
+        _t, row = first_hit(df)
+        for col in MEASURED_MOVE_COLS:
+            self.assertIn(col, row.index)
+        self.assertGreater(float(row["rr"]), 0)
+        # ダブルボトムの撤退は 2 安値の低いほう
+        self.assertAlmostEqual(float(row["pattern_low"]),
+                               min(float(row["l1"]), float(row["l2"])), places=6)
+
+    def test_inverse_hs_stop_is_the_head(self):
+        df = inverse_hs()
+        _t, row = first_hit(df)
+        self.assertAlmostEqual(float(row["pattern_low"]), float(row["l2"]), places=6)

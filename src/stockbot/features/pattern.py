@@ -46,6 +46,17 @@ PATTERN_COLS = [
     "h1_pos", "h1",     # 左のネックライン点
     "h2_pos", "h2",     # 右のネックライン点（ダブルボトムでは欠損）
     "span",         # 使った極値の最初から T までの本数
+    # 撤退・目標・比率（docs/PATTERN.md §2.3）。**測定目標は文献上の目安であって、
+    # 統計的裏付けは調べていない。** 比率を併記して読み手が自分で判断できるようにする
+    "pattern_low",  # 撤退の目安。パターンの最安値
+    "height",       # ネックライン − 最安値。測定目標の投影幅
+    "target",       # ネックライン + 高さ（測定目標・文献上の目安）
+    "breakout_pct",   # (終値 / ネックライン − 1) × 100。負なら未抜け
+    "breakout_h",     # 抜け幅 ÷ 高さ。比率 = (1 − b) / (1 + b) の b
+    "up_pct",         # (目標 / 終値 − 1) × 100
+    "down_pct",       # (最安値 / 終値 − 1) × 100（負）
+    "rr",             # up ÷ |down|。**1 未満なら目標のほうが撤退より近い**
+    "breakeven_win_rate",   # 1 / (1 + rr)。これを上回る勝率が無いと期待値が負になる
     # 形は揃っているか、ネックラインも抜けたか。**形だけ揃った行を数えるための列。**
     # 検出 0 件だったときに「条件が厳しい」のか「実装が間違っている」のかを
     # 1 回で切り分けるために置いた（設計責任者の指示、docs/PATTERN.md §2.1）
@@ -104,7 +115,55 @@ def _row(pattern: str, t_pos: int, neckline: float, close_t: float,
         "h1_pos": h1p, "h1": h1, "h2_pos": h2p, "h2": h2,
         "span": int(t_pos - first),
         "breakout": bool(close_t > neckline),
+        **measured_move(neckline, close_t, [v for _p, v in lows]),
     }
+
+
+MEASURED_MOVE_COLS = ["pattern_low", "height", "target", "breakout_pct", "breakout_h",
+                      "up_pct", "down_pct", "rr", "breakeven_win_rate"]
+
+
+def measured_move(neckline: float, close_t: float, lows) -> dict:
+    """撤退・測定目標・比率（docs/PATTERN.md §2.3）。
+
+    **測定目標は文献上の目安であって、統計的裏付けは調べていない。** ネックラインから
+    パターンの最安値までの値幅を、ネックラインの上に同じだけ投影したもの。
+
+    - 撤退の目安 = パターンの最安値
+    - 高さ `h` = ネックライン − 最安値
+    - 測定目標 = ネックライン + h
+    - 抜け幅を高さで割った `b` に対し、**比率 = (1 − b) / (1 + b)**
+
+    **抜けた直後（b ≈ 0）なら比率 ≈ 1.0** で、大きく抜けてから買うほど下がる
+    （b=0.05 で 0.90、b=0.20 で 0.67）。抜け幅の下限を入れると、シグナルの確からしさと
+    引き換えに比率を削ることになる（§5 D-7）。
+
+    T の引けまでの値だけで決まる。結果ではない。
+    """
+    nan = {c: np.nan for c in MEASURED_MOVE_COLS}
+    finite = [float(v) for v in lows if v is not None and np.isfinite(v)]
+    if not finite or not (np.isfinite(neckline) and np.isfinite(close_t) and close_t > 0):
+        return nan
+    low = min(finite)
+    height = neckline - low
+    out = dict(nan)
+    out["pattern_low"] = low
+    out["height"] = float(height)
+    out["breakout_pct"] = float((close_t / neckline - 1.0) * 100) if neckline > 0 else np.nan
+    if height <= 0:
+        return out          # ネックラインが最安値以下。高さが定義できない
+    target = neckline + height
+    up = target / close_t - 1.0
+    down = low / close_t - 1.0
+    out["target"] = float(target)
+    out["breakout_h"] = float((close_t - neckline) / height)
+    out["up_pct"] = float(up * 100)
+    out["down_pct"] = float(down * 100)
+    if down < 0 and up > 0:
+        rr = up / -down
+        out["rr"] = float(rr)
+        out["breakeven_win_rate"] = float(1.0 / (1.0 + rr))
+    return out
 
 
 def _double_bottom(swings: pd.DataFrame, t_pos: int, close_t: float) -> Optional[dict]:

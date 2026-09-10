@@ -421,6 +421,15 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
 PATTERN_LIST_MAX = 30   # 目視用に列挙する上限。多すぎるとログが読めない
 
 
+def _num(value, digits: int = 1) -> str:
+    """欠損を「—」にする。高さが定義できない行では目標も比率も出ない。"""
+    return "—" if pd.isna(value) else f"{float(value):,.{digits}f}"
+
+
+def _signed(value) -> str:
+    return "—" if pd.isna(value) else f"{float(value):+.1f}%"
+
+
 def _dates(row, keys) -> str:
     """極値を「日付 値」の並びにする。欠損（ダブルボトムの l3 など）は飛ばす。"""
     parts = []
@@ -494,6 +503,22 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
         log(f"[pattern] {label}の span（最初の極値から T まで）: 中央 "
             f"{part['span'].median():.0f}本 / 最小 {part['span'].min():.0f} / "
             f"最大 {part['span'].max():.0f}")
+        # 抜け幅の分布（§5 D-7）。**下限は入れていない。** 分布を見るための記録
+        bo = part["breakout_pct"].dropna()
+        if len(bo):
+            log(f"[pattern] {label}の抜け幅: 中央 {bo.median():+.2f}% / "
+                f"最小 {bo.min():+.2f}% / 最大 {bo.max():+.2f}%")
+        bh = part["breakout_h"].dropna()
+        if len(bh):
+            log(f"[pattern] {label}の抜け幅÷高さ: 中央 {bh.median():+.3f} / "
+                f"最小 {bh.min():+.3f} / 最大 {bh.max():+.3f}")
+        rr = part["rr"].dropna()
+        if len(rr):
+            log(f"[pattern] {label}の比率（測定目標÷撤退・文献上の目安）: 中央 "
+                f"{rr.median():.2f} / 最小 {rr.min():.2f} / 最大 {rr.max():.2f}")
+            be = part["breakeven_win_rate"].dropna()
+            log(f"[pattern] {label}の損益分岐勝率: 中央 {be.median():.1%} / "
+                f"最小 {be.min():.1%} / 最大 {be.max():.1%}")
 
     if len(out):
         multi = out.groupby("ticker")["pattern"].nunique()
@@ -514,6 +539,9 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                 f"({r['to_neck_pct']:+.1f}%) / span {int(r['span'])}本")
             log(f"[pattern]     谷 {_dates(r, ('l1', 'l2', 'l3'))}")
             log(f"[pattern]     山 {_dates(r, ('h1', 'h2'))}")
+            log(f"[pattern]     撤退 {r['pattern_low']:.1f} ({r['down_pct']:+.1f}%) / "
+                f"目標 {_num(r['target'])} ({_signed(r['up_pct'])}) / "
+                f"比率 {_num(r['rr'], 2)}")
         if len(part) > PATTERN_LIST_MAX:
             log(f"[pattern]   ... 他 {len(part) - PATTERN_LIST_MAX} 件")
     return out
