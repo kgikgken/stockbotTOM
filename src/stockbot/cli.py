@@ -418,6 +418,20 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
     return df
 
 
+PATTERN_LIST_MAX = 30   # 目視用に列挙する上限。多すぎるとログが読めない
+
+
+def _dates(row, keys) -> str:
+    """極値を「日付 値」の並びにする。欠損（ダブルボトムの l3 など）は飛ばす。"""
+    parts = []
+    for key in keys:
+        d, v = row.get(f"{key}_date"), row.get(key)
+        if pd.isna(d) or pd.isna(v):
+            continue
+        parts.append(f"{pd.Timestamp(d):%m-%d} {float(v):.1f}")
+    return " / ".join(parts) if parts else "—"
+
+
 def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                  log=print) -> pd.DataFrame:
     """反転系パターンの検出数を数える（docs/PATTERN.md §2.1）。
@@ -448,9 +462,22 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
         if len(hits) == 0:
             n_swings_short += 1
         for _i, r in hits.iterrows():
-            rows.append({"ticker": ticker, "asof": df.index[t_pos], **r.to_dict()})
+            # 極値の位置を日付に直す。**チャートで探せるようにするため**（目視確認用、
+            # docs/PATTERN.md §5 D-4 の「形を目視確認してから」に対応）
+            dates = {}
+            for col in ("l1_pos", "l2_pos", "l3_pos", "h1_pos", "h2_pos"):
+                pos = r[col]
+                dates[col.replace("_pos", "_date")] = (
+                    df.index[int(pos)] if pd.notna(pos) else pd.NaT)
+            rows.append({"ticker": ticker, "asof": df.index[t_pos],
+                         **r.to_dict(), **dates})
 
-    out = pd.DataFrame(rows, columns=["ticker", "asof"] + pattern_mod.PATTERN_COLS)
+    date_cols = ["l1_date", "l2_date", "l3_date", "h1_date", "h2_date"]
+    out = pd.DataFrame(rows,
+                       columns=["ticker", "asof"] + pattern_mod.PATTERN_COLS + date_cols)
+    if len(out):
+        # ネックラインまでの距離。目視の優先順位を付けるため（閾値ではない）
+        out["to_neck_pct"] = (out["neckline"] / out["close_t"] - 1.0) * 100
     done = out[out["breakout"].astype(bool)] if len(out) else out
     pending = out[~out["breakout"].astype(bool)] if len(out) else out
     log(f"[pattern] 評価 {n_eval} 銘柄")
@@ -468,15 +495,27 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
             f"{part['span'].median():.0f}本 / 最小 {part['span'].min():.0f} / "
             f"最大 {part['span'].max():.0f}")
 
-    if len(done):
-        multi = done.groupby("ticker")["pattern"].nunique()
+    if len(out):
+        multi = out.groupby("ticker")["pattern"].nunique()
         log(f"[pattern] 同じ銘柄で複数パターンに該当: {int((multi > 1).sum())} 銘柄")
-        for _i, r in done.head(20).iterrows():
+
+    # **成立と未抜けの両方を銘柄つきで出す。** 未抜けを出すのは、成立 0 件が続く間も
+    # 「その形をダブルボトムと呼んでよいか」をチャートで確かめられるようにするため
+    # （docs/PATTERN.md §5 D-4）。**閾値の判断には使わない**
+    for label, part in (("成立", done), ("未抜け", pending)):
+        if not len(part):
+            continue
+        # ネックラインに近い順。目視する順番を決めるだけで、絞り込みではない
+        part = part.sort_values("to_neck_pct")
+        log(f"[pattern] --- {label} {len(part)}件（ネックラインに近い順）---")
+        for _i, r in part.head(PATTERN_LIST_MAX).iterrows():
             log(f"[pattern]   {r['ticker']:<9} {r['pattern']:<14} "
-                f"ネックライン {r['neckline']:.1f} / 終値 {r['close_t']:.1f} / "
-                f"span {int(r['span'])}本")
-        if len(done) > 20:
-            log(f"[pattern]   ... 他 {len(done) - 20} 件")
+                f"終値 {r['close_t']:.1f} → ネックライン {r['neckline']:.1f} "
+                f"({r['to_neck_pct']:+.1f}%) / span {int(r['span'])}本")
+            log(f"[pattern]     谷 {_dates(r, ('l1', 'l2', 'l3'))}")
+            log(f"[pattern]     山 {_dates(r, ('h1', 'h2'))}")
+        if len(part) > PATTERN_LIST_MAX:
+            log(f"[pattern]   ... 他 {len(part) - PATTERN_LIST_MAX} 件")
     return out
 
 
