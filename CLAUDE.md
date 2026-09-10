@@ -6,9 +6,9 @@
 ## 正の情報源（この順で優先）
 
 **19 条件のスクリーナーは 2026-09-08 に撤去した**（`docs/SCREENER_CLOSING.md`）。
-現在の作業対象は 7 パターンの検出（`docs/PATTERN.md`）。ただし**判定式はまだ揃っていない**
-（PATTERN.md §4 Q-1）。検証プロジェクト（v8 順張り押し目）は 2026-08-30 に終了している
-（`docs/CLOSING.md`）。
+現在の作業対象は 7 パターンの検出（`docs/PATTERN.md`）。判定式は 2026-09-08 に揃い
+（§4 Q-1 クローズ）、7 つとも実装済み。**検出数を出すだけで、記録も配信もまだしない。**
+検証プロジェクト（v8 順張り押し目）は 2026-08-30 に終了している（`docs/CLOSING.md`）。
 
 1. `docs/PATTERN.md` — **現在の作業対象。** 7 パターンの仕様と事前登録パラメータ。
    質問ログもここ（§4）
@@ -22,8 +22,9 @@
 記録の列が何かを引くために読んでよいが、そこの条件・閾値・検定数・停止規則・撤退基準を
 新しい作業に引き継がない。
 
-**パターンの判定式をこちらで作らない。** PATTERN.md §2 が「判定式待ち」の間は、
-検出の実装をしない（§4 Q-1）。事前登録パラメータ（§1）は決まっているので動かさない。
+**パターンの判定式をこちらで作らない。** 判定式は PATTERN.md §2 にあるものが全部で、
+書いていない条件を足さない。事前登録パラメータ（§1）は決まっているので動かさない。
+§2.2 の「実装上の読み」は判定式の追加ではなく、既にある数値をどこに当てるかの記録である。
 
 チャットの指示と文書が食い違ったら、文書を正として指摘する。
 
@@ -62,7 +63,7 @@
     data/        yf_fetch.py  adjust.py  store.py  jpx_lists.py  synthetic.py
     universe/    build.py
     features/    indicators.py  swings.py  pullback.py  dimensions.py  regime.py  sector.py
-                 pattern.py（未着手。PATTERN.md §4 Q-1 の判定式待ち）
+                 pattern.py（7 パターン。PATTERN.md §2.1・§2.2）
     scoring/     composite.py  template.py  ranking.py
     validation/  labels.py  replay.py  layer1.py  report.py  calibration.py
     render/      context.py  template.html  render.py

@@ -443,7 +443,7 @@ def _dates(row, keys) -> str:
 
 def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                  log=print) -> pd.DataFrame:
-    """反転系パターンの検出数を数える（docs/PATTERN.md §2.1）。
+    """7 パターンの検出数を数える（docs/PATTERN.md §2.1 反転系・§2.2 保ち合い系）。
 
     **数えて出すだけで、何も保存しないし配信もしない。** 事前登録した数値どおりに
     実装できているかを実データで確かめるためのもの（D-3・D-5 の「検出数を見てから
@@ -474,14 +474,14 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
             # 極値の位置を日付に直す。**チャートで探せるようにするため**（目視確認用、
             # docs/PATTERN.md §5 D-4 の「形を目視確認してから」に対応）
             dates = {}
-            for col in ("l1_pos", "l2_pos", "l3_pos", "h1_pos", "h2_pos"):
+            for col in ("l1_pos", "l2_pos", "l3_pos", "h1_pos", "h2_pos", "h3_pos"):
                 pos = r[col]
                 dates[col.replace("_pos", "_date")] = (
                     df.index[int(pos)] if pd.notna(pos) else pd.NaT)
             rows.append({"ticker": ticker, "asof": df.index[t_pos],
                          **r.to_dict(), **dates})
 
-    date_cols = ["l1_date", "l2_date", "l3_date", "h1_date", "h2_date"]
+    date_cols = ["l1_date", "l2_date", "l3_date", "h1_date", "h2_date", "h3_date"]
     out = pd.DataFrame(rows,
                        columns=["ticker", "asof"] + pattern_mod.PATTERN_COLS + date_cols)
     if len(out):
@@ -538,7 +538,13 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                 f"終値 {r['close_t']:.1f} → ネックライン {r['neckline']:.1f} "
                 f"({r['to_neck_pct']:+.1f}%) / span {int(r['span'])}本")
             log(f"[pattern]     谷 {_dates(r, ('l1', 'l2', 'l3'))}")
-            log(f"[pattern]     山 {_dates(r, ('h1', 'h2'))}")
+            log(f"[pattern]     山 {_dates(r, ('h1', 'h2', 'h3'))}")
+            if pd.notna(r["upper_slope"]):
+                # 保ち合い系だけ。ε（日次 0.1%）と比べられるよう %/日 で出す
+                log(f"[pattern]     上辺 {r['upper_slope'] * 100:+.3f}%/日 / "
+                    f"下辺 {r['lower_slope'] * 100:+.3f}%/日"
+                    + ("" if pd.isna(r["pole_pct"]) else
+                       f" / 旗竿 {r['pole_pct']:+.1f}%"))
             log(f"[pattern]     撤退 {r['pattern_low']:.1f} ({r['down_pct']:+.1f}%) / "
                 f"目標 {_num(r['target'])} ({_signed(r['up_pct'])}) / "
                 f"比率 {_num(r['rr'], 2)}")
