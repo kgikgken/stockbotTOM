@@ -1,7 +1,7 @@
-"""反転系パターンの検出（docs/PATTERN.md §2.1）。
+"""パターンの検出（docs/PATTERN.md §2.1 反転系・§2.2 保ち合い系）。
 
 固定するのは 3 つ。**未来を見ないこと**、**事前登録した数値のとおりに切れること**、
-**同じ 5 極値が R2 と R3 の両方に該当したら両方出ること**（§2.1）。
+**同じ極値が複数のパターンに該当したら全部出ること**（§2.1）。
 """
 import unittest
 
@@ -11,11 +11,19 @@ import pandas as pd
 from . import _path  # noqa: F401
 from stockbot.features.pattern import (
     ADJACENT_TROUGH_GAP,
+    BOX_TOL,
     DOUBLE_BOTTOM_GAP,
+    EPSILON_SLOPE,
     EQUAL_TOL,
+    FLAG_MAX_SPAN,
+    MEASURED_MOVE_COLS,
     PATTERN_COLS,
+    POLE_LOOKBACK,
+    POLE_RISE,
     SEARCH_WINDOW,
+    TOUCH_POINTS,
     detect_patterns,
+    measured_move,
 )
 
 K = 3   # swings.py の確定ラグ。PATTERN.md §2.1 共通
@@ -62,9 +70,80 @@ def inverse_hs(gap=14, shoulders=(100.0, 100.6), head=92.0, necks=(108.0, 108.5)
                         (end, max(necks) + 3.0), (199, max(necks) + 3.0)])
 
 
+# ------------------------------------------------------------------ 保ち合い系
+# docs/PATTERN.md §2.2。極値は 5 点で、交互なので必ず 3 + 2 に割れる
+
+
+def five_points(values, start=40, gap=7, lead=120.0, end_value=None, n=200):
+    """極値 5 点を gap 間隔で置き、そのあと上抜けさせる折れ線。
+
+    `values` は古い順の 5 値。`lead` を高くしておくと 1 点目が谷になる
+    （安値から始まる形）。`end_value` を上辺より上にすると成立日ができる。
+    """
+    pos = [start + gap * i for i in range(5)]
+    knots = [(0, lead)] + list(zip(pos, values))
+    top = max(values) + 4.0 if end_value is None else end_value
+    knots += [(pos[-1] + 12, top), (n - 1, top)]
+    return series_from(knots, n=n)
+
+
+def ascending_triangle(highs=(110.0, 110.2), lows=(100.0, 103.0, 106.0)):
+    """L H L H L。上辺が水平・下辺が上向き（C1）。"""
+    return five_points([lows[0], highs[0], lows[1], highs[1], lows[2]])
+
+
+def ascending_box(highs=(110.0, 110.3), lows=(100.2, 100.5, 100.0)):
+    """L H L H L。上辺・下辺とも水平で重ならない（C2）。"""
+    return five_points([lows[0], highs[0], lows[1], highs[1], lows[2]],
+                       end_value=115.0)
+
+
+def flagged(ups=(120.0, 119.0, 118.0), downs=(114.0, 113.04), gap=2,
+            start=40, pole_from=105.0, n=200):
+    """旗竿 → H L H L H の 5 点 → 上抜け（C3・C4）。
+
+    旗竿は `start` の 5 本前から `start` までの上昇。gap を変えると span が変わる
+    （gap=2 で span 11〜14、gap=3 で span 15 以上）。**フラッグは 15 営業日未満・
+    ペナントは 15 営業日以下**なので、span 15 で両者が分かれる（§2.2）。
+    """
+    pos = [start + gap * i for i in range(5)]
+    last = pos[-1]
+    knots = [(0, pole_from), (start - POLE_LOOKBACK, pole_from),
+             (pos[0], ups[0]), (pos[1], downs[0]), (pos[2], ups[1]),
+             (pos[3], downs[1]), (pos[4], ups[2])]
+    # 確定に k 本（上辺より下）、そのあと上抜け
+    knots += [(last + 1, ups[2] - 0.4), (last + 2, ups[2] - 0.3),
+              (last + 3, ups[2] - 0.2), (last + 4, 130.0), (n - 1, 130.0)]
+    return series_from(knots, n=n)
+
+
 def names_at(df, t_pos, **kw):
     out = detect_patterns(df["High"], df["Low"], df["Close"], t_pos, k=K, **kw)
     return sorted(out["pattern"].tolist())
+
+
+def _any_pending(df, hi=None):
+    """全 T を走査して出たパターン名を重複なく返す（未抜けも含める）。
+
+    「出ないこと」を確かめるための道具。**成立日を狙い撃ちしないので、形の条件で
+    落ちたのか上抜けで落ちたのかを取り違えない。**
+    """
+    names = set()
+    for t in range(K + 1, hi or len(df)):
+        out = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                              include_pending=True)
+        names.update(out["pattern"].tolist())
+    return sorted(names)
+
+
+def _spans(df, hi=None):
+    """全 T を走査して出た span を集める（境界の位置を確かめるため）。"""
+    spans = []
+    for t in range(K + 1, hi or len(df)):
+        out = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                              include_pending=True)
+        spans += [int(v) for v in out["span"]]
+    return spans
 
 
 def first_hit(df, **kw):
@@ -93,6 +172,23 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(SEARCH_WINDOW, 63)
         self.assertEqual(DOUBLE_BOTTOM_GAP, 22)
         self.assertEqual(ADJACENT_TROUGH_GAP, 10)
+
+    def test_pre_registered_numbers_for_consolidation(self):
+        """§1 のうち保ち合い系で使うもの。
+
+        文献値: ±0.75%（LMW・±1.5% とは別の定数）・3 + 2（最小 5）・15 営業日。
+        裁量値: ε＝日次 0.1%、旗竿＝5 営業日以内に 10%。
+
+        **±0.75% はたまたま ±1.5% の半分だが、片方を他方から導いていない**（§1）。
+        値が一致していても別々の定数として持つ —— 一方を動かしたときに他方が
+        黙って動かないようにするため。
+        """
+        self.assertEqual(BOX_TOL, 0.0075)
+        self.assertEqual(TOUCH_POINTS, 5)
+        self.assertEqual(FLAG_MAX_SPAN, 15)
+        self.assertEqual(EPSILON_SLOPE, 0.001)
+        self.assertEqual(POLE_LOOKBACK, 5)
+        self.assertEqual(POLE_RISE, 0.10)
 
 
 class DoubleBottomTest(unittest.TestCase):
@@ -191,7 +287,21 @@ class BothPatternsTest(unittest.TestCase):
         df = inverse_hs(shoulders=(100.0, 100.4), head=99.2, necks=(108.0, 108.5))
         t, _row = first_hit(df)
         self.assertIsNotNone(t)
-        self.assertEqual(names_at(df, t), ["inverse_hs", "triple_bottom"])
+        found = names_at(df, t)
+        self.assertIn("inverse_hs", found)
+        self.assertIn("triple_bottom", found)
+
+    def test_overlap_crosses_families_too(self):
+        """**寄せない相手は反転系どうしに限らない。**
+
+        谷が ±0.75% に収まるほど揃った逆三尊は、上辺・下辺が水平なので
+        上昇ボックス（C2）にも該当する。ボックスの許容が等値幅より狭いだけで、
+        別の形を指しているわけではない —— **どちらの形として扱うかは検出数を見て
+        から設計責任者が決める**ので、実装では両方返す（§2.1・§2.2）。
+        """
+        df = inverse_hs(shoulders=(100.0, 100.4), head=99.2, necks=(108.0, 108.5))
+        t, _row = first_hit(df)
+        self.assertIn("ascending_box", names_at(df, t))
 
 
 class PendingTest(unittest.TestCase):
@@ -337,6 +447,298 @@ class VisualCheckListingTest(unittest.TestCase):
         """同じ 5 極値が両方に該当したら、2 行とも列挙する（§2.1）。"""
         df = inverse_hs(shoulders=(100.0, 100.4), head=99.2, necks=(108.0, 108.5))
         out, text = self._run(df)
-        self.assertEqual(sorted(out["pattern"]), ["inverse_hs", "triple_bottom"])
+        self.assertIn("inverse_hs", sorted(out["pattern"]))
+        self.assertIn("triple_bottom", sorted(out["pattern"]))
         self.assertIn("inverse_hs", text)
         self.assertIn("triple_bottom", text)
+        # 1 行 1 パターン。同じ銘柄が該当したぶんだけ行が出る
+        self.assertEqual(len(out), out["pattern"].nunique())
+
+
+class MeasuredMoveTest(unittest.TestCase):
+    """測定目標と比率（docs/PATTERN.md §2.3）。
+
+    **文献上の目安であって統計的裏付けは無い。** 比率を併記して読み手が判断できる
+    ようにするための量で、判定には一切使わない。
+    """
+
+    def test_ratio_follows_the_algebra(self):
+        """比率 = (1 − b) / (1 + b)。b は高さに対する抜け幅。"""
+        neck, low = 110.0, 100.0
+        h = neck - low
+        for b, expected in [(0.0, 1.0), (0.05, 0.905), (0.10, 0.818), (0.20, 0.667)]:
+            m = measured_move(neck, neck + b * h, [low, low])
+            self.assertAlmostEqual(m["rr"], expected, places=3, msg=f"b={b}")
+            self.assertAlmostEqual(m["breakeven_win_rate"], 1 / (1 + expected),
+                                   places=3, msg=f"b={b}")
+
+    def test_target_is_neckline_plus_height(self):
+        m = measured_move(110.0, 111.0, [100.0, 100.5])
+        self.assertAlmostEqual(m["pattern_low"], 100.0)
+        self.assertAlmostEqual(m["height"], 10.0)
+        self.assertAlmostEqual(m["target"], 120.0)
+
+    def test_stop_is_the_lowest_low(self):
+        """撤退はパターンの最安値。逆三尊なら頭になる。"""
+        m = measured_move(110.0, 111.0, [100.0, 92.0, 100.6])
+        self.assertAlmostEqual(m["pattern_low"], 92.0)
+        self.assertAlmostEqual(m["height"], 18.0)
+
+    def test_breakout_pct_is_negative_while_pending(self):
+        pending = measured_move(110.0, 105.0, [100.0])
+        done = measured_move(110.0, 111.0, [100.0])
+        self.assertLess(pending["breakout_pct"], 0)
+        self.assertGreater(done["breakout_pct"], 0)
+
+    def test_degenerate_inputs(self):
+        """高さが定義できない・値が壊れている場合は比率を出さない。"""
+        flat = measured_move(100.0, 101.0, [100.0])       # 高さ 0
+        self.assertTrue(pd.isna(flat["rr"]))
+        self.assertTrue(pd.isna(measured_move(110.0, 0.0, [100.0])["rr"]))
+        self.assertTrue(pd.isna(measured_move(np.nan, 111.0, [100.0])["rr"]))
+        self.assertTrue(pd.isna(measured_move(110.0, 111.0, [])["rr"]))
+
+    def test_rows_carry_the_columns(self):
+        df = double_bottom()
+        _t, row = first_hit(df)
+        for col in MEASURED_MOVE_COLS:
+            self.assertIn(col, row.index)
+        self.assertGreater(float(row["rr"]), 0)
+        # ダブルボトムの撤退は 2 安値の低いほう
+        self.assertAlmostEqual(float(row["pattern_low"]),
+                               min(float(row["l1"]), float(row["l2"])), places=6)
+
+    def test_inverse_hs_stop_is_the_head(self):
+        df = inverse_hs()
+        _t, row = first_hit(df)
+        self.assertAlmostEqual(float(row["pattern_low"]), float(row["l2"]), places=6)
+
+
+class AscendingTriangleTest(unittest.TestCase):
+    """上辺が水平・下辺が上向き（docs/PATTERN.md §2.2 C1）。"""
+
+    def test_detected_on_the_breakout_day(self):
+        df = ascending_triangle()
+        t, row = first_hit(df)
+        self.assertIsNotNone(t)
+        self.assertEqual(row["pattern"], "ascending_triangle")
+        close = df["Close"].to_numpy()
+        self.assertGreater(close[t], row["neckline"])
+        self.assertLessEqual(close[t - 1], row["neckline"])
+
+    def test_upper_line_must_be_flat_within_epsilon(self):
+        """|上辺傾き| < ε（日次 0.1%）。超えたら三角ではない。"""
+        flat = ascending_triangle(highs=(110.0, 110.2))     # 約 0.013%/日
+        tilted = ascending_triangle(highs=(108.0, 113.0))   # 約 0.33%/日
+        self.assertIn("ascending_triangle", names_at(flat, first_hit(flat)[0]))
+        t, _r = first_hit(tilted)
+        self.assertNotIn("ascending_triangle",
+                         names_at(tilted, t, include_pending=True) if t else [])
+
+    def test_epsilon_boundary_bites(self):
+        """ε をまたぐ 2 つ。境界のすぐ内と外で結果が変わること。"""
+        df = ascending_triangle()
+        _t, row = first_hit(df)
+        self.assertLess(abs(float(row["upper_slope"])), EPSILON_SLOPE)
+        self.assertGreater(float(row["lower_slope"]), 0)
+
+    def test_lower_line_must_rise(self):
+        """下辺傾き > 0。下向き・水平は三角にしない（判定式のまま）。"""
+        falling = ascending_triangle(lows=(106.0, 103.0, 100.0))
+        found = _any_pending(falling)
+        self.assertNotIn("ascending_triangle", found)
+
+    def test_three_touch_side_lands_in_l3(self):
+        """下辺 3 タッチは l1..l3、上辺 2 タッチは h1..h2 に入る。"""
+        df = ascending_triangle()
+        _t, row = first_hit(df)
+        for col in ("l1", "l2", "l3", "h1", "h2"):
+            self.assertFalse(pd.isna(row[col]), col)
+        self.assertTrue(pd.isna(row["h3"]))
+
+
+class AscendingBoxTest(unittest.TestCase):
+    """上辺・下辺とも水平（docs/PATTERN.md §2.2 C2）。"""
+
+    def test_detected(self):
+        df = ascending_box()
+        t, _row = first_hit(df)
+        self.assertIsNotNone(t)
+        self.assertIn("ascending_box", names_at(df, t))
+
+    def test_upper_line_is_the_mean_not_a_regression(self):
+        """ボックスの上辺は水平（上辺の平均）。回帰直線を延ばした値ではない。"""
+        df = ascending_box(highs=(110.0, 110.3))
+        _t, row = first_hit(df)
+        self.assertAlmostEqual(float(row["neckline"]), 110.15, places=6)
+
+    def test_box_tolerance_is_0_75pct_not_1_5pct(self):
+        """±0.75% で切る。**±1.5% は通るが ±0.75% は通らない**幅で確かめる。
+
+        ±1.5% で切っていたらこれが通ってしまう（等値幅を流用していないことの確認）。
+        """
+        spread = (100.0, 102.0, 100.2)      # 平均から最大 1.26%
+        self.assertLess(max(abs(v - np.mean(spread)) for v in spread) / np.mean(spread),
+                        EQUAL_TOL)
+        self.assertGreater(max(abs(v - np.mean(spread)) for v in spread) / np.mean(spread),
+                           BOX_TOL)
+        loose = ascending_box(lows=spread)
+        found = _any_pending(loose)
+        self.assertNotIn("ascending_box", found)
+        # 形（5 極値）自体は揃っている —— 落ちたのは幅の判定であって極値ではない
+        self.assertIn("triple_bottom", found)
+
+    def test_lowest_high_must_be_above_the_highest_low(self):
+        """`最低の山 > 最高の谷`。上下が重なる形はボックスにしない。"""
+        overlap = ascending_box(highs=(104.5, 104.2), lows=(104.3, 104.0, 104.1))
+        found = _any_pending(overlap)
+        self.assertNotIn("ascending_box", found)
+        self.assertIn("triple_bottom", found)   # 極値は揃っている
+
+    def test_a_box_with_three_troughs_is_also_a_triple_bottom(self):
+        """**±0.75% は ±1.5% より狭い。** 谷 3 点のボックスは必ず等値も満たす。
+
+        寄せずに両方記録する（§2.1）。どちらの形として扱うかは設計責任者の判断。
+        """
+        df = ascending_box()
+        t, _row = first_hit(df)
+        self.assertEqual(names_at(df, t), ["ascending_box", "triple_bottom"])
+
+
+class FlagAndPennantTest(unittest.TestCase):
+    """旗竿つきの保ち合い（docs/PATTERN.md §2.2 C3・C4）。"""
+
+    def test_flag_detected_with_parallel_falling_lines(self):
+        df = flagged()
+        t, row = first_hit(df)
+        self.assertEqual(row["pattern"], "bull_flag")
+        self.assertLess(float(row["upper_slope"]), 0)
+        self.assertLess(float(row["lower_slope"]), 0)
+        self.assertLess(abs(float(row["upper_slope"]) - float(row["lower_slope"])),
+                        EPSILON_SLOPE)
+
+    def test_pennant_detected_when_lines_converge(self):
+        df = flagged(downs=(112.0, 113.5))
+        t, row = first_hit(df)
+        self.assertEqual(row["pattern"], "bull_pennant")
+        self.assertLess(float(row["upper_slope"]), 0)
+        self.assertGreater(float(row["lower_slope"]), 0)
+
+    def test_flag_needs_the_lines_parallel(self):
+        """傾き差が ε 以上なら平行ではない。収束でもないので何にもならない。"""
+        df = flagged(downs=(114.0, 111.0))     # 下辺だけ急な下げ
+        self.assertEqual(_any_pending(df), [])
+
+    def test_pole_is_required(self):
+        """旗竿（5 営業日以内に 10% 以上）が無ければ検出しない。"""
+        weak = flagged(pole_from=118.0)        # 上昇 1.7% しかない
+        self.assertEqual(_any_pending(weak), [])
+        strong = flagged(pole_from=105.0)      # 上昇 14.3%
+        self.assertEqual(_any_pending(strong), ["bull_flag"])
+
+    def test_pole_percent_is_recorded(self):
+        df = flagged(pole_from=105.0)
+        _t, row = first_hit(df)
+        self.assertAlmostEqual(float(row["pole_pct"]), (120.0 / 105.0 - 1) * 100,
+                               places=6)
+
+    def test_flag_is_under_15_and_pennant_is_15_or_less(self):
+        """**境界の扱いが違う。** span 15 でフラッグは落ち、ペナントは残る（§2.2）。"""
+        flag = flagged(gap=3)
+        pennant = flagged(gap=3, downs=(112.0, 113.5))
+        spans = _spans(flag) + _spans(pennant)
+        self.assertTrue(all(sp >= FLAG_MAX_SPAN for sp in spans), spans)
+        self.assertEqual(_any_pending(flag), [])                # 15 は「未満」に入らない
+        self.assertEqual(_any_pending(pennant), ["bull_pennant"])   # 15 は「以下」に入る
+
+    def test_three_touch_upper_side_lands_in_h3(self):
+        """H L H L H は上辺 3 タッチ。3 つ目の山は h3 に入る。"""
+        df = flagged()
+        _t, row = first_hit(df)
+        for col in ("h1", "h2", "h3", "l1", "l2"):
+            self.assertFalse(pd.isna(row[col]), col)
+        self.assertTrue(pd.isna(row["l3"]))
+
+
+class ConsolidationPointInTimeTest(unittest.TestCase):
+    """CLAUDE.md 未来参照の禁止。保ち合い系も同じ（旗竿は T より前だけを読む）。"""
+
+    def test_future_bars_do_not_change_the_result(self):
+        for df in (ascending_triangle(), ascending_box(), flagged()):
+            t, _row = first_hit(df)
+            before = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K)
+            broken = df.copy()
+            broken.iloc[t + 1:] = broken.iloc[t + 1:] * 10.0
+            after = detect_patterns(broken["High"], broken["Low"], broken["Close"],
+                                    t, k=K)
+            pd.testing.assert_frame_equal(before, after)
+
+    def test_truncating_after_t_does_not_change_the_result(self):
+        """再計算一致（DESIGN.md §11）。T までしか無い系列でも同じ行が出る。"""
+        for df in (ascending_triangle(), ascending_box(), flagged()):
+            t, _row = first_hit(df)
+            full = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K)
+            cut = df.iloc[:t + 1]
+            trimmed = detect_patterns(cut["High"], cut["Low"], cut["Close"], t, k=K)
+            pd.testing.assert_frame_equal(full, trimmed)
+
+    def test_fewer_than_five_confirmed_extremes_detects_nothing(self):
+        """タッチ点が 5 点に満たなければ線を引かない（3 + 2・最小 5）。"""
+        df = series_from([(0, 120.0), (40, 100.0), (60, 110.0), (80, 101.0),
+                          (199, 101.0)])
+        self.assertEqual(_any_pending(df), [])
+
+
+class SlopeDistributionTest(unittest.TestCase):
+    """保ち合い系の傾きの分布（docs/PATTERN.md §5 D-11）。
+
+    **観測であって判定ではない。** C1 の `下辺傾き > 0` に下限が無いので、実質
+    「上辺が水平」だけで通っていないかを切り分けるための表示。
+    """
+
+    def _lines(self, df, tickers=("1234.T",)):
+        from stockbot.cli import step_pattern
+        from stockbot.config import Settings
+
+        universe = pd.DataFrame({"ticker": list(tickers),
+                                 "passes": [True] * len(tickers)})
+        lines = []
+        step_pattern(Settings.from_env(), universe, {t: df for t in tickers},
+                     log=lines.append)
+        return "\n".join(lines)
+
+    def test_both_slopes_are_reported_for_consolidation(self):
+        df = ascending_triangle()
+        df = df.iloc[:first_hit(df)[0] + 1]
+        text = self._lines(df)
+        self.assertIn("ascending_triangle 上辺傾き", text)
+        self.assertIn("ascending_triangle 下辺傾き", text)
+        self.assertIn("%/日", text)
+
+    def test_flat_lower_edge_is_counted_against_epsilon(self):
+        """**下辺傾きが ε 未満なら「上向き」ではなく「水平」。** その件数を出す。
+
+        C1 の件数が突出したときに、下辺が実質水平で通っていないかを見るため。
+        """
+        # 下辺がほぼ水平（+0.0003%/日 程度）だが正なので C1 は通る
+        flatish = ascending_triangle(lows=(100.0, 100.05, 100.02))
+        t, row = first_hit(flatish)
+        self.assertIsNotNone(t)
+        self.assertGreater(float(row["lower_slope"]), 0)
+        self.assertLess(abs(float(row["lower_slope"])), EPSILON_SLOPE)
+        text = self._lines(flatish.iloc[:t + 1])
+        self.assertIn("が 1 件", text)
+
+    def test_rising_lower_edge_is_not_counted(self):
+        """はっきり上向きの下辺は ε 未満に数えない。"""
+        df = ascending_triangle()          # 下辺 +0.2%/日 程度
+        t, row = first_hit(df)
+        self.assertGreater(abs(float(row["lower_slope"])), EPSILON_SLOPE)
+        self.assertIn("が 0 件", self._lines(df.iloc[:t + 1]))
+
+    def test_reversal_patterns_have_no_slope_line(self):
+        """反転系に上辺・下辺は無い。傾きの行を出さない。"""
+        df = double_bottom()
+        text = self._lines(df.iloc[:first_hit(df)[0] + 1])
+        self.assertNotIn("上辺傾き", text)
+        self.assertNotIn("下辺傾き", text)

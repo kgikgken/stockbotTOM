@@ -421,6 +421,15 @@ def step_features(cfg: Settings, universe: pd.DataFrame, ohlcv: dict, log=print)
 PATTERN_LIST_MAX = 30   # 目視用に列挙する上限。多すぎるとログが読めない
 
 
+def _num(value, digits: int = 1) -> str:
+    """欠損を「—」にする。高さが定義できない行では目標も比率も出ない。"""
+    return "—" if pd.isna(value) else f"{float(value):,.{digits}f}"
+
+
+def _signed(value) -> str:
+    return "—" if pd.isna(value) else f"{float(value):+.1f}%"
+
+
 def _dates(row, keys) -> str:
     """極値を「日付 値」の並びにする。欠損（ダブルボトムの l3 など）は飛ばす。"""
     parts = []
@@ -432,9 +441,36 @@ def _dates(row, keys) -> str:
     return " / ".join(parts) if parts else "—"
 
 
+def _log_slopes(label: str, part: pd.DataFrame, log) -> None:
+    """保ち合い系の上辺・下辺の傾きの分布（docs/PATTERN.md §5 D-11）。
+
+    **観測であって判定ではない。** 上昇三角（C1）の `下辺傾き > 0` に下限が無いので、
+    わずかでも正なら通る —— 実質「上辺が水平」だけで通っていないかを切り分けるため
+    の表示である。**下辺傾きが ε 未満の件数**を併記する（ε 未満なら「上向き」では
+    なく「水平」で、その行は実質ボックスに近い）。
+
+    件数を見て閾値を足すためのものではない（§1 の感度分析はしない方針はそのまま）。
+    """
+    eps_pct = pattern_mod.EPSILON_SLOPE * 100
+    for name in pattern_mod.CONSOLIDATION_PATTERNS:
+        sub = part[part["pattern"] == name]
+        if not len(sub):
+            continue
+        for side, col in (("上辺", "upper_slope"), ("下辺", "lower_slope")):
+            v = sub[col].dropna() * 100
+            if not len(v):
+                continue
+            line = (f"[pattern] {label}の{name} {side}傾き: 中央 {v.median():+.4f}%/日 / "
+                    f"最小 {v.min():+.4f} / 最大 {v.max():+.4f}")
+            if col == "lower_slope":
+                # ε 未満 ＝「上向き」ではなく「水平」。C1 が実質ボックスになっていないか
+                line += f" / |傾き| < ε({eps_pct:.1f}%) が {int((v.abs() < eps_pct).sum())} 件"
+            log(line)
+
+
 def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                  log=print) -> pd.DataFrame:
-    """反転系パターンの検出数を数える（docs/PATTERN.md §2.1）。
+    """7 パターンの検出数を数える（docs/PATTERN.md §2.1 反転系・§2.2 保ち合い系）。
 
     **数えて出すだけで、何も保存しないし配信もしない。** 事前登録した数値どおりに
     実装できているかを実データで確かめるためのもの（D-3・D-5 の「検出数を見てから
@@ -465,14 +501,14 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
             # 極値の位置を日付に直す。**チャートで探せるようにするため**（目視確認用、
             # docs/PATTERN.md §5 D-4 の「形を目視確認してから」に対応）
             dates = {}
-            for col in ("l1_pos", "l2_pos", "l3_pos", "h1_pos", "h2_pos"):
+            for col in ("l1_pos", "l2_pos", "l3_pos", "h1_pos", "h2_pos", "h3_pos"):
                 pos = r[col]
                 dates[col.replace("_pos", "_date")] = (
                     df.index[int(pos)] if pd.notna(pos) else pd.NaT)
             rows.append({"ticker": ticker, "asof": df.index[t_pos],
                          **r.to_dict(), **dates})
 
-    date_cols = ["l1_date", "l2_date", "l3_date", "h1_date", "h2_date"]
+    date_cols = ["l1_date", "l2_date", "l3_date", "h1_date", "h2_date", "h3_date"]
     out = pd.DataFrame(rows,
                        columns=["ticker", "asof"] + pattern_mod.PATTERN_COLS + date_cols)
     if len(out):
@@ -494,6 +530,23 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
         log(f"[pattern] {label}の span（最初の極値から T まで）: 中央 "
             f"{part['span'].median():.0f}本 / 最小 {part['span'].min():.0f} / "
             f"最大 {part['span'].max():.0f}")
+        # 抜け幅の分布（§5 D-7）。**下限は入れていない。** 分布を見るための記録
+        bo = part["breakout_pct"].dropna()
+        if len(bo):
+            log(f"[pattern] {label}の抜け幅: 中央 {bo.median():+.2f}% / "
+                f"最小 {bo.min():+.2f}% / 最大 {bo.max():+.2f}%")
+        bh = part["breakout_h"].dropna()
+        if len(bh):
+            log(f"[pattern] {label}の抜け幅÷高さ: 中央 {bh.median():+.3f} / "
+                f"最小 {bh.min():+.3f} / 最大 {bh.max():+.3f}")
+        rr = part["rr"].dropna()
+        if len(rr):
+            log(f"[pattern] {label}の比率（測定目標÷撤退・文献上の目安）: 中央 "
+                f"{rr.median():.2f} / 最小 {rr.min():.2f} / 最大 {rr.max():.2f}")
+            be = part["breakeven_win_rate"].dropna()
+            log(f"[pattern] {label}の損益分岐勝率: 中央 {be.median():.1%} / "
+                f"最小 {be.min():.1%} / 最大 {be.max():.1%}")
+        _log_slopes(label, part, log)
 
     if len(out):
         multi = out.groupby("ticker")["pattern"].nunique()
@@ -513,7 +566,16 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                 f"終値 {r['close_t']:.1f} → ネックライン {r['neckline']:.1f} "
                 f"({r['to_neck_pct']:+.1f}%) / span {int(r['span'])}本")
             log(f"[pattern]     谷 {_dates(r, ('l1', 'l2', 'l3'))}")
-            log(f"[pattern]     山 {_dates(r, ('h1', 'h2'))}")
+            log(f"[pattern]     山 {_dates(r, ('h1', 'h2', 'h3'))}")
+            if pd.notna(r["upper_slope"]):
+                # 保ち合い系だけ。ε（日次 0.1%）と比べられるよう %/日 で出す
+                log(f"[pattern]     上辺 {r['upper_slope'] * 100:+.3f}%/日 / "
+                    f"下辺 {r['lower_slope'] * 100:+.3f}%/日"
+                    + ("" if pd.isna(r["pole_pct"]) else
+                       f" / 旗竿 {r['pole_pct']:+.1f}%"))
+            log(f"[pattern]     撤退 {r['pattern_low']:.1f} ({r['down_pct']:+.1f}%) / "
+                f"目標 {_num(r['target'])} ({_signed(r['up_pct'])}) / "
+                f"比率 {_num(r['rr'], 2)}")
         if len(part) > PATTERN_LIST_MAX:
             log(f"[pattern]   ... 他 {len(part) - PATTERN_LIST_MAX} 件")
     return out
