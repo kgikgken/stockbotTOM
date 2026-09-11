@@ -17,3 +17,6 @@ data/layer1/
 data/render/
 # DRYRUN の出力先（config.py: dryrun 時の既定 DATA_DIR）。本番 data/ とは物理的に分離する
 data-dryrun/
+# バックテストの中間出力（docs/BACKTEST.md）。日別に肥大するので git に入れない
+data/pattern_replay/
+data-dryrun/pattern_replay/

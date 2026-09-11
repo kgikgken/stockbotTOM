@@ -57,6 +57,7 @@ from .notify import line_send, message
 from .render import context as render_context
 from .render import render as render_images_mod
 from .screener import pattern_record, record, resolver
+from .validation import pattern_replay, pattern_report
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -864,12 +865,95 @@ def step_notify(cfg: Settings, log=print) -> dict:
     return {**result, "mode": "text"}
 
 
+# ------------------------------------------------------ バックテスト（BACKTEST.md）
+PATTERN_WINDOWS = {
+    "search": pattern_replay.SEARCH_WINDOW,      # 2021-08-01〜2026-01-30
+    "confirm": pattern_replay.CONFIRM_WINDOW,    # 2017-03-15〜2021-07-31
+    "holdout": pattern_replay.HOLDOUT_WINDOW,    # 2026-02-01〜2026-08-01
+}
+
+
+def step_pattern_replay(cfg: Settings, window: str, include_holdout: bool,
+                        log=print) -> None:
+    """パターン検出を過去に再生する（docs/BACKTEST.md §2）。
+
+    **ホールドアウトは `--include-holdout` を明示しない限り走らない**
+    （CLAUDE.md の絶対規則）。確認窓を通過するまで触らない（BACKTEST.md §5）。
+
+    出力は `data/pattern_replay/<窓>/` に日別。中断再開できる。
+    """
+    if window == "holdout" and not include_holdout:
+        log("[pattern-replay] ホールドアウトは --include-holdout を明示したときだけ走る"
+            "（CLAUDE.md の絶対規則。確認窓を通過するまで触らない）")
+        return
+    start, end = PATTERN_WINDOWS[window]
+    out_dir = cfg.data_dir / "pattern_replay" / window
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    idx_df = ohlcv.get(IDX_TICKER)
+    if idx_df is None or len(idx_df) == 0:
+        log("[pattern-replay] 指数データが無いためスキップ")
+        return
+    listed = _load_listed_cached(cfg, log)
+    sectors = dict(zip(listed["ticker"].astype(str),
+                       listed.get("sector33", pd.Series("", index=listed.index))))
+    log(f"[pattern-replay] 窓={window} {start.date()}〜{end.date()} → {out_dir}")
+    pattern_replay.run(ohlcv, idx_df, listed, out_dir, start, end, cfg.k,
+                       sectors=sectors, include_holdout=include_holdout, log=log)
+
+
+def step_pattern_report(cfg: Settings, window: str, log=print) -> None:
+    """探索の集計を出す（docs/BACKTEST.md §4・§6）。**表のみ。解釈はしない。**
+
+    分位の境界は**探索窓から作り、他の窓にはそれをそのまま当てる**（D-3）。
+    """
+    base = cfg.data_dir / "pattern_replay"
+    df = pattern_replay.load_table(base / window)
+    search = pattern_replay.load_table(base / "search")
+    cov = pattern_report.coverage(df)
+    log(f"[pattern-report] 窓={window} 成立 {cov['n_rows']}件 / 評価日 {cov['n_days']}日")
+    if cov["first"] is not None:
+        # **窓の定義を黙って縮めない。** 実際に評価できた期間をそのまま出す
+        log(f"[pattern-report] カバーした期間: {cov['first'].date()}〜{cov['last'].date()}")
+    if cov["n_rows"] == 0:
+        log("[pattern-report] 行が無い（先に cli pattern-replay を実行）")
+        return
+
+    log(f"[pattern-report] 検定 {pattern_report.N_TESTS} 件"
+        "（パターン別5 + 抜け幅5分位）。これ以上増やさない")
+    log("[pattern-report] --- 全体 ---")
+    for line in pattern_report.format_table(
+            pd.DataFrame([pattern_report.overall(df)])[pattern_report.GROUP_COLS]):
+        log(f"[pattern-report] {line}")
+    log("[pattern-report] --- パターン別（検定1〜5）---")
+    for line in pattern_report.format_table(pattern_report.by_pattern(df)):
+        log(f"[pattern-report] {line}")
+
+    edges = pattern_report.quantile_edges(search if len(search) else df)
+    if edges is None:
+        log("[pattern-report] 抜け幅の分位を作れない（件数不足）")
+        return
+    src = "探索窓" if len(search) else "この窓"
+    log(f"[pattern-report] --- 抜け幅 b の5分位（検定6〜10・境界は{src}から）---")
+    for line in pattern_report.format_table(
+            pattern_report.by_breakout_quantile(df, edges)):
+        log(f"[pattern-report] {line}")
+    log("[pattern-report] 主指標は平均r20とNW t。勝率・成功率・目標到達は診断で、"
+        "判定には使わない（BACKTEST.md D-2）")
+
+
 # ------------------------------------------------------------------ main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="stockbot")
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
                                        "references", "universe", "features", "pattern",
-                                       "resolve", "notify", "refetch-recent-splits"])
+                                       "resolve", "notify", "refetch-recent-splits",
+                                       "pattern-replay", "pattern-report"])
+    ap.add_argument("--window", choices=list(PATTERN_WINDOWS), default="search",
+                    help="バックテストの窓（docs/BACKTEST.md §1）")
+    # **ホールドアウトはこれを明示したときだけ**（CLAUDE.md の絶対規則）
+    ap.add_argument("--include-holdout", action="store_true",
+                    help="ホールドアウトを生成する（確認窓を通過してから・1回のみ）")
     args = ap.parse_args(argv)
     cfg = Settings.from_env()
     log = print
@@ -897,6 +981,10 @@ def main(argv: list[str] | None = None) -> int:
                 log("[pattern] ユニバースが無いためスキップ（先に universe を実行）")
             else:
                 step_pattern(cfg, u, ohlcv, log)
+        elif args.command == "pattern-replay":
+            step_pattern_replay(cfg, args.window, args.include_holdout, log)
+        elif args.command == "pattern-report":
+            step_pattern_report(cfg, args.window, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":
