@@ -83,21 +83,33 @@ jobs:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli references
 
-      # 反転系パターンの検出数を数える（docs/PATTERN.md §2.1）。
-      # **数えてログに出すだけ。何も保存しないし配信もしない。**
-      # 事前登録した数値どおりに実装できているかを実データで確かめるためのもので、
-      # 最初の観測が済んだら外してよい。continue-on-error にはしない（落ちたら気づく）。
-      - name: Detect patterns (report only)
+      # 7 パターンを検出し、成立を台帳に、監視を日次スナップショットに書く
+      # （docs/PATTERN.md §2・§3）。**記録するのは成立だけ。監視は観測値として残す。**
+      # continue-on-error にはしない（落ちたら気づく）。
+      - name: Detect patterns
         env:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli pattern
 
       # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）。references と同じく
       # daily とは別ステップにして、ここが失敗しても取得・保存の成果を失わないようにする。
+      # **パターンの記録は飛ばす**（成功の定義が未決。docs/PATTERN.md §4 Q-3）。
       - name: Resolve delivered records
         env:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli resolve
+
+      # LINE に画像カード2枚を送る（docs/PATTERN.md §6）。2026-09-11 に設計責任者の
+      # 指示で再開した（19条件のスクリーナー撤去に伴い 2026-09-08 に外していた）。
+      # **成立0件の日も送る** —— 送らないと動いているのか壊れているのか分からない。
+      # continue-on-error にする: 配信が失敗しても取得・保存・記録は残す。
+      - name: Notify
+        if: github.event.inputs.dryrun != '1'
+        continue-on-error: true
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_AUTH_TOKEN: ${{ secrets.WORKER_AUTH_TOKEN }}
+        run: python -m stockbot.cli notify
 
       - name: Commit snapshots
         if: always()

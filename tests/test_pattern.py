@@ -3,7 +3,9 @@
 固定するのは 3 つ。**未来を見ないこと**、**事前登録した数値のとおりに切れること**、
 **同じ極値が複数のパターンに該当したら全部出ること**（§2.1）。
 """
+import dataclasses
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -117,6 +119,26 @@ def flagged(ups=(120.0, 119.0, 118.0), downs=(114.0, 113.04), gap=2,
     knots += [(last + 1, ups[2] - 0.4), (last + 2, ups[2] - 0.3),
               (last + 3, ups[2] - 0.2), (last + 4, 130.0), (n - 1, 130.0)]
     return series_from(knots, n=n)
+
+
+def run_step_pattern(df, tickers=("1234.T",)):
+    """step_pattern を**一時ディレクトリで**走らせて (表, ログ) を返す。
+
+    **本番の `data/daily/` に書かせない。** step_pattern は成立を台帳に、監視を
+    スナップショットに書くので、`Settings.from_env()` をそのまま使うとテストの合成
+    データが本番の記録に混ざる（実装中に実際に起きた。CLAUDE.md の落とし穴と同じ形）。
+    """
+    import tempfile
+
+    from stockbot.cli import step_pattern
+    from stockbot.config import Settings
+
+    universe = pd.DataFrame({"ticker": list(tickers), "passes": [True] * len(tickers)})
+    lines = []
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = dataclasses.replace(Settings.from_env(), data_dir=Path(tmp))
+        out = step_pattern(cfg, universe, {t: df for t in tickers}, log=lines.append)
+    return out, "\n".join(lines)
 
 
 def names_at(df, t_pos, **kw):
@@ -405,18 +427,9 @@ class VisualCheckListingTest(unittest.TestCase):
         raise AssertionError("形が揃う日が無い")
 
     def _run(self, df, tickers=("1234.T",), confirmed=False):
-        from stockbot.cli import step_pattern
-        from stockbot.config import Settings
-
         # confirmed=True なら上抜けた日で切る。既定は形が揃った最初の日（未抜け）
         df = df.iloc[:first_hit(df)[0] + 1] if confirmed else self._trim(df)
-        cfg = Settings.from_env()
-        universe = pd.DataFrame({"ticker": list(tickers),
-                                 "passes": [True] * len(tickers)})
-        lines = []
-        out = step_pattern(cfg, universe, {t: df for t in tickers},
-                           log=lines.append)
-        return out, "\n".join(lines)
+        return run_step_pattern(df, tickers)
 
     def test_pending_rows_are_listed_with_dates(self):
         df = double_bottom(breakout=False)
@@ -699,15 +712,7 @@ class SlopeDistributionTest(unittest.TestCase):
     """
 
     def _lines(self, df, tickers=("1234.T",)):
-        from stockbot.cli import step_pattern
-        from stockbot.config import Settings
-
-        universe = pd.DataFrame({"ticker": list(tickers),
-                                 "passes": [True] * len(tickers)})
-        lines = []
-        step_pattern(Settings.from_env(), universe, {t: df for t in tickers},
-                     log=lines.append)
-        return "\n".join(lines)
+        return run_step_pattern(df, tickers)[1]
 
     def test_both_slopes_are_reported_for_consolidation(self):
         df = ascending_triangle()
@@ -813,15 +818,7 @@ class ScatterLoggingTest(unittest.TestCase):
     """散らばりの日次記録（docs/PATTERN.md §5 D-13）。"""
 
     def _lines(self, df, tickers=("1234.T",)):
-        from stockbot.cli import step_pattern
-        from stockbot.config import Settings
-
-        universe = pd.DataFrame({"ticker": list(tickers),
-                                 "passes": [True] * len(tickers)})
-        lines = []
-        step_pattern(Settings.from_env(), universe, {t: df for t in tickers},
-                     log=lines.append)
-        return "\n".join(lines)
+        return run_step_pattern(df, tickers)[1]
 
     def test_counts_three_touch_rows_and_those_over_the_box_tolerance(self):
         """山 3 点以上の件数と、うち ±0.75% を超えた件数を毎日出す。"""
@@ -854,3 +851,122 @@ class ScatterLoggingTest(unittest.TestCase):
         text = self._lines(df.iloc[:t + 1])
         self.assertIn("山3点以上: 1/1 件", text)
         self.assertIn("±0.75%（BOX 基準）超 0 件", text)
+
+
+class StepPatternWritesTest(unittest.TestCase):
+    """検出から記録まで（docs/PATTERN.md §3）。
+
+    **成立だけが台帳に入り、監視はスナップショットに入る。** 書き先が
+    `cfg.daily_dir` であること（本番 `data/` に漏らさないこと）もここで固定する。
+    """
+
+    def _run(self, df, tmp, now="2026-09-14", tickers=("1234.T",)):
+        import json
+
+        from stockbot import cli
+        from stockbot.config import Settings
+
+        universe = pd.DataFrame({"ticker": list(tickers),
+                                 "passes": [True] * len(tickers)})
+        cfg = dataclasses.replace(Settings.from_env(), data_dir=Path(tmp))
+        real_now = cli._now
+        cli._now = lambda: pd.Timestamp(now)
+        try:
+            out = cli.step_pattern(cfg, universe, {t: df for t in tickers},
+                                   log=lambda *_a: None)
+        finally:
+            cli._now = real_now
+        daily = Path(tmp) / "daily"
+        summaries = sorted(daily.glob("pattern_summary_*.json"))
+        payload = json.loads(summaries[-1].read_text()) if summaries else None
+        return out, daily, payload
+
+    def test_writes_into_the_configured_dir_only(self):
+        import tempfile
+
+        df = double_bottom(breakout=False)
+        df = df.iloc[:first_hit(df, include_pending=True)[0] + 1] \
+            if first_hit(df, include_pending=True)[0] else df
+        with tempfile.TemporaryDirectory() as tmp:
+            _out, daily, payload = self._run(df, tmp)
+            self.assertTrue(any(daily.glob("delivered_*.csv")))
+            self.assertIsNotNone(payload)
+
+    def test_ledger_holds_only_confirmed_rows(self):
+        import tempfile
+
+        from stockbot.screener.pattern_record import load_pattern_delivered
+
+        df = double_bottom()                       # 成立する系列
+        df = df.iloc[:first_hit(df)[0] + 1]
+        with tempfile.TemporaryDirectory() as tmp:
+            out, daily, payload = self._run(df, tmp)
+            ledger = load_pattern_delivered(sorted(daily.glob("delivered_*.csv"))[-1])
+            self.assertEqual(len(ledger), int(out["breakout"].astype(bool).sum()))
+            self.assertTrue(all(ledger["breakout_pct"] > 0))
+            self.assertEqual(payload["n_watch"], 0)
+            self.assertEqual(payload["watch"], [])
+
+    def test_watch_goes_to_the_snapshot_not_the_ledger(self):
+        import tempfile
+
+        from stockbot.screener.pattern_record import load_pattern_delivered
+
+        df = double_bottom(breakout=False)
+        for t in range(K + 1, len(df)):
+            if len(detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                                   include_pending=True)):
+                df = df.iloc[:t + 1]
+                break
+        with tempfile.TemporaryDirectory() as tmp:
+            _out, daily, payload = self._run(df, tmp)
+            ledger = load_pattern_delivered(sorted(daily.glob("delivered_*.csv"))[-1])
+            self.assertEqual(len(ledger), 0)          # 監視は台帳に入らない
+            self.assertEqual(payload["n_watch"], 1)
+            self.assertEqual(payload["watch"][0]["ticker"], "1234.T")
+
+    def test_snapshot_has_a_full_row_for_the_card_and_a_short_one_for_the_trace(self):
+        """全件は最小限、カードに載せる上位だけ全列（リポジトリを膨らませないため）。"""
+        import tempfile
+
+        df = double_bottom(breakout=False)
+        for t in range(K + 1, len(df)):
+            if len(detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                                   include_pending=True)):
+                df = df.iloc[:t + 1]
+                break
+        with tempfile.TemporaryDirectory() as tmp:
+            _out, _daily, payload = self._run(df, tmp)
+            self.assertEqual(sorted(payload["watch"][0]),
+                             ["breakout_pct", "pattern", "ticker", "watch_streak"])
+            card = payload["watch_cards"][0]
+            for col in ("close_t", "neckline", "pattern_low", "target", "l1_date",
+                        "adv_jpy", "earnings_unknown"):
+                self.assertIn(col, card)
+
+    def test_watch_streak_grows_across_days(self):
+        """**連続日数はスナップショットから数える**（監視は台帳に無い）。"""
+        import tempfile
+
+        df = double_bottom(breakout=False)
+        for t in range(K + 1, len(df)):
+            if len(detect_patterns(df["High"], df["Low"], df["Close"], t, k=K,
+                                   include_pending=True)):
+                df = df.iloc[:t + 1]
+                break
+        with tempfile.TemporaryDirectory() as tmp:
+            _o, _d, first = self._run(df, tmp, now="2026-09-14")
+            self.assertEqual(first["watch"][0]["watch_streak"], 1)
+            _o, _d, second = self._run(df, tmp, now="2026-09-15")
+            self.assertEqual(second["watch"][0]["watch_streak"], 2)
+
+    def test_counts_match_the_frames(self):
+        """2枚目の内訳は検出と同じフレームから数える（食い違わせない）。"""
+        import tempfile
+
+        df = double_bottom()
+        df = df.iloc[:first_hit(df)[0] + 1]
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _daily, payload = self._run(df, tmp)
+            total = sum(v["done"] + v["watch"] for v in payload["counts"].values())
+            self.assertEqual(total, len(out))
