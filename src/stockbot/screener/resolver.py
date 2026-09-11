@@ -25,6 +25,7 @@ import pandas as pd
 from ..data.store import IDX_TICKER
 from ..features.dimensions import LANDING_MA_NAMES
 from ..features.indicators import sma
+from . import pattern_resolver
 from .pattern_record import is_pattern_record
 from .record import (
     DELIVERED_COLS,
@@ -278,6 +279,31 @@ def _coerce_bool(v) -> object:
     return pd.NA
 
 
+def _resolve_pattern_file(daily_dir: Path, f, delivered: pd.DataFrame,
+                          ohlcv: Dict[str, pd.DataFrame],
+                          calendar: pd.DatetimeIndex, resolved_on, log) -> bool:
+    """パターンの配信記録 1 ファイルに結果を付ける（docs/PATTERN.md §3.4）。
+
+    付けたら True、評価窓がまだ経過していなければ False。既に結果があるファイルには
+    触らない（確定した記録を作り直さない）。
+    """
+    horizon = pattern_resolver.PATTERN_HORIZON_DAYS
+    asof_values = pd.to_datetime(delivered["asof"]).dropna().unique()
+    asof = f.asof if f.asof is not None else as_calendar_date(asof_values[0])
+    if pattern_resolver.outcome_path(daily_dir, f.delivered_on, asof).exists():
+        return False
+    dues = [due_date(calendar, a, horizon) for a in asof_values]
+    if not dues or any(d is None for d in dues):
+        return False
+    stamp = resolved_on if resolved_on is not None else max(dues)
+    outcome = pattern_resolver.resolve_delivered(delivered, ohlcv, horizon, stamp)
+    path = pattern_resolver.save_outcome(outcome, daily_dir, f.delivered_on, asof)
+    n_success = int(outcome["success"].fillna(False).astype(bool).sum())
+    log(f"[resolve] {f.path.name} → {path.name} {len(outcome)}件 / "
+        f"成功 {n_success} / 打ち切り {int(outcome['censored'].astype(bool).sum())}")
+    return True
+
+
 def resolve_pending(daily_dir: Path, ohlcv: Dict[str, pd.DataFrame],
                     horizon: int = HORIZON_DAYS, resolved_on=None,
                     calendar: Optional[pd.DatetimeIndex] = None, log=print) -> list[Path]:
@@ -297,12 +323,15 @@ def resolve_pending(daily_dir: Path, ohlcv: Dict[str, pd.DataFrame],
         if len(delivered) == 0:
             continue   # 候補0件の日。結果を付ける対象が無い
         if is_pattern_record(delivered):
-            # **パターンの配信記録には結果を付けない。** 成功の定義（測定目標に届いたか・
-            # 撤退を割ったか・評価窓の長さ）が docs/PATTERN.md に無いため、こちらで
-            # 決めない（§4 Q-3）。押し目型の定義（押し安値 Lp・直近高値 H0・5日線回復）
-            # をそのまま当てると、別のルールの成績として記録が残ってしまう。
-            # 記録自体は保全されるので、定義が決まってから遡って付けられる
-            n_pattern += 1
+            # **パターンは別の定義で付ける**（docs/PATTERN.md §3.4・§4 Q-3 の回答）。
+            # 評価窓 20 本、撤退＝パターン最安値、目標＝測定目標、MFE/MAE つき。
+            # 押し目型（5 本・押し安値・直近高値・5日線回復）とは列ごと分ける
+            if _resolve_pattern_file(daily_dir, f, delivered, ohlcv, calendar,
+                                     resolved_on, log):
+                written.append(pattern_resolver.outcome_path(
+                    daily_dir, f.delivered_on, f.asof))
+            else:
+                n_pattern += 1
             continue
         asof_values = pd.to_datetime(delivered["asof"]).dropna().unique()
         # 判定日はファイル名から採るのが正だが、旧名のファイルは中身から補う
@@ -323,8 +352,8 @@ def resolve_pending(daily_dir: Path, ohlcv: Dict[str, pd.DataFrame],
     if n_pending:
         log(f"[resolve] {horizon}営業日が未経過のため持ち越し: {n_pending}件")
     if n_pattern:
-        log(f"[resolve] パターンの配信記録 {n_pattern}ファイルは結果を付けずに残した"
-            "（成功の定義が未決。docs/PATTERN.md §4 Q-3）")
+        log(f"[resolve] パターンの配信記録 {n_pattern}ファイルは持ち越し"
+            f"（{pattern_resolver.PATTERN_HORIZON_DAYS}営業日が未経過）")
     return written
 
 

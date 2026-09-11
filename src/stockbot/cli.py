@@ -38,6 +38,7 @@ from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
 from .features.dimensions import next_earnings_business_days
+from .features.indicators import atr_wilder
 from .features import (  # noqa: F401
     indicators,
     pattern as pattern_mod,
@@ -565,6 +566,8 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                                            t_pos, cfg.k, include_pending=True)
         if len(hits) == 0:
             n_swings_short += 1
+        atr = atr_wilder(df["High"], df["Low"], df["Close"]).to_numpy(dtype=float)
+        atr_t = float(atr[t_pos]) if np.isfinite(atr[t_pos]) else np.nan
         for _i, r in hits.iterrows():
             # 極値の位置を日付に直す。**チャートで探せるようにするため**（目視確認用、
             # docs/PATTERN.md §5 D-4 の「形を目視確認してから」に対応）
@@ -573,12 +576,12 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                 pos = r[col]
                 dates[col.replace("_pos", "_date")] = (
                     df.index[int(pos)] if pd.notna(pos) else pd.NaT)
-            rows.append({"ticker": ticker, "asof": df.index[t_pos],
+            rows.append({"ticker": ticker, "asof": df.index[t_pos], "atr_t": atr_t,
                          **r.to_dict(), **dates})
 
     date_cols = ["l1_date", "l2_date", "l3_date", "h1_date", "h2_date", "h3_date"]
-    out = pd.DataFrame(rows,
-                       columns=["ticker", "asof"] + pattern_mod.PATTERN_COLS + date_cols)
+    out = pd.DataFrame(
+        rows, columns=["ticker", "asof", "atr_t"] + pattern_mod.PATTERN_COLS + date_cols)
     if len(out):
         # ネックラインまでの距離。**監視の並び順（明日抜けるかもしれない順）**に使う。
         # 優劣ではないし、絞り込みの閾値でもない（§6.1）

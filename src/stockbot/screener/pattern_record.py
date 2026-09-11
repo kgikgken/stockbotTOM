@@ -41,6 +41,8 @@ PATTERN_DELIVERED_COLS = [
     "pattern",            # double_bottom / ascending_triangle / ...
     "neckline",           # 反転系は水平なネックライン、保ち合い系は上辺の T での値
     "close_t",            # Close[T]
+    "atr_t",              # ATR14[T]。**MFE / MAE を ATR 単位で出すために記録する**
+                          # （§3.4）。判定には使わない
     "breakout_pct",       # (終値 / ネックライン − 1) × 100。成立なら正
     "pattern_low",        # 撤退の目安（パターンの最安値）
     "height",             # ネックライン − 最安値
