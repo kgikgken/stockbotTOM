@@ -61,13 +61,15 @@ jobs:
           restore-keys: |
             store-v2-
 
+      # v2: 1 回目はユニバースが運用と違っていた（BACKTEST.md §7 Q-2）。世代を上げて
+      # 1 回目の日別ファイルを「済み」として拾わせない（中断再開ロジックが拾ってしまう）
       - name: Restore backtest output
         uses: actions/cache@v4
         with:
           path: data/pattern_replay
-          key: pattern-replay-v1-${{ github.event.inputs.window }}-${{ github.run_id }}
+          key: pattern-replay-v2-${{ github.event.inputs.window }}-${{ github.run_id }}
           restore-keys: |
-            pattern-replay-v1-${{ github.event.inputs.window }}-
+            pattern-replay-v2-${{ github.event.inputs.window }}-
 
       - name: Tests
         run: python -m unittest discover -s tests -t .

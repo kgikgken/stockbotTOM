@@ -42,7 +42,6 @@ from .replay import (
     _filter_holdout,
     _real_trading_days,
     _truncate_before_holdout,
-    replay_universe_tickers,
 )
 
 # docs/BACKTEST.md §1。確認窓だけが新しい（探索・ホールドアウトは replay.py と同じ）
@@ -50,6 +49,10 @@ SEARCH_WINDOW = (pd.Timestamp("2021-08-01"), pd.Timestamp("2026-01-30"))
 CONFIRM_WINDOW = (pd.Timestamp("2017-03-15"), pd.Timestamp("2021-07-31"))
 
 HORIZON = 20   # docs/PATTERN.md §3.4 と同じ評価窓。BACKTEST.md §3
+
+# ユニバースのゲート（docs/BACKTEST.md §2.1）。**運用の `universe/build.py` と同じ値**を
+# `Settings` から受け取る。ここに数字を書かない —— 書くと運用側と黙ってずれる
+# （2026-09-11 の再実行の理由がこれ。§7 Q-2 / §8 D-5）
 
 PREFIX = "pattern_replay_"
 SUFFIX = ".csv.gz"
@@ -62,6 +65,10 @@ DETECT_COLS = [
     "pattern_low", "height", "target", "up_pct", "down_pct", "rr", "breakeven_win_rate",
     "upper_slope", "lower_slope", "pole_pct", "upper_scatter",
     "adv_jpy", "sector33",
+    # **T の時点で既に測定目標を超えているか**（docs/BACKTEST.md §3.1）。
+    # `b >= 1` と同値で、この行の `reached_target` は「届いた」ではなく
+    # 「最初から届いていた」を数える。読み違えると危ないので列に持つ
+    "already_at_target",
 ]
 
 # ラベル（BACKTEST.md §3）。**主指標は r_20 だけ。** ほかは診断列
@@ -172,6 +179,43 @@ def label_one(df: pd.DataFrame, t_pos: int, row: dict, bench_r20: float,
     return out
 
 
+def universe_at(prepared: dict, equities: set, date_t: pd.Timestamp,
+                min_adv_jpy: float, min_price: float,
+                min_history_bars: int = MIN_HISTORY_BARS) -> list:
+    """T 時点のユニバース（docs/BACKTEST.md §2.1）。**運用と同じ母集団にする。**
+
+    上場株式のうち、T 時点で
+
+    - 履歴が `min_history_bars` 本以上
+    - **20 日平均売買代金が `min_adv_jpy` 以上**
+    - **終値が `min_price` 以上**
+
+    を満たす銘柄。どれも T までのバーだけで決まる（未来参照にならない）。
+
+    運用の `universe/build.py` には他に**鮮度**（最終足が 7 日以内）と**分割疑い**の
+    ゲートもあるが、ここでは当てない —— どちらも「いま取得できているか」を見る
+    データ品質のゲートで、過去の各 T について当時の状態を復元できない。流動性の
+    ゲート（売買代金・株価）とは性質が違う（§2.1 に明記）。
+    """
+    out = []
+    for ticker in sorted(equities):
+        item = prepared.get(ticker)
+        if item is None:
+            continue
+        df = item["df"]
+        pos = _date_position(df.index, date_t)
+        if pos is None or pos + 1 < min_history_bars:
+            continue
+        adv = item["adv"][pos]
+        close = float(df["Close"].to_numpy(dtype=float)[pos])
+        if not np.isfinite(adv) or adv < min_adv_jpy:
+            continue
+        if not np.isfinite(close) or close < min_price:
+            continue
+        out.append(ticker)
+    return out
+
+
 def replay_one_day(date_t: pd.Timestamp, prepared: dict, universe,
                    sectors: Dict[str, str], k: int,
                    horizon: int = HORIZON) -> pd.DataFrame:
@@ -201,9 +245,14 @@ def replay_one_day(date_t: pd.Timestamp, prepared: dict, universe,
         for _i, r in hits.iterrows():
             row = {c: np.nan for c in DETECT_COLS}
             row.update({k2: r[k2] for k2 in r.index if k2 in DETECT_COLS})
+            target = float(r["target"]) if pd.notna(r["target"]) else np.nan
+            close_t = float(r["close_t"])
             row.update({"date": date_t, "ticker": ticker, "atr_t": atr_t,
                         "adv_jpy": adv, "sector33": sectors.get(ticker, ""),
-                        "pattern": str(r["pattern"])})
+                        "pattern": str(r["pattern"]),
+                        # b >= 1 ⟺ 終値[T] >= 目標（§3.1）
+                        "already_at_target": bool(np.isfinite(target)
+                                                  and close_t >= target)})
             rows.append(row)
     if not rows:
         return pd.DataFrame(columns=REPLAY_COLS)
@@ -244,6 +293,7 @@ def load_table(output_dir: Path) -> pd.DataFrame:
 
 def run(ohlcv: Dict[str, pd.DataFrame], idx_ohlcv: pd.DataFrame, listed: pd.DataFrame,
         output_dir: Path, start: pd.Timestamp, end: pd.Timestamp, k: int,
+        min_adv_jpy: float, min_price: float,
         sectors: Optional[Dict[str, str]] = None,
         min_history_bars: int = MIN_HISTORY_BARS,
         include_holdout: bool = False, log=print) -> None:
@@ -274,18 +324,30 @@ def run(ohlcv: Dict[str, pd.DataFrame], idx_ohlcv: pd.DataFrame, listed: pd.Data
     prepared = _prepared(ohlcv, all_tickers, k)
     log(f"[pattern-replay] スイング表と ATR を用意: {len(prepared)}/{len(all_tickers)} 銘柄")
 
+    equities = set(listed[listed["is_equity"].astype(bool)]["ticker"].astype(str))
+    log(f"[pattern-replay] ユニバースのゲート: 履歴 {min_history_bars}本以上 / "
+        f"20日平均売買代金 {min_adv_jpy / 1e8:.1f}億円以上 / 株価 {min_price:.0f}円以上"
+        "（運用の universe/build.py と同じ値）")
+
     t0 = time.monotonic()
     n_written = 0
+    n_univ: list = []
     for i, date_t in enumerate(dates, start=1):
         path = day_path(output_dir, date_t)
         if path.exists():
             continue
-        tickers = replay_universe_tickers(listed, ohlcv, date_t, min_history_bars)
+        tickers = universe_at(prepared, equities, date_t, min_adv_jpy, min_price,
+                              min_history_bars)
+        n_univ.append(len(tickers))
         day = replay_one_day(date_t, prepared, tickers, sectors, k)
         day.to_csv(path, index=False, encoding="utf-8", compression="gzip")
         n_written += 1
         if i % 50 == 0 or i == len(dates):
             elapsed = time.monotonic() - t0
             log(f"[pattern-replay] {i}/{len(dates)} {date_t.date()} "
-                f"成立 {len(day)}件 / 経過 {elapsed:.0f}秒")
+                f"ユニバース {len(tickers)}銘柄 / 成立 {len(day)}件 / 経過 {elapsed:.0f}秒")
+    if n_univ:
+        arr = np.asarray(n_univ, dtype=float)
+        log(f"[pattern-replay] ユニバース: 中央 {np.median(arr):.0f}銘柄 / "
+            f"最小 {arr.min():.0f} / 最大 {arr.max():.0f}")
     log(f"[pattern-replay] 書き出し {n_written}日ぶん")
