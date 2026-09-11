@@ -1,0 +1,99 @@
+name: pattern-backtest
+
+# docs/BACKTEST.md: パターン検出のバックテスト。探索窓 → 確認窓 → ホールドアウトの順。
+#
+# **ホールドアウトは include_holdout を明示したときだけ走る**（CLAUDE.md の絶対規則）。
+# 確認窓を通過するまで触らない（BACKTEST.md §5）。
+#
+# 全期間を 1 回のジョブ（6 時間上限）で終えられない場合は start/end を区切って
+# 複数回トリガーする（中断再開できる。既にある日はスキップする）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      window:
+        description: "search / confirm / holdout"
+        required: true
+        default: "search"
+      start:
+        description: "YYYY-MM-DD（空なら窓の全期間）"
+        required: false
+      end:
+        description: "YYYY-MM-DD（空なら窓の全期間）"
+        required: false
+      include_holdout:
+        description: "ホールドアウトを生成する（確認窓を通過してから・1回のみ）"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+# data-daily / backfill と同じグループにして、store キャッシュの読み取り中に
+# 書き込みが走らないようにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      - name: Restore backtest output
+        uses: actions/cache@v4
+        with:
+          path: data/pattern_replay
+          key: pattern-replay-v1-${{ github.event.inputs.window }}-${{ github.run_id }}
+          restore-keys: |
+            pattern-replay-v1-${{ github.event.inputs.window }}-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      # store のカバー範囲を先に出す。**確認窓の開始日まで履歴が届いていない
+      # 可能性がある**（backfill は 2600 本）。届いていなければ実測をそのまま報告する
+      - name: Store coverage
+        run: python scripts/store_coverage.py
+
+      - name: Replay
+        env:
+          K: "3"
+        run: |
+          python -m stockbot.cli pattern-replay \
+            --window "${{ github.event.inputs.window }}" \
+            ${{ github.event.inputs.include_holdout == 'true' && '--include-holdout' || '' }}
+
+      - name: Report
+        if: always()
+        run: |
+          python -m stockbot.cli pattern-report --window "${{ github.event.inputs.window }}"
+
+      - name: Upload tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pattern-backtest-${{ github.event.inputs.window }}-${{ github.run_id }}
+          path: data/pattern_replay/${{ github.event.inputs.window }}
+          if-no-files-found: ignore
