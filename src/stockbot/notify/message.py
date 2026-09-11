@@ -1,11 +1,14 @@
-"""配信本文の組み立て（docs/SCREENER.md §4.2）。
+"""配信本文の組み立て（docs/PATTERN.md §6）。
 
-**入力は配信記録（`delivered_*.csv`）とその日の要約（`screen_summary_*.json`）だけ。**
-株価も指標もここでは計算し直さない。配信した内容と台帳が食い違わないようにするため、
-カードに出す値はすべて配信記録の列をそのまま整形したものにする（§4.3 のテスト）。
+**入力は成立の配信記録（`delivered_*.csv`）とその日のスナップショット
+（`pattern_summary_*.json`）だけ。** 株価も指標もここでは計算し直さない。配信した
+内容と台帳が食い違わないようにするため、出す値はすべて記録の列をそのまま整形する。
 
-順位は付けない。並びは配信記録の順（売買代金の降順）をそのまま使い、本文にもその旨を
-書く（§2.8）。
+**通常はこの本文を送らない。** 画像カード 2 枚だけを送り（§6・SCREENER.md §4.5）、
+描画か送信に失敗した日だけここに落ちる。先頭で失敗した旨を断る。
+
+順位は付けない。監視の並びは上値抵抗線に近い順（明日抜けるかもしれない順）で、
+**優劣ではない**。業種は表示のみで並び順に使わない（§6.5）。
 """
 from __future__ import annotations
 
@@ -14,16 +17,16 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ..screener.record import RECORD_MISMATCH_NOTE
+from ..render.context import PATTERN_LABELS, PATTERN_ORDER, WATCH_MAX
 
 MAX_TEXT = 4900  # Worker 側で切られる上限（src/worker.js）。ここで超えないようにする
 
-# 通常は画像カード2枚だけを送る（§4.5）。この本文が流れるのは描画か送信に失敗した日
-# だけなので、受け取った側が「いつもと違う」と分かるように先頭で断る（§4.4）
+# 通常は画像カード2枚だけを送る。この本文が流れるのは描画か送信に失敗した日だけなので、
+# 受け取った側が「いつもと違う」と分かるように先頭で断る
 FALLBACK_NOTE = "画像生成に失敗（テキストで配信）"
 
-# 記録では SMA5 のような機械的な名前だが、配信では日本語で出す
-MA_LABELS = {"SMA5": "5日線", "SMA25": "25日線", "SMA75": "75日線", "SMA200": "200日線"}
+TARGET_NOTE = "測定目標は文献上の目安（統計的な裏付けは未確認）。"
+DISCLAIMER = "AI候補提示で投資助言ではない。最終判断と結果責任はユーザーにある。"
 
 
 def _num(value, digits: int = 1) -> str:
@@ -33,128 +36,96 @@ def _num(value, digits: int = 1) -> str:
     return f"{float(value):,.{digits}f}"
 
 
+def _signed(value, digits: int = 1) -> str:
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "—"
+    return f"{float(value):+.{digits}f}%"
+
+
 def _oku(adv_jpy) -> str:
-    """売買代金を億円で。"""
     if adv_jpy is None or (isinstance(adv_jpy, float) and not np.isfinite(adv_jpy)):
         return "—"
     return f"{float(adv_jpy) / 1e8:,.1f}億円"
 
 
 def _earnings(row) -> str:
-    """決算までの営業日数。取れていない銘柄はその旨を明記する（§2.6）。"""
-    if bool(row.get("a4_earnings_unknown")):
-        return "決算日未取得"
+    """決算までの営業日数。**9 割方「未取得」になる前提**で、それでも出す（§6.2）。"""
     days = row.get("earnings_days")
-    if days is None or (isinstance(days, float) and not np.isfinite(days)):
+    if bool(row.get("earnings_unknown")) or days is None or (
+            isinstance(days, float) and not np.isfinite(days)):
         return "決算日未取得"
     return f"決算まで{int(days)}営業日"
 
 
-def _header(summary: dict, n_candidates: int, fallback: bool = False) -> list[str]:
-    level = summary.get("regime_level") or "不明"
-    score = summary.get("regime_score")
-    gauge = f"{level}（{score}/6）" if score is not None else level
+def _label(pattern) -> str:
+    return PATTERN_LABELS.get(str(pattern), str(pattern))
+
+
+def _rows(df: Optional[pd.DataFrame]) -> list:
+    if df is None or len(df) == 0:
+        return []
+    return [row for _i, row in df.iterrows()]
+
+
+def _done_line(row) -> list[str]:
+    return [
+        f"{row.get('ticker', '')} {row.get('name', '') or ''}"
+        f"［{_label(row.get('pattern'))}］".rstrip(),
+        f"  終値 {_num(row.get('close_t'))} / 抜け幅 {_signed(row.get('breakout_pct'), 2)}",
+        f"  撤退 {_num(row.get('pattern_low'))}（{_signed(row.get('down_pct'))}）"
+        f" / 目標 {_num(row.get('target'))}（{_signed(row.get('up_pct'))}）"
+        f" / 比率 {_num(row.get('rr'), 2)}",
+        f"  {row.get('sector33', '') or '—'} / {_oku(row.get('adv_jpy'))}"
+        f" / {_earnings(row)}",
+    ]
+
+
+def _watch_line(row) -> str:
+    streak = ""
+    try:
+        n = int(row.get("watch_streak") or 1)
+        streak = f" 監視{n}日目" if n > 1 else ""
+    except (TypeError, ValueError):
+        pass
+    return (f"{row.get('ticker', '')}［{_label(row.get('pattern'))}］"
+            f" 抜けまで {_signed(-float(row.get('breakout_pct') or 0.0), 2)}{streak}")
+
+
+def build_message(delivered: Optional[pd.DataFrame], watch: Optional[pd.DataFrame],
+                  summary: dict, fallback: bool = False) -> str:
+    """テキスト本文（画像に失敗した日だけ流れる）。
+
+    **成立 0 件の日も本文を作る**（§6.1）。その旨を明記して監視だけを出す。
+    """
+    done_rows = _rows(delivered)
+    done_tickers = {str(r.get("ticker") or "") for r in done_rows}
+    # 成立している銘柄は監視から外す（§6.4）。既に抜けた銘柄を「待つ」側に出さない
+    watch_rows = [r for r in _rows(watch)
+                  if str(r.get("ticker") or "") not in done_tickers][:WATCH_MAX]
+
     lines = [FALLBACK_NOTE] if fallback else []
     lines += [
-        f"順張り押し目 {summary.get('delivered_on', '')}"
+        f"チャートパターン {summary.get('delivered_on', '')}"
         f"（判定 {summary.get('asof', '')} の引け）",
-        f"地合い {gauge} ／ 候補 {n_candidates}件",
-    ]
-    # 台帳に書けなかった日（想定外の衝突）。数字がどれを指すのか読み手に分かるようにする
-    if summary.get("delivered_written") is False:
-        lines.append(f"※ {RECORD_MISMATCH_NOTE}")
-    # 候補0件の日は E1 の注記を出さない。母集団も0なので「未適用」は正しいが、
-    # 適用する対象がそもそも無い日にこれを出すと E1 が壊れているように読める
-    if n_candidates and summary.get("e1_skipped"):
-        lines.append(f"※ E1（相対力の上位10%除外）は母集団 {summary.get('n_pool', 0)}件"
-                     "のため本日は未適用")
-    return lines
-
-
-def _streak(row) -> str:
-    """連続点灯日数。初日は何も出さない（§3.2 の streak）。"""
-    try:
-        n = int(row.get("streak") or 1)
-    except (TypeError, ValueError):
-        return ""
-    return f"（連続{n}日目）" if n > 1 else ""
-
-
-def _sector(row, n_sectors: Optional[int]) -> str:
-    """業種と 5 日順位（§2.9）。順位が取れなければ業種名だけ。"""
-    name = str(row.get("sector33") or "")
-    r = row.get("sector_rank_5d")
-    try:
-        rank = int(r)
-    except (TypeError, ValueError):
-        return name or "—"
-    return f"{name} {rank}/{n_sectors}位" if n_sectors else name or "—"
-
-
-def _card(i: int, row, n_sectors: Optional[int] = None) -> list[str]:
-    ma = MA_LABELS.get(str(row.get("landing_ma") or ""), "—")
-    return [
-        f"{i}. {row['ticker']} {row.get('name') or ''}{_streak(row)}".rstrip(),
-        f"   {_sector(row, n_sectors)} ／ {row.get('state') or '—'}",
-        f"   終値 {_num(row['close_t'])}円 ／ {_oku(row.get('adv_jpy'))}",
-        f"   止まった線 {ma}（{_num(row.get('landing_dist_atr'), 2)} ATR）",
-        f"   撤退ライン（押し安値） {_num(row['lp'])}円",
-        f"   目標の目安（直近高値） {_num(row['h0_high'])}円",
-        f"   深さ {_num(float(row['depth_pct']) * 100, 2)}% ／ 押し目"
-        f"{int(row['pullback_days'])}日 ／ {_earnings(row)}",
+        f"成立 {len(done_rows)}件 / 監視 {int(summary.get('n_watch') or 0)}件"
+        f" / 判定対象 {int(summary.get('n_evaluated') or 0):,}銘柄",
+        "",
     ]
 
+    if done_rows:
+        lines.append("■ 候補（上値抵抗線を抜けた）")
+        for pattern in PATTERN_ORDER:
+            for r in [x for x in done_rows if str(x.get("pattern")) == pattern]:
+                lines += _done_line(r)
+        lines.append("")
+    else:
+        lines += ["■ 本日の成立はありません。", ""]
 
-def _zero_day(summary: dict) -> list[str]:
-    """候補0件の日（§4.2）。
+    if watch_rows:
+        lines.append(f"■ 監視（形は揃い、まだ抜けていない／上位 {len(watch_rows)}件）")
+        lines += [f"・{_watch_line(r)}" for r in watch_rows]
+        lines.append("")
 
-    以前は「落ちた条件の上位3つ」を添えていたが、19 条件のスクリーナーごと撤去したので
-    出す中身が無くなった（SCREENER_CLOSING.md）。条件名の対応表は conditions.py に
-    あったもので、条件が無い今それを残すと存在しない判定を説明することになる。
-    """
-    return ["本日の候補はありません。"]
-
-
-DISCLAIMER = "この配信は監視候補の一覧です。売買の判断はご自身で行ってください。"
-ORDER_NOTE = ("並びは業種の5日リターン順位（昇順）→20日平均売買代金（降順）です。"
-              "優劣ではありません。")
-
-
-def build_message(delivered: Optional[pd.DataFrame], summary: dict,
-                  fallback: bool = False) -> str:
-    """配信本文を組み立てる（§4.2）。
-
-    delivered は screener.record.load_delivered() の出力（0行でもよい）。
-    summary は screener.screen.build_summary() が書いた JSON を読んだ dict。
-
-    fallback=True で先頭に「画像生成に失敗（テキストで配信）」を入れる。**通常の配信は
-    画像カード2枚だけで、この本文は使わない**（§4.5）。テキストが届いた時点で異常なので、
-    受け取った側がすぐ分かるようにする。
-
-    返す文字列は MAX_TEXT 以内。超える場合は末尾のカードから落とし、何件省いたかを
-    最終行に書く（黙って切らない）。見出しと免責は必ず残す。
-    """
-    n = 0 if delivered is None else len(delivered)
-    head = _header(summary, n, fallback=fallback)
-    foot = ["", DISCLAIMER]
-
-    if n == 0:
-        return "\n".join(head + [""] + _zero_day(summary) + foot)
-
-    n_sectors = len(summary.get("sector_ranking") or []) or None
-    cards = [_card(i, row, n_sectors)
-             for i, (_idx, row) in enumerate(delivered.iterrows(), start=1)]
-
-    def render(keep: int) -> str:
-        lines = head + [ORDER_NOTE]
-        for card in cards[:keep]:
-            lines += [""] + card
-        if keep < n:
-            lines += ["", f"（残り {n - keep}件は文字数の都合で省略しました）"]
-        return "\n".join(lines + foot)
-
-    # 入る枚数を前から詰めていく（再帰にすると枚数に対して指数的に膨らむ）
-    keep = n
-    while keep > 0 and len(render(keep)) > MAX_TEXT:
-        keep -= 1
-    return render(keep) if keep > 0 else render(0)[:MAX_TEXT]
+    lines += [TARGET_NOTE, "監視は記録に残しません。", DISCLAIMER]
+    text = "\n".join(lines)
+    return text if len(text) <= MAX_TEXT else text[:MAX_TEXT - 1] + "…"

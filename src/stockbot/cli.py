@@ -37,6 +37,7 @@ from .data.jpx_lists import (
 from .data.store import IDX_TICKER, OhlcvStore, from_long, to_long
 from .data.synthetic import make_synthetic, make_synthetic_index, synthetic_listed
 from .data.yf_fetch import fetch_index, fetch_ohlcv
+from .features.dimensions import next_earnings_business_days
 from .features import (  # noqa: F401
     indicators,
     pattern as pattern_mod,
@@ -52,8 +53,9 @@ from .pipeline import (
     save_daily_features,
 )
 from .notify import line_send, message
+from .render import context as render_context
 from .render import render as render_images_mod
-from .screener import record, resolver
+from .screener import pattern_record, record, resolver
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -489,18 +491,63 @@ def _log_scatter(label: str, name: str, sub: pd.DataFrame, log) -> None:
         f"±{tol_pct:.2f}%（BOX 基準）超 {int((v > tol_pct).sum())} 件")
 
 
+def _display_columns(cfg: Settings, universe: pd.DataFrame, out: pd.DataFrame,
+                     log=print) -> pd.DataFrame:
+    """カードに載せる列を足す（docs/PATTERN.md §6.2）。**判定には一切使わない。**
+
+    銘柄名・33業種・20日平均売買代金はユニバースから、決算までの日数は
+    `reference/earnings_schedule.csv` から引く。業種は表示のみで並び順に使わない（§6.5）。
+
+    **決算日は 9 割方「未取得」になる**（JPX のカバー率が 2.5〜10.4% で振れる）。
+    それでも載せる —— 載せないと取れている 1 割の情報まで消える。
+    """
+    if not len(out):
+        for col in ("name", "sector33", "adv_jpy", "earnings_days", "earnings_unknown"):
+            out[col] = pd.Series(dtype="object")
+        return out
+    have = [c for c in ("ticker", "name", "sector33", "adv_jpy") if c in universe.columns]
+    out = out.merge(universe[have].drop_duplicates("ticker"), on="ticker", how="left")
+    # **列は必ず作る。** ユニバースに無くても記録とカードの形を変えない
+    for col in ("name", "sector33"):
+        out[col] = out[col].fillna("") if col in out.columns else ""
+    if "adv_jpy" not in out.columns:
+        out["adv_jpy"] = np.nan
+
+    schedule = None
+    path = cfg.reference_dir / "earnings_schedule.csv"
+    if path.exists():
+        schedule = load_earnings_schedule(path)
+    days = []
+    for _i, r in out.iterrows():
+        value = (next_earnings_business_days(schedule, r["asof"], str(r["ticker"]))
+                 if schedule is not None else None)
+        days.append(np.nan if value is None else float(value))
+    out["earnings_days"] = days
+    out["earnings_unknown"] = out["earnings_days"].isna()
+    known = int((~out["earnings_unknown"]).sum())
+    log(f"[pattern] 決算日が取れた行 {known}/{len(out)}")
+    return out
+
+
 def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                  log=print) -> pd.DataFrame:
-    """7 パターンの検出数を数える（docs/PATTERN.md §2.1 反転系・§2.2 保ち合い系）。
+    """7 パターンを検出し、成立を記録して監視をスナップショットに残す
+    （docs/PATTERN.md §2.1 反転系・§2.2 保ち合い系・§3 記録）。
 
-    **数えて出すだけで、何も保存しないし配信もしない。** 事前登録した数値どおりに
-    実装できているかを実データで確かめるためのもの（D-3・D-5 の「検出数を見てから
-    動かさない」に対する、最初の 1 回の観測）。
+    判定日 T は各銘柄の最終足。**T の引けまでのデータしか読まない。**
 
-    判定日 T は各銘柄の最終足。T の引けまでのデータしか読まない。
+    書くものは 2 つ。
 
-    **「形は揃ったがネックライン未抜け」の件数も出す。** 成立が 0 件だったときに、
-    条件が厳しいのか実装が間違っているのかを 1 回で切り分けるため（設計責任者の指示）。
+    - `delivered_<配信日>_asof<判定日>.csv` —— **成立した行だけ**（§3.1）。
+      既にあれば上書きしない（台帳は後から作り直さない）
+    - `pattern_summary_<配信日>_asof<判定日>.json` —— 要約と**その日の監視**（§3.2）。
+      台帳ではなく観測値なので上書きしてよい
+
+    **監視は記録しない。** 成立は事象（抜けた日 1 日）、監視は状態（同じ形が何日も
+    続く）で単位が違う。監視を台帳に書くと分母が「形 × 滞留日数」になる。
+
+    **「形は揃ったが未抜け」の件数も出す。** 成立が 0 件だったときに、条件が厳しいのか
+    実装が間違っているのかを切り分けるため（設計責任者の指示）。
     """
     tickers = universe[universe["passes"]]["ticker"].tolist()
     rows = []
@@ -533,10 +580,14 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
     out = pd.DataFrame(rows,
                        columns=["ticker", "asof"] + pattern_mod.PATTERN_COLS + date_cols)
     if len(out):
-        # ネックラインまでの距離。目視の優先順位を付けるため（閾値ではない）
+        # ネックラインまでの距離。**監視の並び順（明日抜けるかもしれない順）**に使う。
+        # 優劣ではないし、絞り込みの閾値でもない（§6.1）
         out["to_neck_pct"] = (out["neckline"] / out["close_t"] - 1.0) * 100
+    out = _display_columns(cfg, universe, out, log)
     done = out[out["breakout"].astype(bool)] if len(out) else out
     pending = out[~out["breakout"].astype(bool)] if len(out) else out
+    if len(pending):
+        pending = pending.sort_values("to_neck_pct").reset_index(drop=True)
     log(f"[pattern] 評価 {n_eval} 銘柄")
     log(f"[pattern] 成立（ネックライン上抜け済み）: {len(done)} 件")
     log(f"[pattern] 形は揃ったが未抜け: {len(pending)} 件")
@@ -602,7 +653,119 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                 f"比率 {_num(r['rr'], 2)}")
         if len(part) > PATTERN_LIST_MAX:
             log(f"[pattern]   ... 他 {len(part) - PATTERN_LIST_MAX} 件")
+
+    _save_pattern_records(cfg, out, done, pending, n_eval, log)
     return out
+
+
+def _pattern_counts(done: pd.DataFrame, pending: pd.DataFrame) -> dict:
+    """パターン別の (成立, 未抜け) 件数。**2枚目の内訳と同じ表を作る値。**
+
+    表示側と検出側で別々に数えると食い違いうるので、**同じフレームから 1 回だけ数える**。
+    """
+    counts: dict = {}
+    for label, part in (("done", done), ("watch", pending)):
+        if not len(part):
+            continue
+        for name, n in part["pattern"].value_counts().items():
+            counts.setdefault(str(name), {"done": 0, "watch": 0})[label] = int(n)
+    return counts
+
+
+def _json_row(row, cols) -> dict:
+    """1 行を JSON に入る型へ。日付は ISO 文字列（読む側は文字列でも Timestamp でも可）。"""
+    out = {}
+    for col in cols:
+        if col not in row.index:
+            continue
+        v = row[col]
+        if isinstance(v, pd.Timestamp):
+            out[col] = None if pd.isna(v) else f"{v:%Y-%m-%d}"
+        # bool は int の派生なので**先に**見る（True が 1 になってしまう）
+        elif isinstance(v, (np.bool_, bool)):
+            out[col] = bool(v)
+        elif pd.isna(v):
+            out[col] = None
+        # iterrows() の行は object dtype になりうるので、素の int / float も受ける。
+        # ここを numpy 型だけにすると span や watch_streak が文字列で書かれる
+        elif isinstance(v, (np.integer, int)):
+            out[col] = int(v)
+        elif isinstance(v, (np.floating, float)):
+            out[col] = float(v)
+        else:
+            out[col] = str(v)
+    return out
+
+
+# 推移を追うのに要る最小限（docs/PATTERN.md §3.2）。**全件ぶん残す**
+WATCH_TRACE_COLS = ["ticker", "pattern", "breakout_pct", "watch_streak"]
+
+
+def _watch_payload(pending: pd.DataFrame) -> tuple[list, list]:
+    """スナップショットに書く監視（docs/PATTERN.md §3.2）。**2 つに分ける。**
+
+    - `watch`: **全件**を最小限の列で（銘柄・パターン・抜け幅・連続日数）。
+      §3.2 が言う「その日の監視銘柄と breakout_pct」で、連続日数もここから数える
+    - `watch_cards`: **カードに載せる上位 `WATCH_MAX` 件だけ**を全列で。
+      配信は記録に書いてある値だけで描く（§4.3）ので、カードに出す値はここに要る
+
+    分ける理由は**リポジトリを膨らませないため**。全件を全列で書くと 196 件で
+    約 235KB/日、年 60MB 近くになる（日次でコミットするファイルは日付別にしてあるが、
+    それでも積み上がる。CLAUDE.md の落とし穴）。カードに要るのは上位 10 件だけである。
+    """
+    if not len(pending):
+        return [], []
+    full = [c for c in pattern_record.PATTERN_DELIVERED_COLS
+            if c not in ("delivered_on", "asof")] + ["watch_streak", "to_neck_pct"]
+    trace = [_json_row(r, WATCH_TRACE_COLS) for _i, r in pending.iterrows()]
+    cards = [_json_row(r, full)
+             for _i, r in pending.head(render_context.WATCH_MAX).iterrows()]
+    return trace, cards
+
+
+def _save_pattern_records(cfg: Settings, out: pd.DataFrame, done: pd.DataFrame,
+                          pending: pd.DataFrame, n_eval: int, log=print) -> None:
+    """成立を台帳に、監視をスナップショットに書く（docs/PATTERN.md §3）。
+
+    判定日 T はファイル名に入れる。**同じ配信日に引け前と引け後の 2 回走っても
+    両方残る**（2026-09-03 の記録消失と同じ形を作らない）。
+    """
+    cfg.ensure_dirs()
+    delivered_on = record.as_calendar_date(_now())
+    asof = (record.as_calendar_date(out["asof"].max()) if len(out)
+            else delivered_on)
+
+    # 監視の連続日数（§6.2）。**過去のスナップショットから数える** ——
+    # 監視は台帳に無いので、台帳からは数えられない
+    keys = list(zip(pending["ticker"].astype(str), pending["pattern"].astype(str)))         if len(pending) else []
+    streaks = pattern_record.watch_streaks(cfg.daily_dir, keys, delivered_on)
+    if len(pending):
+        pending = pending.assign(watch_streak=[
+            streaks.get((str(t), str(p)), 1)
+            for t, p in zip(pending["ticker"], pending["pattern"])])
+
+    watch_trace, watch_cards = _watch_payload(pending)
+    ledger = pattern_record.build_delivered(done, delivered_on, asof)
+    path, written = record.save_delivered(ledger, cfg.daily_dir, delivered_on, asof)
+    log(f"[pattern] 成立 {len(ledger)}件を {path.name} に"
+        + ("保存" if written else "保存しなかった（既存ファイルを残した）"))
+
+    summary = {
+        "delivered_on": f"{delivered_on:%Y-%m-%d}",
+        "asof": f"{asof:%Y-%m-%d}",
+        "n_evaluated": int(n_eval),
+        "n_done": int(len(done)),
+        "n_watch": int(len(pending)),
+        "counts": _pattern_counts(done, pending),
+        "delivered_written": bool(written),
+        # **監視の全件**を残す（1枚目に載せるのは上位 10 件だけだが、推移は全件で追う）。
+        # 記録用の列をそのまま入れる —— 配信は「記録に書いてある値だけ」で描くので
+        # （§4.3）、ここに無い値はカードに出せない。銘柄と抜け幅だけでは足りない
+        "watch": watch_trace,
+        "watch_cards": watch_cards,
+    }
+    spath = pattern_record.save_pattern_summary(summary, cfg.daily_dir, delivered_on, asof)
+    log(f"[pattern] 監視 {len(pending)}件を {spath.name} に保存（記録ではなく観測値）")
 
 
 def step_resolve(cfg: Settings, log=print) -> list[Path]:
@@ -622,29 +785,31 @@ def step_resolve(cfg: Settings, log=print) -> list[Path]:
 
 
 def step_notify(cfg: Settings, log=print) -> dict:
-    """その日の配信を LINE に流す（docs/SCREENER.md §4）。
+    """その日のパターン配信を LINE に流す（docs/PATTERN.md §6）。
 
-    読むのは `daily/delivered_*.csv` と `daily/screen_summary_*.json` だけで、株価も
-    指標も計算し直さない。配信内容と台帳が食い違わないようにするため（§4.3）。
-    候補0件の日も配信する（§4.2）。同じ配信日に判定が 2 つある日は、判定日が新しい方
-    （引け後）を流す。
+    読むのは `daily/delivered_*.csv`（成立）と `daily/pattern_summary_*.json`
+    （要約と監視）だけで、**株価も指標も計算し直さない**。配信内容と台帳が食い違わない
+    ようにするため（SCREENER.md §4.3 と同じ方針）。
 
-    **通常は画像カード2枚だけを送る。テキストは送らない**（§4.5）。Worker の
-    `/upload` は caption を付けると画像とは別にテキストを 1 通 push する
-    （`src/worker.js`）ので、caption は付けない。描画または送信に失敗した日だけ
-    テキストに落とし、本文の先頭に失敗した旨を入れる（§4.4）。
+    **成立 0 件の日も配信する**（§6.1）。成立は 1 日 0〜13 件で振れるので、0 件の日に
+    何も送らないと「動いているのか壊れているのか」が分からない。監視のほうが実用的
+    でもある —— 抜けた日に買うなら前日に形を知っておくほうが早い。
+
+    **画像 2 枚だけを送る。テキストは送らない**（§4.5）。Worker の `/upload` は
+    caption を付けると画像とは別にテキストを 1 通 push する（`src/worker.js`）ので、
+    caption は付けない。描画または送信に失敗した日だけテキストに落とし、本文の先頭に
+    失敗した旨を入れる。
 
     WORKER_URL が無い環境（ローカル・DRYRUN）では本文を作って log に出すだけで、
     送信はしない。
     """
     cfg.ensure_dirs()
     delivered_on = record.as_calendar_date(_now())
-    found = record.latest_summary(cfg.daily_dir, delivered_on)
+    found = pattern_record.latest_pattern_summary(cfg.daily_dir, delivered_on)
     if found is None:
-        # スクリーナー撤去後はこれが通常の経路。空の配信を送らないための止め方その 2
-        # （その 1 はワークフローから Notify ステップを外したこと）。SCREENER_CLOSING.md
-        log(f"[notify] {delivered_on:%Y-%m-%d} の要約が無いため配信しない"
-            "（19条件のスクリーナーは撤去済み。docs/SCREENER_CLOSING.md）")
+        # その日の検出がまだ走っていない。空の配信を送らない
+        log(f"[notify] {delivered_on:%Y-%m-%d} のパターン要約が無いため配信しない"
+            "（先に cli pattern を実行）")
         return {"sent": False, "status": None, "reason": "要約が無い"}
 
     summary = json.loads(found.path.read_text(encoding="utf-8"))
@@ -652,15 +817,20 @@ def step_notify(cfg: Settings, log=print) -> dict:
     delivered = None
     if found.asof is not None:
         path = record.delivered_path(cfg.daily_dir, delivered_on, found.asof)
-        delivered = record.load_delivered(path) if path.exists() else None
-    n = 0 if delivered is None else len(delivered)
+        if path.exists():
+            delivered = pattern_record.load_pattern_delivered(path)
+    # カードに載せるのは上位 `WATCH_MAX` 件（全件は "watch" に最小限の列で入っている）
+    watch = pd.DataFrame(summary.get("watch_cards") or [])
+    n_done = 0 if delivered is None else len(delivered)
+    log(f"[notify] 成立 {n_done}件 / 監視 {len(watch)}件")
 
     images = []
     failure = ""
     try:
         images = render_images_mod.render_images(
-            delivered, summary, cfg.data_dir / "render", stem=f"screen_{delivered_on:%Y-%m-%d}")
-        log(f"[notify] 候補 {n}件 / 画像 {len(images)}枚を作成: {[p.name for p in images]}")
+            delivered, watch, summary, cfg.data_dir / "render",
+            stem=f"pattern_{delivered_on:%Y-%m-%d}")
+        log(f"[notify] 画像 {len(images)}枚を作成: {[p.name for p in images]}")
     except Exception as e:   # Chromium 無し・フォント無し・起動失敗のいずれでも落とさない
         failure = f"{type(e).__name__}: {e}"
         log(f"[notify] 画像の作成に失敗（テキストに切り替える）: {failure}")
@@ -682,7 +852,7 @@ def step_notify(cfg: Settings, log=print) -> dict:
         failure = "画像の送信に失敗"
         log(f"[notify] {failure}したためテキストに切り替える")
 
-    text = message.build_message(delivered, summary, fallback=bool(failure))
+    text = message.build_message(delivered, watch, summary, fallback=bool(failure))
     log(f"[notify] テキスト {len(text)}文字")
     for line in text.splitlines():
         log(f"[notify]   {line}")

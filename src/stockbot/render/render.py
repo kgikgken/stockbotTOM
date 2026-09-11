@@ -1,4 +1,4 @@
-"""HTML → PNG（docs/SCREENER.md §4.5）。
+"""HTML → PNG（docs/PATTERN.md §6 / SCREENER.md §4.5 の方式）。
 
 Jinja2 でテンプレートを HTML にし、Playwright（headless Chromium）で 1枚目・2枚目を
 それぞれ PNG にする。SPEC.md §5 の方式（HTML/CSS を Chromium に描かせる）に従う。
@@ -52,10 +52,10 @@ def _asset_url(path: Path) -> Optional[str]:
     return path.resolve().as_uri() if path.exists() else None
 
 
-def render_html(delivered: Optional[pd.DataFrame], summary: dict,
-                assets_dir: Optional[Path] = None,
+def render_html(delivered: Optional[pd.DataFrame], watch: Optional[pd.DataFrame],
+                summary: dict, assets_dir: Optional[Path] = None,
                 template_dir: Optional[Path] = None) -> str:
-    """配信記録と要約から HTML を作る（PNG 化はしない）。
+    """成立・監視・要約から HTML を作る（PNG 化はしない）。
 
     ブラウザを使わないので、表示内容のテストはここまでで完結する（§4.3）。
     """
@@ -67,7 +67,7 @@ def render_html(delivered: Optional[pd.DataFrame], summary: dict,
                       autoescape=select_autoescape(["html"]))
     template = env.get_template(TEMPLATE_NAME)
     return template.render(
-        ctx=build_context(delivered, summary),
+        ctx=build_context(delivered, watch, summary),
         hero=_asset_url(assets_dir / "hero.jpeg"),
         mascot=_asset_url(assets_dir / "mascot.png"),
     )
@@ -109,9 +109,11 @@ def html_to_pngs(html: str, out_dir: Path, stem: str) -> list[Path]:
     return paths
 
 
-def render_images(delivered: Optional[pd.DataFrame], summary: dict, out_dir: Path,
-                  stem: str = "screen", assets_dir: Optional[Path] = None,
+def render_images(delivered: Optional[pd.DataFrame], watch: Optional[pd.DataFrame],
+                  summary: dict, out_dir: Path, stem: str = "pattern",
+                  assets_dir: Optional[Path] = None,
                   template_dir: Optional[Path] = None) -> list[Path]:
-    """配信記録と要約から PNG 2枚を作る。失敗は例外のまま呼び出し側へ返す。"""
-    html = render_html(delivered, summary, assets_dir=assets_dir, template_dir=template_dir)
+    """成立・監視・要約から PNG 2枚を作る。失敗は例外のまま呼び出し側へ返す。"""
+    html = render_html(delivered, watch, summary,
+                       assets_dir=assets_dir, template_dir=template_dir)
     return html_to_pngs(html, out_dir, stem)

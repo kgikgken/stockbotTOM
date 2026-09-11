@@ -25,6 +25,7 @@ import pandas as pd
 from ..data.store import IDX_TICKER
 from ..features.dimensions import LANDING_MA_NAMES
 from ..features.indicators import sma
+from .pattern_record import is_pattern_record
 from .record import (
     DELIVERED_COLS,
     as_calendar_date,
@@ -290,10 +291,19 @@ def resolve_pending(daily_dir: Path, ohlcv: Dict[str, pd.DataFrame],
         calendar = trading_calendar(ohlcv)
     written: list[Path] = []
     n_pending = 0
+    n_pattern = 0
     for f in list_delivered(daily_dir):
         delivered = load_delivered(f.path)
         if len(delivered) == 0:
             continue   # 候補0件の日。結果を付ける対象が無い
+        if is_pattern_record(delivered):
+            # **パターンの配信記録には結果を付けない。** 成功の定義（測定目標に届いたか・
+            # 撤退を割ったか・評価窓の長さ）が docs/PATTERN.md に無いため、こちらで
+            # 決めない（§4 Q-3）。押し目型の定義（押し安値 Lp・直近高値 H0・5日線回復）
+            # をそのまま当てると、別のルールの成績として記録が残ってしまう。
+            # 記録自体は保全されるので、定義が決まってから遡って付けられる
+            n_pattern += 1
+            continue
         asof_values = pd.to_datetime(delivered["asof"]).dropna().unique()
         # 判定日はファイル名から採るのが正だが、旧名のファイルは中身から補う
         asof = f.asof if f.asof is not None else as_calendar_date(asof_values[0])
@@ -312,6 +322,9 @@ def resolve_pending(daily_dir: Path, ohlcv: Dict[str, pd.DataFrame],
             f"打ち切り {int(outcome['censored'].astype(bool).sum())}")
     if n_pending:
         log(f"[resolve] {horizon}営業日が未経過のため持ち越し: {n_pending}件")
+    if n_pattern:
+        log(f"[resolve] パターンの配信記録 {n_pattern}ファイルは結果を付けずに残した"
+            "（成功の定義が未決。docs/PATTERN.md §4 Q-3）")
     return written
 
 
@@ -322,8 +335,8 @@ def load_journal(daily_dir: Path) -> pd.DataFrame:
     frames = []
     for f in list_delivered(daily_dir):
         delivered = load_delivered(f.path)
-        if len(delivered) == 0:
-            continue
+        if len(delivered) == 0 or is_pattern_record(delivered):
+            continue   # パターンの記録は列が違う。混ぜると押し目型の集計が壊れる
         asof = f.asof
         if asof is None:
             values = pd.to_datetime(delivered["asof"], errors="coerce").dropna()

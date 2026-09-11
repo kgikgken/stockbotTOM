@@ -1,9 +1,12 @@
-"""LINE 配信（docs/SCREENER.md §4）。
+"""LINE 配信（docs/PATTERN.md §6）。
 
-要は「配信した内容と配信記録が食い違わないこと」。カードに出る数値がすべて
-delivered_*.csv の列から来ていることをテストで固定する（§4.3）。
+要は「配信した内容と記録が食い違わないこと」。本文に出る値がすべて成立の配信記録と
+その日のスナップショットの列から来ていることを固定する（SCREENER.md §4.3 と同じ）。
+
+**通常はテキストを送らない。** 画像カード2枚だけを送り、この本文は描画か送信に失敗
+した日だけ流れる。`line_send` の caption の扱いもここで固定する（caption を付けると
+Worker がテキストを 1 通余分に push する。2026-09-04 に実際に起きた）。
 """
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,189 +18,149 @@ from . import _path  # noqa: F401
 from stockbot.notify import line_send
 from stockbot.notify.line_send import push_image
 from stockbot.notify.message import (
+    DISCLAIMER,
     FALLBACK_NOTE,
-    MA_LABELS,
     MAX_TEXT,
+    TARGET_NOTE,
     build_message,
 )
-from stockbot.screener.record import (
-    DELIVERED_COLS,
-    RECORD_MISMATCH_NOTE,
-    load_delivered,
-    records_to_frame,
-    save_delivered,
-)
-
-ASOF = pd.Timestamp("2026-08-31")
-DELIVERED_ON = pd.Timestamp("2026-09-01")
+from stockbot.render.context import WATCH_MAX
 
 
-def make_record(ticker="2801.T", name="キッコーマン", landing_ma="SMA5",
-                close_t=1835.0, lp=1790.5, h0_high=1867.5, depth_pct=0.041231593038821956,
-                days=6, adv=7009219892.5, unknown=True, earnings_days=np.nan,
-                e1_skipped=True, dist=0.6436456198738544):
-    return {
-        "delivered_on": DELIVERED_ON, "asof": ASOF, "ticker": ticker, "name": name,
-        "landing_ma": landing_ma, "landing_ma_value": 1822.5, "landing_dist_atr": dist,
-        "lp": lp, "lp_date": pd.Timestamp("2026-08-28"),
-        "h0_high": h0_high, "h0_date": pd.Timestamp("2026-08-21"),
-        "close_t": close_t, "atr_t": 49.7167991390535, "state": "反発開始",
-        "depth_pct": depth_pct, "pullback_days": days,
-        "adv_jpy": adv, "sector33": "食料品", "a4_earnings_unknown": unknown,
-        "e1_skipped": e1_skipped, "earnings_days": earnings_days,
+def done_row(ticker="5202.T", pattern="inverse_hs", **kw):
+    row = {
+        "ticker": ticker, "name": "日本板硝子", "sector33": "ガラス・土石製品",
+        "pattern": pattern, "close_t": 495.0, "neckline": 493.0, "breakout_pct": 0.41,
+        "pattern_low": 478.0, "target": 508.0, "up_pct": 2.6, "down_pct": -3.4,
+        "rr": 0.76, "adv_jpy": 5.2e8, "earnings_days": np.nan, "earnings_unknown": True,
     }
+    row.update(kw)
+    return row
 
 
-def make_summary(n_candidates=1, n_pool=1, e1_skipped=True, fails=None, level="中", score=3):
-    return {
-        "delivered_on": "2026-09-01", "asof": "2026-08-31",
-        "regime_level": level, "regime_score": score,
-        "n_evaluated": 1330, "n_pool": n_pool, "n_candidates": n_candidates,
-        "e1_skipped": e1_skipped, "e1_threshold": None,
-        # 撤去済みのスクリーナーが残した既存の要約ファイルにはこの列がある。
-        # 描画側が古い記録を読んでも落ちないことを確かめるために残してある
-        "fail_counts": fails if fails is not None else {"C1": 1086, "E3": 1053, "C3": 967},
-        "landing_ma_all": {"SMA5": 514, "SMA25": 277, "SMA75": 219, "SMA200": 252},
-        "landing_ma_candidates": {"SMA5": 1, "SMA25": 0, "SMA75": 0, "SMA200": 0},
-    }
+def watch_row(ticker="2331.T", pattern="ascending_triangle", **kw):
+    row = {"ticker": ticker, "pattern": pattern, "breakout_pct": -0.07, "watch_streak": 1}
+    row.update(kw)
+    return row
 
 
-def frame(records):
-    return records_to_frame(records)
+def summary(**kw):
+    out = {"delivered_on": "2026-09-14", "asof": "2026-09-11",
+           "n_evaluated": 1277, "n_watch": 196}
+    out.update(kw)
+    return out
 
 
-class MatchesDeliveredTest(unittest.TestCase):
-    """§4.3: カードの値はすべて配信記録の列から来る。"""
+def frame(rows):
+    return pd.DataFrame(rows) if rows else None
+
+
+class MatchesRecordTest(unittest.TestCase):
+    """本文の値はすべて記録の列から来る（何も計算し直さない）。"""
 
     def test_every_required_field_appears(self):
-        rec = make_record()
-        text = build_message(frame([rec]), make_summary())
-        self.assertIn("2801.T", text)                 # 銘柄コード
-        self.assertIn("キッコーマン", text)             # 銘柄名
-        self.assertIn("1,835.0円", text)              # 終値
-        self.assertIn("5日線", text)                   # 止まった線
-        self.assertIn("0.64 ATR", text)               # 距離
-        self.assertIn("1,790.5円", text)              # 押し安値
-        self.assertIn("1,867.5円", text)              # 直近高値
-        self.assertIn("4.12%", text)                  # 深さ
-        self.assertIn("押し目6日", text)                # 押し目日数
-        self.assertIn("反発開始", text)                 # 状態
-        self.assertIn("70.1億円", text)                # 20日平均売買代金
-        self.assertIn("決算日未取得", text)             # 決算までの日数（未取得）
+        text = build_message(frame([done_row()]), None, summary())
+        for token in ("5202.T", "日本板硝子", "逆三尊", "495.0", "+0.41%",
+                      "478.0", "508.0", "0.76", "ガラス・土石製品", "5.2億円"):
+            self.assertIn(token, text, token)
 
-    def test_labels_for_stop_line_and_target(self):
-        text = build_message(frame([make_record()]), make_summary())
-        self.assertIn("撤退ライン（押し安値）", text)
-        self.assertIn("目標の目安（直近高値）", text)
+    def test_target_is_labelled_as_literature(self):
+        """測定目標は文献上の目安だと必ず書く（§2.3）。"""
+        self.assertIn(TARGET_NOTE, build_message(frame([done_row()]), None, summary()))
+        self.assertIn("文献上の目安", TARGET_NOTE)
 
     def test_earnings_days_when_known(self):
-        rec = make_record(unknown=False, earnings_days=12.0)
-        text = build_message(frame([rec]), make_summary())
-        self.assertIn("決算まで12営業日", text)
-        self.assertNotIn("決算日未取得", text)
+        row = done_row(earnings_days=5.0, earnings_unknown=False)
+        self.assertIn("決算まで5営業日", build_message(frame([row]), None, summary()))
 
-    def test_values_survive_csv_roundtrip(self):
-        """CSV に書いて読み直しても本文が変わらない（配信と台帳の一致）。"""
-        rec = make_record()
-        direct = build_message(frame([rec]), make_summary())
-        with tempfile.TemporaryDirectory() as tmp:
-            path, _w = save_delivered(frame([rec]), Path(tmp), DELIVERED_ON, ASOF)
-            from_csv = build_message(load_delivered(path), make_summary())
-        self.assertEqual(direct, from_csv)
-
-    def test_all_ma_labels_covered(self):
-        for ma in ("SMA5", "SMA25", "SMA75", "SMA200"):
-            text = build_message(frame([make_record(landing_ma=ma)]), make_summary())
-            self.assertIn(MA_LABELS[ma], text)
+    def test_earnings_unknown_is_stated_not_hidden(self):
+        """9 割方これになる。それでも出す（§6.2）。"""
+        self.assertIn("決算日未取得", build_message(frame([done_row()]), None, summary()))
 
     def test_missing_values_render_as_dash_not_nan(self):
-        rec = dict(make_record(), landing_ma="", landing_dist_atr=np.nan, adv_jpy=np.nan)
-        text = build_message(frame([rec]), make_summary())
+        row = done_row(rr=np.nan, target=np.nan, adv_jpy=np.nan)
+        text = build_message(frame([row]), None, summary())
         self.assertNotIn("nan", text.lower())
         self.assertIn("—", text)
 
+    def test_disclaimer_is_present(self):
+        self.assertIn(DISCLAIMER, build_message(frame([done_row()]), None, summary()))
 
-class HeaderTest(unittest.TestCase):
-    def test_gauge_and_count(self):
-        text = build_message(frame([make_record()]), make_summary())
-        self.assertIn("地合い 中（3/6）", text)
-        self.assertIn("候補 1件", text)
-        self.assertIn("判定 2026-08-31 の引け", text)
 
-    def test_not_a_ranking(self):
-        """並び順に業種順位を使うようになっても、優劣ではないと断り続ける（§2.9）。
+class ZeroDoneTest(unittest.TestCase):
+    """**成立0件の日も配信する**（§6.1）。何も送らないと壊れたのか分からない。"""
 
-        「順位ではありません」とは書けない —— 並びに業種の 5 日順位を実際に使うので、
-        それは事実に反する。断るべきは「その順が成績の良し悪しを表さない」ことの方。
+    def test_states_that_there_is_none(self):
+        text = build_message(None, frame([watch_row()]), summary())
+        self.assertIn("本日の成立はありません", text)
+        self.assertIn("成立 0件", text)
+
+    def test_watch_is_still_listed(self):
+        text = build_message(None, frame([watch_row()]), summary())
+        self.assertIn("2331.T", text)
+        self.assertIn("上昇三角", text)
+
+    def test_empty_both(self):
+        text = build_message(None, None, summary(n_watch=0))
+        self.assertIn("本日の成立はありません", text)
+        self.assertNotIn("■ 監視", text)
+
+
+class WatchTest(unittest.TestCase):
+    def test_done_ticker_is_dropped_from_watch(self):
+        """**同一銘柄が成立していれば監視から外す**（§6.4）。
+
+        5202.T は逆三尊が成立し、上昇三角が未抜けだった（2026-09-10 の実データ）。
+        既に抜けた銘柄を「抜けるのを待つ」側に出すと読み手が混乱する。
         """
-        text = build_message(frame([make_record()]), make_summary())
-        self.assertIn("優劣ではありません", text)
-        self.assertIn("業種の5日リターン順位", text)
-        self.assertIn("売買代金", text)
+        done = frame([done_row("5202.T", "inverse_hs")])
+        watch = frame([watch_row("5202.T", "ascending_triangle"),
+                       watch_row("2331.T", "ascending_triangle")])
+        text = build_message(done, watch, summary())
+        self.assertIn("■ 監視", text)
+        self.assertIn("2331.T", text)
+        watch_part = text.split("■ 監視")[1]
+        self.assertNotIn("5202.T", watch_part)
 
-    def test_e1_skipped_line(self):
-        text = build_message(frame([make_record()]), make_summary(e1_skipped=True, n_pool=1))
-        self.assertIn("E1", text)
-        self.assertIn("未適用", text)
+    def test_capped_at_watch_max(self):
+        watch = frame([watch_row(f"{1000 + i}.T") for i in range(WATCH_MAX + 8)])
+        text = build_message(None, watch, summary())
+        self.assertIn(f"上位 {WATCH_MAX}件", text)
+        self.assertEqual(text.count("［上昇三角］"), WATCH_MAX)
 
-    def test_no_e1_line_on_zero_candidate_day(self):
-        """候補0件の日は E1 の注記を出さない。適用する対象がそもそも無い（§4.2）。"""
-        text = build_message(frame([]), make_summary(n_candidates=0, n_pool=0,
-                                                     e1_skipped=True))
-        self.assertNotIn("未適用", text)
-        self.assertNotIn("母集団", text)
-        self.assertIn("候補 0件", text)
+    def test_streak_shown_only_after_the_first_day(self):
+        first = build_message(None, frame([watch_row(watch_streak=1)]), summary())
+        self.assertNotIn("監視1日目", first)
+        later = build_message(None, frame([watch_row(watch_streak=4)]), summary())
+        self.assertIn("監視4日目", later)
 
-    def test_no_e1_line_when_applied(self):
-        text = build_message(frame([make_record(e1_skipped=False)]),
-                             make_summary(e1_skipped=False, n_pool=25))
-        self.assertNotIn("未適用", text)
+    def test_broken_streak_value_does_not_crash(self):
+        text = build_message(None, frame([watch_row(watch_streak=None)]), summary())
+        self.assertIn("2331.T", text)
 
-    def test_unknown_gauge(self):
-        text = build_message(frame([make_record()]), make_summary(level=None, score=None))
-        self.assertIn("地合い 不明", text)
+    def test_full_watch_count_is_from_the_summary_not_the_shown_rows(self):
+        """見出しは検出した全件（196）で、1枚目に載せた数ではない。"""
+        text = build_message(None, frame([watch_row()]), summary(n_watch=196))
+        self.assertIn("監視 196件", text)
 
 
-class ZeroCandidateTest(unittest.TestCase):
-    """§4.2: 候補0件の日も配信し、落ちた条件を上位3つ添える。"""
+class FallbackTextTest(unittest.TestCase):
+    """この本文が流れるのは描画か送信に失敗した日だけ（§6）。"""
 
-    def test_zero_day_message(self):
-        text = build_message(frame([]), make_summary(n_candidates=0, n_pool=0))
-        self.assertIn("候補 0件", text)
-        self.assertIn("本日の候補はありません", text)
+    def test_fallback_prefix_is_first_line(self):
+        text = build_message(frame([done_row()]), None, summary(), fallback=True)
+        self.assertEqual(text.splitlines()[0], FALLBACK_NOTE)
 
-    def test_zero_day_does_not_mention_conditions(self):
-        """条件名は出さない。19 条件ごと撤去したので、説明する判定が存在しない。"""
-        text = build_message(frame([]), make_summary(n_candidates=0))
-        self.assertIn("本日の候補はありません", text)
-        for cid in ("C1", "E3", "C3"):
-            self.assertNotIn(f"{cid} ", text)
-        self.assertNotIn(" … ", text)
-
-    def test_zero_day_with_none_delivered(self):
-        text = build_message(None, make_summary(n_candidates=0))
-        self.assertIn("候補 0件", text)
-
-    def test_zero_day_without_fail_counts(self):
-        s = make_summary(n_candidates=0)
-        s["fail_counts"] = {}
-        text = build_message(frame([]), s)
-        self.assertIn("本日の候補はありません", text)
+    def test_no_prefix_when_not_a_fallback(self):
+        text = build_message(frame([done_row()]), None, summary())
+        self.assertNotIn(FALLBACK_NOTE, text)
 
 
 class LengthTest(unittest.TestCase):
-    def test_within_limit_and_reports_omission(self):
-        records = [make_record(ticker=f"{1000+i}.T", name="テスト銘柄" * 3)
-                   for i in range(120)]
-        text = build_message(frame(records), make_summary(n_candidates=120))
-        self.assertLessEqual(len(text), MAX_TEXT)
-        self.assertIn("省略しました", text)
-        self.assertIn("ご自身で", text)   # 免責は必ず残る
-
-    def test_normal_size_has_no_omission_note(self):
-        records = [make_record(ticker=f"{1000+i}.T") for i in range(5)]
-        text = build_message(frame(records), make_summary(n_candidates=5))
-        self.assertNotIn("省略しました", text)
+    def test_within_limit(self):
+        watch = frame([watch_row(f"{1000 + i}.T") for i in range(WATCH_MAX)])
+        done = frame([done_row(f"{2000 + i}.T") for i in range(40)])
+        text = build_message(done, watch, summary())
         self.assertLessEqual(len(text), MAX_TEXT)
 
 
@@ -245,31 +208,6 @@ class PushTest(unittest.TestCase):
         self.assertIn("502", r["reason"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class StreakDisplayTest(unittest.TestCase):
-    """連続点灯（docs/SCREENER.md §3.2）はカードの見出しに出す。"""
-
-    def test_first_day_has_no_streak_label(self):
-        text = build_message(frame([make_record()]), make_summary())
-        self.assertNotIn("連続", text.split("並びは")[1])   # 見出しの E1 行は別
-
-    def test_second_day_shows_streak(self):
-        rec = dict(make_record(), streak=2)
-        text = build_message(frame([rec]), make_summary())
-        self.assertIn("（連続2日目）", text)
-
-    def test_broken_streak_value_does_not_crash(self):
-        rec = dict(make_record(), streak=None)
-        text = build_message(frame([rec]), make_summary())
-        self.assertIn("2801.T", text)
-
-
-# EarningsCoverageTest は screen.build_summary ごと撤去した（SCREENER_CLOSING.md）。
-# 決算カバー率は 19 条件の A4 がどれだけ効いたかを見るためのもので、条件が無い今は
-# 計算する相手がいない。既存の要約ファイルに残っている値はそのまま保全している。
 
 
 class _FakeResponse:
@@ -302,23 +240,5 @@ class ImageOnlyDeliveryTest(unittest.TestCase):
         self.assertEqual(calls[0]["data"], {})
 
 
-class FallbackTextTest(unittest.TestCase):
-    def test_fallback_prefix_is_first_line(self):
-        summary = {"delivered_on": "2026-09-04", "asof": "2026-09-03",
-                   "regime_level": "強", "regime_score": 6, "n_evaluated": 1327,
-                   "n_pool": 5, "e1_skipped": True, "fail_counts": {"D2": 1150}}
-        plain = build_message(None, summary)
-        fell = build_message(None, summary, fallback=True)
-        self.assertFalse(plain.startswith(FALLBACK_NOTE))
-        self.assertEqual(fell.splitlines()[0], FALLBACK_NOTE)
-        # 本文そのものは変わらない（先頭の 1 行が足されるだけ）
-        self.assertEqual("\n".join(fell.splitlines()[1:]), plain)
-
-    def test_mismatch_note_appears_when_ledger_was_not_written(self):
-        summary = {"delivered_on": "2026-09-04", "asof": "2026-09-03",
-                   "regime_level": "強", "regime_score": 6, "n_evaluated": 1327,
-                   "n_pool": 5, "e1_skipped": True, "delivered_written": False,
-                   "fail_counts": {"D2": 1150}}
-        self.assertIn(RECORD_MISMATCH_NOTE, build_message(None, summary))
-        summary["delivered_written"] = True
-        self.assertNotIn(RECORD_MISMATCH_NOTE, build_message(None, summary))
+if __name__ == "__main__":
+    unittest.main()
