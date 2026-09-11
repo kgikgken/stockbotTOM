@@ -48,6 +48,7 @@ class ReplayTest(unittest.TestCase):
     def _run(self, tmp, start, end, **kw):
         replay_mod.run(dict(self.ohlcv), self.idx, self.listed, Path(tmp),
                        pd.Timestamp(start), pd.Timestamp(end), K,
+                       min_adv_jpy=0.0, min_price=0.0,
                        sectors={"1234.T": "機械"}, log=lambda *_a: None, **kw)
         return replay_mod.load_table(Path(tmp))
 
@@ -97,7 +98,7 @@ class HoldoutTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             replay_mod.run({"1234.T": df}, df, listed_frame(["1234.T"]), Path(tmp),
                            pd.Timestamp("2026-01-01"), pd.Timestamp("2026-07-01"), K,
-                           log=lambda *_a: None)
+                           min_adv_jpy=0.0, min_price=0.0, log=lambda *_a: None)
             out = replay_mod.load_table(Path(tmp))
             if len(out):
                 inside = out[(out["date"] >= HOLDOUT_WINDOW[0])
@@ -112,7 +113,7 @@ class HoldoutTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             replay_mod.run({"1234.T": df}, df, listed_frame(["1234.T"]), Path(tmp),
                            pd.Timestamp("2026-01-05"), pd.Timestamp("2026-01-30"), K,
-                           log=lambda *_a: None)
+                           min_adv_jpy=0.0, min_price=0.0, log=lambda *_a: None)
             out = replay_mod.load_table(Path(tmp))
             if len(out):
                 # ホールドアウト直前の T は T+20 が切られているので打ち切りになる
@@ -134,9 +135,11 @@ class LookaheadTest(unittest.TestCase):
         short = df[df.index <= cut + pd.Timedelta(days=1)]
         with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
             replay_mod.run({"1234.T": df}, df, listed, Path(a),
-                           pd.Timestamp("2025-04-01"), cut, K, log=lambda *_a: None)
+                           pd.Timestamp("2025-04-01"), cut, K,
+                           min_adv_jpy=0.0, min_price=0.0, log=lambda *_a: None)
             replay_mod.run({"1234.T": short}, short, listed, Path(b),
-                           pd.Timestamp("2025-04-01"), cut, K, log=lambda *_a: None)
+                           pd.Timestamp("2025-04-01"), cut, K,
+                           min_adv_jpy=0.0, min_price=0.0, log=lambda *_a: None)
             full = replay_mod.load_table(Path(a))
             trimmed = replay_mod.load_table(Path(b))
         cols = ["date", "ticker", "pattern", "neckline", "close_t", "breakout_pct",
@@ -234,3 +237,97 @@ class ReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UniverseGateTest(unittest.TestCase):
+    """バックテストの母集団を運用と揃える（docs/BACKTEST.md §2.1・§8 D-5）。
+
+    **数字をここに書かない。** 運用の `Settings` から受け取る設計になっていること
+    （ずれたら再実行が要るので、ずれない形にした）。
+    """
+
+    def _prepared(self, adv_per_day, close=1000.0, n=400):
+        df = series_from([(0, close), (n - 1, close)], n=n)
+        df = df.assign(Volume=np.full(n, adv_per_day / close))
+        return replay_mod._prepared({"1234.T": df}, ["1234.T"], K), df
+
+    def test_turnover_gate_drops_a_thin_name(self):
+        prep, df = self._prepared(adv_per_day=1e8)     # 1億円
+        date_t = df.index[300]
+        kept = replay_mod.universe_at(prep, {"1234.T"}, date_t,
+                                      min_adv_jpy=2e8, min_price=200.0)
+        self.assertEqual(kept, [])
+        loose = replay_mod.universe_at(prep, {"1234.T"}, date_t,
+                                       min_adv_jpy=5e7, min_price=200.0)
+        self.assertEqual(loose, ["1234.T"])
+
+    def test_price_gate_drops_a_low_priced_name(self):
+        prep, df = self._prepared(adv_per_day=1e9, close=150.0)
+        date_t = df.index[300]
+        self.assertEqual(replay_mod.universe_at(prep, {"1234.T"}, date_t,
+                                                min_adv_jpy=2e8, min_price=200.0), [])
+        self.assertEqual(replay_mod.universe_at(prep, {"1234.T"}, date_t,
+                                                min_adv_jpy=2e8, min_price=100.0),
+                         ["1234.T"])
+
+    def test_history_gate(self):
+        prep, df = self._prepared(adv_per_day=1e9)
+        early = df.index[100]                           # 履歴 101 本
+        self.assertEqual(replay_mod.universe_at(prep, {"1234.T"}, early, 2e8, 200.0,
+                                                min_history_bars=250), [])
+
+    def test_gates_use_only_bars_up_to_t(self):
+        """T より後を壊しても、その日のユニバースは変わらない（未来参照の禁止）。"""
+        prep, df = self._prepared(adv_per_day=1e9)
+        date_t = df.index[300]
+        before = replay_mod.universe_at(prep, {"1234.T"}, date_t, 2e8, 200.0)
+        broken = df.copy()
+        broken.iloc[301:] = broken.iloc[301:] * 0.001
+        prep2 = replay_mod._prepared({"1234.T": broken}, ["1234.T"], K)
+        self.assertEqual(replay_mod.universe_at(prep2, {"1234.T"}, date_t, 2e8, 200.0),
+                         before)
+
+
+class AlreadyAtTargetTest(unittest.TestCase):
+    """**b >= 1 は「最初から目標を超えている」**（docs/BACKTEST.md §3.1）。
+
+    `reached_target` はその行では「届いた」ではなく「最初から届いていた」を数える。
+    診断列なので判定には影響しないが、読み違えると危ない。
+    """
+
+    def test_b_at_least_one_means_close_is_at_or_above_target(self):
+        from stockbot.features.pattern import measured_move
+
+        neck, low = 100.0, 90.0
+        height = neck - low
+        for b, expected in [(0.5, False), (1.0, True), (1.5, True)]:
+            close = neck + b * height
+            m = measured_move(neck, close, [low])
+            self.assertEqual(close >= m["target"], expected, f"b={b}")
+
+    def test_column_is_set_from_the_detection(self):
+        df = double_bottom_series()
+        with tempfile.TemporaryDirectory() as tmp:
+            replay_mod.run({"1234.T": df}, df, listed_frame(["1234.T"]), Path(tmp),
+                           pd.Timestamp("2025-03-01"), pd.Timestamp("2025-06-30"), K,
+                           min_adv_jpy=0.0, min_price=0.0, log=lambda *_a: None)
+            out = replay_mod.load_table(Path(tmp))
+        self.assertIn("already_at_target", out.columns)
+        flag = out["already_at_target"].astype(bool)
+        # フラグが立っている行は必ず 終値 >= 目標
+        for _i, r in out[flag].iterrows():
+            self.assertGreaterEqual(float(r["close_t"]), float(r["target"]))
+        for _i, r in out[~flag].iterrows():
+            if pd.notna(r["target"]):
+                self.assertLess(float(r["close_t"]), float(r["target"]))
+
+    def test_report_shows_the_rate(self):
+        df = pd.DataFrame({
+            "date": pd.bdate_range("2021-08-02", periods=4),
+            "r_20": [0.01, -0.01, 0.02, 0.0],
+            "already_at_target": [True, True, False, False],
+            "reached_target": [True, True, False, True],
+        })
+        row = report_mod.summarize_group("x", df)
+        self.assertAlmostEqual(row["already_rate"], 0.5)
+        self.assertIn("既に到達", report_mod.format_table(pd.DataFrame([row]))[0])

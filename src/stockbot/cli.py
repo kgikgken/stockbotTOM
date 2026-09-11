@@ -899,7 +899,9 @@ def step_pattern_replay(cfg: Settings, window: str, include_holdout: bool,
                        listed.get("sector33", pd.Series("", index=listed.index))))
     log(f"[pattern-replay] 窓={window} {start.date()}〜{end.date()} → {out_dir}")
     pattern_replay.run(ohlcv, idx_df, listed, out_dir, start, end, cfg.k,
-                       sectors=sectors, include_holdout=include_holdout, log=log)
+                       min_adv_jpy=cfg.min_adv_jpy, min_price=cfg.min_price,
+                       sectors=sectors, min_history_bars=cfg.min_history_bars,
+                       include_holdout=include_holdout, log=log)
 
 
 def step_pattern_report(cfg: Settings, window: str, log=print) -> None:

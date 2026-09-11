@@ -37,7 +37,7 @@ PATTERN_LABELS = {
 }
 
 GROUP_COLS = ["group", "n", "n_days", "mean_r20", "nw_t", "nw_p",
-              "win_rate", "success_rate", "target_rate",
+              "win_rate", "success_rate", "target_rate", "already_rate",
               "mfe_atr_median", "mae_atr_median"]
 
 
@@ -77,6 +77,10 @@ def summarize_group(name: str, df: pd.DataFrame, lag: int = HORIZON) -> dict:
         "success_rate": _rate(df["success"]) if "success" in df.columns else float("nan"),
         "target_rate": (_rate(df["reached_target"]) if "reached_target" in df.columns
                         else float("nan")),
+        # **T の時点で既に目標を超えていた行の比率**（§3.1）。この比率が高い群では
+        # 上の `target_rate` は「届いた」ではなく「最初から届いていた」を数えている
+        "already_rate": (_rate(df["already_at_target"])
+                         if "already_at_target" in df.columns else float("nan")),
         "mfe_atr_median": (float(df["mfe_atr"].median())
                            if "mfe_atr" in df.columns else float("nan")),
         "mae_atr_median": (float(df["mae_atr"].median())
@@ -155,7 +159,8 @@ def coverage(df: pd.DataFrame, dates: Optional[pd.DatetimeIndex] = None) -> dict
 def format_table(table: pd.DataFrame) -> list[str]:
     """ログに出す行（表のみ。解釈はしない）。"""
     out = [f"{'群':<26}{'件数':>7}{'日数':>7}{'平均r20':>10}{'NW t':>8}"
-           f"{'勝率':>8}{'成功率':>8}{'目標到達':>9}{'MFE/ATR':>9}{'MAE/ATR':>9}"]
+           f"{'勝率':>8}{'成功率':>8}{'目標到達':>9}{'既に到達':>9}"
+           f"{'MFE/ATR':>9}{'MAE/ATR':>9}"]
     for _i, r in table.iterrows():
         def pct(v):
             return "—" if pd.isna(v) else f"{float(v) * 100:.1f}%"
@@ -166,6 +171,6 @@ def format_table(table: pd.DataFrame) -> list[str]:
         out.append(f"{str(r['group']):<26}{int(r['n']):>7}{int(r['n_days']):>7}"
                    f"{num(r['mean_r20'], 4):>10}{num(r['nw_t'], 2):>8}"
                    f"{pct(r['win_rate']):>8}{pct(r['success_rate']):>8}"
-                   f"{pct(r['target_rate']):>9}"
+                   f"{pct(r['target_rate']):>9}{pct(r['already_rate']):>9}"
                    f"{num(r['mfe_atr_median'], 2):>9}{num(r['mae_atr_median'], 2):>9}")
     return out
