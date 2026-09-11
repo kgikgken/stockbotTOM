@@ -12,6 +12,8 @@ from . import _path  # noqa: F401
 from stockbot.features.pattern import (
     ADJACENT_TROUGH_GAP,
     BOX_TOL,
+    _scatter,
+    _slope,
     DOUBLE_BOTTOM_GAP,
     EPSILON_SLOPE,
     EQUAL_TOL,
@@ -742,3 +744,113 @@ class SlopeDistributionTest(unittest.TestCase):
         text = self._lines(df.iloc[:first_hit(df)[0] + 1])
         self.assertNotIn("上辺傾き", text)
         self.assertNotIn("下辺傾き", text)
+
+
+class UpperScatterTest(unittest.TestCase):
+    """上辺の散らばり（docs/PATTERN.md §2.2・§5 D-13）。
+
+    **判定には使わない。表示と記録のためだけの量。** C1 は上辺の傾きだけを制約して
+    散らばりを制約していないので、山 3 点の V 字が ε を通る。それを見えるようにする。
+    """
+
+    def test_only_three_or_more_touches(self):
+        """2 点は NaN。回帰直線が必ず両点を通るので散らばりが定義できない。"""
+        self.assertTrue(np.isnan(_scatter([(0, 100.0), (10, 101.0)])))
+        self.assertTrue(np.isnan(_scatter([(0, 100.0)])))
+        self.assertFalse(np.isnan(_scatter([(0, 100.0), (5, 99.0), (10, 100.0)])))
+
+    def test_measures_deviation_from_the_mean(self):
+        """平均からの最大乖離（%）。`_within` と同じ測り方で ±0.75% と比べられる。"""
+        # 実データの 2331.T: 1241 → 1180.5 → 1227（中央が凹んだ V 字）
+        got = _scatter([(0, 1241.0), (12, 1180.5), (24, 1227.0)])
+        mean = (1241.0 + 1180.5 + 1227.0) / 3
+        self.assertAlmostEqual(got, (mean - 1180.5) / mean * 100, places=9)
+        self.assertGreater(got, BOX_TOL * 100)   # ボックスの基準なら落ちる幅
+
+    def test_flat_line_has_no_scatter(self):
+        self.assertAlmostEqual(_scatter([(0, 100.0), (5, 100.0), (10, 100.0)]), 0.0)
+
+    def test_degenerate_inputs(self):
+        self.assertTrue(np.isnan(_scatter([(0, 100.0), (5, np.nan), (10, 100.0)])))
+        self.assertTrue(np.isnan(_scatter([(0, 0.0), (5, 0.0), (10, 0.0)])))
+
+    def test_v_shaped_top_passes_the_slope_test_but_shows_scatter(self):
+        """**傾きだけでは V 字と水平線を区別できない。** 散らばりが両者を分ける。
+
+        これが D-13 の理由。判定では落とさず、値を出して読み手に見せる。
+        """
+        flat = [(0, 1241.0), (12, 1234.0), (24, 1227.0)]     # 素直な下り
+        vee = [(0, 1241.0), (12, 1180.5), (24, 1227.0)]      # 中央が凹む
+        # **どちらも ε を通る。** 両端が同じなので回帰の傾きがほぼ揃う
+        # （平均が違うぶん比率はわずかにずれるが、桁が同じで符号も同じ）
+        self.assertLess(abs(_slope(flat)), EPSILON_SLOPE)
+        self.assertLess(abs(_slope(vee)), EPSILON_SLOPE)
+        self.assertAlmostEqual(_slope(flat), _slope(vee), places=4)
+        # 散らばりははっきり違う。**ここだけが V 字を分ける**
+        self.assertLess(_scatter(flat), BOX_TOL * 100)
+        self.assertGreater(_scatter(vee), BOX_TOL * 100)
+
+    def test_column_is_present_and_nan_for_reversal(self):
+        """反転系はネックライン点が 2 点以下なので必ず欠損になる。"""
+        df = double_bottom()
+        _t, row = first_hit(df)
+        self.assertIn("upper_scatter", row.index)
+        self.assertTrue(pd.isna(row["upper_scatter"]))
+
+    def test_box_rows_are_always_within_the_box_tolerance(self):
+        """C2 は散らばりで判定しているので、出た行は必ず ±0.75% 以内になる。"""
+        df = ascending_box()
+        t, _row = first_hit(df)
+        out = detect_patterns(df["High"], df["Low"], df["Close"], t, k=K)
+        box = out[out["pattern"] == "ascending_box"]
+        self.assertEqual(len(box), 1)
+        scatter = float(box["upper_scatter"].iloc[0])
+        if not np.isnan(scatter):       # 山が 3 点のときだけ値が出る
+            self.assertLessEqual(scatter, BOX_TOL * 100)
+
+
+class ScatterLoggingTest(unittest.TestCase):
+    """散らばりの日次記録（docs/PATTERN.md §5 D-13）。"""
+
+    def _lines(self, df, tickers=("1234.T",)):
+        from stockbot.cli import step_pattern
+        from stockbot.config import Settings
+
+        universe = pd.DataFrame({"ticker": list(tickers),
+                                 "passes": [True] * len(tickers)})
+        lines = []
+        step_pattern(Settings.from_env(), universe, {t: df for t in tickers},
+                     log=lines.append)
+        return "\n".join(lines)
+
+    def test_counts_three_touch_rows_and_those_over_the_box_tolerance(self):
+        """山 3 点以上の件数と、うち ±0.75% を超えた件数を毎日出す。"""
+        df = ascending_box()          # 山 2 点なので 3 点以上は 0 件
+        t, _row = first_hit(df)
+        text = self._lines(df.iloc[:t + 1])
+        self.assertNotIn("山3点以上", text)    # 該当が無ければ行を出さない
+
+    def test_three_touch_row_is_counted_and_listed(self):
+        # step_pattern は最終足を T にするので、SEARCH_WINDOW + k*2 本より長く要る
+        df = flagged(start=80)        # H L H L H なので上辺が 3 点
+        t, row = first_hit(df)
+        self.assertFalse(pd.isna(row["upper_scatter"]))
+        text = self._lines(df.iloc[:t + 1])
+        self.assertIn("山3点以上: 1/1 件", text)
+        self.assertIn("上辺の散らばり", text)
+        # 山 120 / 119 / 118 は平均から 0.84%。**ボックスの基準なら落ちる幅**
+        self.assertGreater(float(row["upper_scatter"]), BOX_TOL * 100)
+        self.assertIn("±0.75%（BOX 基準）超 1 件", text)
+
+    def test_tolerance_count_is_not_just_the_row_count(self):
+        """**±0.75% 超の件数は「山 3 点以上の件数」とは別物。**
+
+        散らばりが基準内の行では 0 件になる。ここが同じ数になっていたら、
+        しきい値の比較が効いていない。
+        """
+        df = flagged(ups=(120.0, 119.6, 119.2), downs=(112.0, 113.5), start=80)
+        t, row = first_hit(df)
+        self.assertLess(float(row["upper_scatter"]), BOX_TOL * 100)   # 0.334%
+        text = self._lines(df.iloc[:t + 1])
+        self.assertIn("山3点以上: 1/1 件", text)
+        self.assertIn("±0.75%（BOX 基準）超 0 件", text)

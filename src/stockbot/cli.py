@@ -466,6 +466,27 @@ def _log_slopes(label: str, part: pd.DataFrame, log) -> None:
                 # ε 未満 ＝「上向き」ではなく「水平」。C1 が実質ボックスになっていないか
                 line += f" / |傾き| < ε({eps_pct:.1f}%) が {int((v.abs() < eps_pct).sum())} 件"
             log(line)
+        _log_scatter(label, name, sub, log)
+
+
+def _log_scatter(label: str, name: str, sub: pd.DataFrame, log) -> None:
+    """上辺の散らばり（docs/PATTERN.md §2.2・§5 D-13）。**判定には使わない。**
+
+    C1 は上辺の**傾き**だけを制約していて散らばりを制約していないので、山が 3 点
+    あると中央が凹んだ V 字でも ε を通る。**傾きを見ているだけでは V 字と水平線を
+    区別できない**ので、平均からの最大乖離を別に数える。
+
+    ボックスの水平許容 ±0.75%（`BOX_TOL`）と同じ測り方なので、「この C1 はボックスの
+    基準なら落ちる」が読める。**C1 に散らばり条件は足さない**（設計責任者の判断）。
+    """
+    tol_pct = pattern_mod.BOX_TOL * 100
+    v = sub["upper_scatter"].dropna()      # 山 2 点の行は NaN（散らばりが定義できない）
+    if not len(v):
+        return
+    log(f"[pattern] {label}の{name} 山3点以上: {len(v)}/{len(sub)} 件 / "
+        f"上辺の散らばり（平均からの最大乖離）中央 {v.median():.2f}% / "
+        f"最大 {v.max():.2f}% / "
+        f"±{tol_pct:.2f}%（BOX 基準）超 {int((v > tol_pct).sum())} 件")
 
 
 def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
@@ -572,7 +593,10 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
                 log(f"[pattern]     上辺 {r['upper_slope'] * 100:+.3f}%/日 / "
                     f"下辺 {r['lower_slope'] * 100:+.3f}%/日"
                     + ("" if pd.isna(r["pole_pct"]) else
-                       f" / 旗竿 {r['pole_pct']:+.1f}%"))
+                       f" / 旗竿 {r['pole_pct']:+.1f}%")
+                    # 山 3 点以上のときだけ。V 字を水平線と取り違えないための表示
+                    + ("" if pd.isna(r["upper_scatter"]) else
+                       f" / 上辺の散らばり {r['upper_scatter']:.2f}%"))
             log(f"[pattern]     撤退 {r['pattern_low']:.1f} ({r['down_pct']:+.1f}%) / "
                 f"目標 {_num(r['target'])} ({_signed(r['up_pct'])}) / "
                 f"比率 {_num(r['rr'], 2)}")

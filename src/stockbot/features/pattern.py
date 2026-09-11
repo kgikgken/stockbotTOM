@@ -78,6 +78,9 @@ PATTERN_COLS = [
     "upper_slope",  # 上辺の日次傾き（比率）。ε と比べる量
     "lower_slope",  # 下辺の日次傾き（比率）
     "pole_pct",     # 旗竿。5 営業日以内の最大上昇率（%）。フラッグ／ペナントだけ
+    # 上辺のタッチ点が 1 本の水平線に乗っているか（docs/PATTERN.md §2.2「散らばり」）。
+    # **判定には使わない。表示と記録のためだけの量**（§5 D-13）
+    "upper_scatter",
     # 撤退・目標・比率（docs/PATTERN.md §2.3）。**測定目標は文献上の目安であって、
     # 統計的裏付けは調べていない。** 比率を併記して読み手が自分で判断できるようにする
     "pattern_low",  # 撤退の目安。パターンの最安値
@@ -129,6 +132,34 @@ def _tail_extremes(swings: pd.DataFrame, n: int) -> Optional[list]:
 LINE_COLS = ["upper_slope", "lower_slope", "pole_pct"]
 
 
+def _scatter(points: list) -> float:
+    """タッチ点の平均からの最大乖離（%）。**3 点以上のときだけ出す。**
+
+    docs/PATTERN.md §2.2「散らばり」。**判定には使わない。**
+
+    C1 は上辺の**傾き**だけを制約していて、**散らばりを制約していない。** 山が 3 点
+    あると、中央が大きく凹んだ V 字でも回帰の傾きは 0 に近くなり、ε の判定を通る
+    （2026-09-10 の実データで 2331.T が 1241 → 1180.5 → 1227、中央が 4.9% 下、
+    傾き −0.044%/日）。**傾きを見ているだけでは V 字と水平線を区別できない。**
+
+    2 点のときは NaN にする —— 回帰直線が必ず両点を通るので散らばりは定義上 0 で、
+    値を出すと「上辺の移動」（傾き × 間隔）と同じものを別の名前で出すことになる。
+
+    測り方は `_within` と同じ（平均からの最大乖離の比率）。**±0.75%（`BOX_TOL`）と
+    そのまま比べられる**ようにするため —— C2 はこの量で水平さを判定しているので、
+    「C1 のこの行は、ボックスの基準なら落ちる」が読める。
+    """
+    if len(points) < 3:
+        return float("nan")
+    vals = np.asarray([v for _p, v in points], dtype=float)
+    if not np.isfinite(vals).all():
+        return float("nan")
+    mean = float(vals.mean())
+    if mean <= 0:
+        return float("nan")
+    return float(np.max(np.abs(vals - mean)) / mean * 100)
+
+
 def _row(pattern: str, t_pos: int, neckline: float, close_t: float,
          lows: list, highs: list, lines: Optional[dict] = None) -> dict:
     """PATTERN_COLS の 1 行。使わない列は欠損にする。
@@ -152,6 +183,7 @@ def _row(pattern: str, t_pos: int, neckline: float, close_t: float,
         "h1_pos": h1p, "h1": h1, "h2_pos": h2p, "h2": h2, "h3_pos": h3p, "h3": h3,
         "span": int(t_pos - first),
         **{c: np.nan for c in LINE_COLS}, **(lines or {}),
+        "upper_scatter": _scatter(highs),
         "breakout": bool(close_t > neckline),
         **measured_move(neckline, close_t, [v for _p, v in lows]),
     }
