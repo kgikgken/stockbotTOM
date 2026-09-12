@@ -931,15 +931,31 @@ def step_pattern_report(cfg: Settings, window: str, log=print) -> None:
     for line in pattern_report.format_table(pattern_report.by_pattern(df)):
         log(f"[pattern-report] {line}")
 
-    edges = pattern_report.quantile_edges(search if len(search) else df)
+    # **境界は探索窓のものを固定して使う**（BACKTEST.md D-3）。窓ごとに切り直すと
+    # 分位の意味が変わって再現を見たことにならない。確定値をリポジトリに置いてある
+    edges = pattern_report.load_frozen_edges()
+    src = f"固定値 {pattern_report.FROZEN_EDGES_PATH}"
+    if edges is None:
+        if window != "search":
+            # **黙って切り直さない。** 切り直すと D-3 違反になる
+            log(f"[pattern-report] 分位の境界（{pattern_report.FROZEN_EDGES_PATH}）が"
+                "無いので抜け幅の表は出さない。確認窓・ホールドアウトは探索窓の境界を"
+                "使う決まり（BACKTEST.md D-3）")
+            return
+        edges = pattern_report.quantile_edges(search if len(search) else df)
+        src = "この窓（固定値が無いので新規に作成）"
     if edges is None:
         log("[pattern-report] 抜け幅の分位を作れない（件数不足）")
         return
-    src = "探索窓" if len(search) else "この窓"
-    log(f"[pattern-report] --- 抜け幅 b の5分位（検定6〜10・境界は{src}から）---")
+    log(f"[pattern-report] --- 抜け幅 b の5分位（検定6〜10・境界は{src}）---")
     for line in pattern_report.format_table(
             pattern_report.by_breakout_quantile(df, edges)):
         log(f"[pattern-report] {line}")
+    if window != "search":
+        # **判定対象は Q1 だけ**（設計責任者・2026-09-12）。探索で落ちた群を確認窓で
+        # 再度判定すると検定が増える。他の 9 群は集計するが判定には使わない
+        log("[pattern-report] **判定対象は Q1（b <= 0.100）のみ。** 他の9群は集計だけで"
+            "判定に使わない（探索で落ちた群を再判定すると検定が増える）")
     log("[pattern-report] 主指標は平均r20とNW t。勝率・成功率・目標到達は診断で、"
         "判定には使わない（BACKTEST.md D-2）")
 
