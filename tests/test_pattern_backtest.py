@@ -331,3 +331,54 @@ class AlreadyAtTargetTest(unittest.TestCase):
         row = report_mod.summarize_group("x", df)
         self.assertAlmostEqual(row["already_rate"], 0.5)
         self.assertIn("既に到達", report_mod.format_table(pd.DataFrame([row]))[0])
+
+
+class FrozenEdgesTest(unittest.TestCase):
+    """分位の境界は探索窓のものを固定して使う（docs/BACKTEST.md D-3）。
+
+    **窓ごとに切り直すと分位の意味が変わり、再現を見たことにならない。**
+    Actions の cache は窓ごとに分かれていて期限もあるので、確定値をリポジトリに置く。
+    """
+
+    def test_frozen_file_exists_and_has_five_groups(self):
+        edges = report_mod.load_frozen_edges()
+        self.assertIsNotNone(edges, "探索窓の境界が固定されていない")
+        self.assertEqual(len(edges), report_mod.N_QUANTILES + 1)
+        self.assertEqual(edges[0], -np.inf)
+        self.assertEqual(edges[-1], np.inf)
+
+    def test_frozen_edges_are_increasing(self):
+        edges = report_mod.load_frozen_edges()
+        self.assertTrue(all(a < b for a, b in zip(edges, edges[1:])))
+
+    def test_frozen_q1_boundary_is_the_reported_one(self):
+        """Q1 の上端は探索窓 2 回目で報告した 0.100（判定対象の群の定義）。"""
+        self.assertAlmostEqual(float(report_mod.load_frozen_edges()[1]), 0.100, places=9)
+
+    def test_missing_file_returns_none_not_a_guess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(report_mod.load_frozen_edges(Path(tmp) / "nope.json"))
+
+    def test_malformed_file_returns_none(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "edges.json"
+            bad.write_text("{ broken", encoding="utf-8")
+            self.assertIsNone(report_mod.load_frozen_edges(bad))
+            bad.write_text(json.dumps({"edges": [None, 1.0, None]}), encoding="utf-8")
+            self.assertIsNone(report_mod.load_frozen_edges(bad))   # 要素数が違う
+
+    def test_frozen_edges_reproduce_the_search_window_groups(self):
+        """固定値で切った群が、探索窓で作った境界の群と一致する。"""
+        rng = np.random.default_rng(7)
+        n = 500
+        df = pd.DataFrame({
+            "date": np.repeat(pd.bdate_range("2021-08-02", periods=n // 2), 2),
+            "r_20": rng.normal(0, 0.05, n),
+            "breakout_h": rng.uniform(-0.2, 2.0, n),
+        })
+        edges = report_mod.load_frozen_edges()
+        table = report_mod.by_breakout_quantile(df, edges)
+        self.assertEqual(len(table), report_mod.N_QUANTILES)
+        self.assertEqual(int(table["n"].sum()), n)     # 取りこぼしも重複も無い

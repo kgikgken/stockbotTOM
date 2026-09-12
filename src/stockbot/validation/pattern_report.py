@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -103,6 +105,37 @@ def by_pattern(df: pd.DataFrame, lag: int = HORIZON) -> pd.DataFrame:
                             df[df["pattern"] == p] if len(df) else df, lag)
             for p in TESTED_PATTERNS]
     return pd.DataFrame(rows)[GROUP_COLS]
+
+
+# 探索窓で作った分位の境界を固定したファイル（docs/BACKTEST.md §4.2・D-3）。
+# **確認窓とホールドアウトはこれをそのまま使う。** 窓ごとに切り直すと分位の意味が
+# 変わって再現を見たことにならない。Actions の cache は窓ごとに分かれていて期限も
+# あるので、**リポジトリに置いて確定値にしてある**
+FROZEN_EDGES_PATH = Path("data/reference/pattern_quantile_edges.json")
+
+
+def load_frozen_edges(path: Optional[Path] = None) -> Optional[np.ndarray]:
+    """固定した分位の境界を読む。無ければ None。
+
+    JSON の `edges` は両端が null（±inf）の 6 要素。
+    """
+    path = Path(path) if path is not None else FROZEN_EDGES_PATH
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = data["edges"]
+    except (OSError, ValueError, KeyError):
+        return None
+    if not isinstance(raw, list) or len(raw) != N_QUANTILES + 1:
+        return None
+    out = []
+    for i, v in enumerate(raw):
+        if v is None:
+            out.append(-np.inf if i == 0 else np.inf)
+        else:
+            out.append(float(v))
+    return np.asarray(out, dtype=float)
 
 
 def quantile_edges(df: pd.DataFrame, value: str = "breakout_h",
