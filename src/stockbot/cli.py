@@ -57,7 +57,7 @@ from .notify import line_send, message
 from .render import context as render_context
 from .render import render as render_images_mod
 from .screener import pattern_record, record, resolver
-from .validation import pattern_replay, pattern_report
+from .validation import pattern_exit, pattern_replay, pattern_report
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -904,6 +904,78 @@ def step_pattern_replay(cfg: Settings, window: str, include_holdout: bool,
                        include_holdout=include_holdout, log=log)
 
 
+def step_pattern_exit(cfg: Settings, window: str, include_holdout: bool,
+                      log=print) -> None:
+    """ATR 基準の出口を当てて集計する（docs/BACKTEST.md §10）。
+
+    **検出はやり直さない。** 保存済みの再生結果（`cli pattern-replay` の出力）に
+    T+1..T+20 の四本値を当てるだけ。
+
+    出すものは 2 つ。**A は記述統計（検定なし）、B が検定 1 件**（倍率 2.0 のみ）。
+
+    **ホールドアウトは `--include-holdout` を明示したときだけ**（CLAUDE.md の絶対
+    規則）。フラグが無ければ四本値を物理的に打ち切る —— 探索窓の末尾の T は
+    T+20 でホールドアウト側のバーに届く。
+    """
+    if window == "holdout" and not include_holdout:
+        log("[pattern-exit] ホールドアウトは --include-holdout を明示したときだけ走る"
+            "（CLAUDE.md の絶対規則）")
+        return
+    base = cfg.data_dir / "pattern_replay"
+    replay = pattern_replay.load_table(base / window)
+    cov = pattern_report.coverage(replay)
+    log(f"[pattern-exit] 窓={window} 成立 {cov['n_rows']}件 / 評価日 {cov['n_days']}日")
+    if cov["n_rows"] == 0:
+        log("[pattern-exit] 行が無い（先に cli pattern-replay を実行）")
+        return
+    log(f"[pattern-exit] カバーした期間: {cov['first'].date()}〜{cov['last'].date()}")
+
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    if not include_holdout:
+        ohlcv = pattern_exit.truncate_before_holdout(ohlcv)
+    table = pattern_exit.run(replay, ohlcv, log=log)
+    if len(table) == 0:
+        log("[pattern-exit] 出口を当てられる行が無い")
+        return
+    out_dir = cfg.data_dir / "pattern_exit"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = pattern_exit.exit_path(out_dir, window)
+    table.to_csv(path, index=False, compression="gzip")
+    log(f"[pattern-exit] 書き出し {len(table)}行 → {path}")
+
+    log(f"[pattern-exit] 検定 {pattern_exit.N_TESTS_TOTAL} 件"
+        f"（既存 {pattern_report.N_TESTS} 件 + ATR×{pattern_exit.ATR_MULT:.1f} の 1 件）。"
+        "A の記述統計は検定に数えない。これ以上増やさない")
+    log("[pattern-exit] --- A. atr_t ÷ 終値[T] の分布（検定なし・判定に使わない）---")
+    for line in pattern_exit.format_ratio_stats(
+            window, pattern_exit.atr_ratio_stats(table)):
+        log(f"[pattern-exit] {line}")
+
+    n_cens = int(table["censored"].astype(bool).sum())
+    n_below = int(table["entry_below_stop"].fillna(False).astype(bool).sum())
+    n_above = int(table["entry_above_target"].fillna(False).astype(bool).sum())
+    n_already = int(table["already_at_target"].fillna(False).astype(bool).sum())
+    log(f"[pattern-exit] 母数 {len(table)}件 / 評価窓が 20 本に満たない行 {n_cens}件 "
+        f"/ 寄り付きが既に撤退ライン割れ {n_below}件 "
+        f"/ 寄り付きが既に測定目標超え {n_above}件（うち T 時点で既に到達 {n_already}件）")
+
+    rows = [pattern_exit.summarize_exit(
+        f"ATR×{pattern_exit.ATR_MULT:.1f}（検定11）", table, "atr2")]
+    rows.append(pattern_exit.summarize_exit("参考: 測定目標（全行）", table, "tgt"))
+    not_already = table[~table["already_at_target"].fillna(False).astype(bool)]
+    rows.append(pattern_exit.summarize_exit(
+        "参考: 測定目標（既に到達を除く）", not_already, "tgt"))
+    log("[pattern-exit] --- B. 出口別の成績 ---")
+    for line in pattern_exit.format_exit_table(
+            pd.DataFrame(rows)[pattern_exit.EXIT_GROUP_COLS]):
+        log(f"[pattern-exit] {line}")
+    log("[pattern-exit] **判定対象は ATR×2.0 の行だけ（検定1件）。** 参考の 2 行は"
+        "診断で、判定には使わない（BACKTEST.md §10）")
+    log("[pattern-exit] 平均損益は**ベンチマークを引いていない素のリターン**である"
+        "（r20 とは別物）。約定は指定価格ちょうどで、手数料もスリッページも見ていない")
+
+
 def step_pattern_report(cfg: Settings, window: str, log=print) -> None:
     """探索の集計を出す（docs/BACKTEST.md §4・§6）。**表のみ。解釈はしない。**
 
@@ -966,7 +1038,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
                                        "references", "universe", "features", "pattern",
                                        "resolve", "notify", "refetch-recent-splits",
-                                       "pattern-replay", "pattern-report"])
+                                       "pattern-replay", "pattern-report", "pattern-exit"])
     ap.add_argument("--window", choices=list(PATTERN_WINDOWS), default="search",
                     help="バックテストの窓（docs/BACKTEST.md §1）")
     # **ホールドアウトはこれを明示したときだけ**（CLAUDE.md の絶対規則）
@@ -1003,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
             step_pattern_replay(cfg, args.window, args.include_holdout, log)
         elif args.command == "pattern-report":
             step_pattern_report(cfg, args.window, log)
+        elif args.command == "pattern-exit":
+            step_pattern_exit(cfg, args.window, args.include_holdout, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":
