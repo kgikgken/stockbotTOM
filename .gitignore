@@ -20,3 +20,6 @@ data-dryrun/
 # バックテストの中間出力（docs/BACKTEST.md）。日別に肥大するので git に入れない
 data/pattern_replay/
 data-dryrun/pattern_replay/
+# ATR 基準の出口の中間出力（docs/BACKTEST.md §10）。再生結果から作り直せるので入れない
+data/pattern_exit/
+data-dryrun/pattern_exit/

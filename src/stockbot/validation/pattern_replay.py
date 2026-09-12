@@ -320,6 +320,14 @@ def run(ohlcv: Dict[str, pd.DataFrame], idx_ohlcv: pd.DataFrame, listed: pd.Data
         return
 
     log(f"[pattern-replay] {dates[0].date()}〜{dates[-1].date()} {len(dates)}営業日")
+
+    # **全日ぶん揃っていれば何もしない。** スイング表の作成（全銘柄）だけで数分かかる
+    # ので、集計や出口の検証（§10）だけを回したいときに毎回それを払わないで済む
+    todo = [d for d in dates if not day_path(output_dir, d).exists()]
+    if not todo:
+        log(f"[pattern-replay] {len(dates)}日ぶんすべて保存済み。再生をスキップする")
+        return
+
     all_tickers = sorted(t for t in ohlcv if t != "__IDX__")
     prepared = _prepared(ohlcv, all_tickers, k)
     log(f"[pattern-replay] スイング表と ATR を用意: {len(prepared)}/{len(all_tickers)} 銘柄")

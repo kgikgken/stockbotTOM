@@ -92,10 +92,22 @@ jobs:
         run: |
           python -m stockbot.cli pattern-report --window "${{ github.event.inputs.window }}"
 
+      # docs/BACKTEST.md §10。**検出はやり直さない** —— 保存済みの再生結果に
+      # T+1..T+20 の四本値を当てるだけ。A（記述統計）と B（ATR×2・検定1件）を
+      # 1 回の実行でまとめて出す
+      - name: Exit (ATR)
+        if: always()
+        run: |
+          python -m stockbot.cli pattern-exit \
+            --window "${{ github.event.inputs.window }}" \
+            ${{ github.event.inputs.include_holdout == 'true' && '--include-holdout' || '' }}
+
       - name: Upload tables
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pattern-backtest-${{ github.event.inputs.window }}-${{ github.run_id }}
-          path: data/pattern_replay/${{ github.event.inputs.window }}
+          path: |
+            data/pattern_replay/${{ github.event.inputs.window }}
+            data/pattern_exit
           if-no-files-found: ignore
