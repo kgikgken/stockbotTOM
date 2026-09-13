@@ -61,15 +61,17 @@ jobs:
           restore-keys: |
             store-v2-
 
-      # v2: 1 回目はユニバースが運用と違っていた（BACKTEST.md §7 Q-2）。世代を上げて
-      # 1 回目の日別ファイルを「済み」として拾わせない（中断再開ロジックが拾ってしまう）
+      # 世代（v2 → v3）は**保存する列が変わったときに上げる**。中断再開ロジックが
+      # 「その日はもうある」で古い形のファイルを拾ってしまうため。
+      # v2: ユニバースを運用と揃えた（BACKTEST.md §7 Q-2）
+      # v3: 極値（t_pos・l1..l3）を保存するようにした（§11 の撤退基準に要る）
       - name: Restore backtest output
         uses: actions/cache@v4
         with:
           path: data/pattern_replay
-          key: pattern-replay-v2-${{ github.event.inputs.window }}-${{ github.run_id }}
+          key: pattern-replay-v3-${{ github.event.inputs.window }}-${{ github.run_id }}
           restore-keys: |
-            pattern-replay-v2-${{ github.event.inputs.window }}-
+            pattern-replay-v3-${{ github.event.inputs.window }}-
 
       - name: Tests
         run: python -m unittest discover -s tests -t .
@@ -99,6 +101,15 @@ jobs:
         if: always()
         run: |
           python -m stockbot.cli pattern-exit \
+            --window "${{ github.event.inputs.window }}" \
+            ${{ github.event.inputs.include_holdout == 'true' && '--include-holdout' || '' }}
+
+      # docs/BACKTEST.md §11。**最後の探索。** 撤退基準の 3 案（S1/S2/S3）を
+      # 現行（パターン最安値）と比べる。検出はやり直さない
+      - name: Stop levels
+        if: always()
+        run: |
+          python -m stockbot.cli pattern-stop \
             --window "${{ github.event.inputs.window }}" \
             ${{ github.event.inputs.include_holdout == 'true' && '--include-holdout' || '' }}
 
