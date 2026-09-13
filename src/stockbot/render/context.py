@@ -40,6 +40,12 @@ NECKLINE_LABELS = {"double_bottom": "ネックライン", "triple_bottom": "ネ�
 DEFAULT_NECKLINE_LABEL = "上値抵抗線"
 
 TARGET_NOTE = "測定目標は文献上の目安で、統計的な裏付けは調べていません。"
+# 利確の目安（1段目）の倍率（§6.2）。**表示だけ。** 判定・記録・並び順には使わない。
+# 記録の reached_target は**測定目標**が基準で、こちらとは別物（§6.6）
+FIRST_TAKE_ATR_MULT = 1.0
+FIRST_TAKE_NOTE = ("利確の目安（1段目）は終値+ATR×1で出した運用上の目安です。"
+                   "文献値でも検証済みでもありません。記録の判定には使っていません"
+                   "（記録は測定目標が基準）。")
 NO_DONE_NOTE = "本日の成立はありません。"
 # 注記は HTML にそのまま入る。**Markdown の強調記号を書かない**（文字として出る）
 WATCH_NOTE = ("監視は形が揃って上抜けを待っている銘柄です。記録には残しません。"
@@ -72,6 +78,21 @@ def _signed_pct(value, digits: int = 1) -> str:
 def _num(value, digits: int = 2) -> str:
     v = _f(value)
     return "—" if v is None else f"{v:,.{digits}f}"
+
+
+def _signed_yen(value) -> str:
+    """円建ての差額。**符号を必ず付ける**（株数計算で向きを間違えないため。§6.2）。"""
+    v = _f(value)
+    return "—" if v is None else f"{v:+,.1f}"
+
+
+def _atr_text(atr: Optional[float], close: Optional[float]) -> str:
+    """ATR を円と終値比 % で出す（§6.2）。**表示だけ。判定には使わない。**"""
+    if atr is None:
+        return "—"
+    if close is None or close <= 0:
+        return f"{atr:,.1f}円"
+    return f"{atr:,.1f}円 / {atr / close * 100:.1f}%"
 
 
 def _extremes(row, keys) -> list:
@@ -121,6 +142,11 @@ def build_card(row, watch: bool = False) -> dict:
     pattern = str(row.get("pattern") or "")
     close = _f(row.get("close_t"))
     scatter = _f(row.get("upper_scatter"))
+    # **既存の記録から計算するだけ**（§6.2）。新しいデータ源は足さない
+    atr = _f(row.get("atr_t"))
+    stop = _f(row.get("pattern_low"))
+    first_take = (None if (atr is None or close is None)
+                  else close + FIRST_TAKE_ATR_MULT * atr)
     return {
         "pattern": pattern,
         "pattern_label": PATTERN_LABELS.get(pattern, pattern),
@@ -134,6 +160,16 @@ def build_card(row, watch: bool = False) -> dict:
         "breakout": _signed_pct(row.get("breakout_pct"), 2),
         "stop": _yen(row.get("pattern_low")),
         "stop_gap": _signed_pct(row.get("down_pct")),
+        # **円建ての差額**（1 株あたりの想定損失）。株数計算に使う（§6.2）
+        "stop_yen": ("—" if (stop is None or close is None)
+                     else _signed_yen(stop - close)),
+        # ATR は円と終値比 % の両方。**判定にも並び順にも使わない**
+        "atr": _atr_text(atr, close),
+        # 利確の目安（1段目）。**測定目標とは別物**。記録の reached_target は測定目標が基準
+        "first_take": _yen(first_take),
+        "first_take_yen": ("—" if atr is None
+                           else _signed_yen(FIRST_TAKE_ATR_MULT * atr)),
+        "first_take_mult": f"ATR×{FIRST_TAKE_ATR_MULT:.0f}",
         "target": _yen(row.get("target")),
         "target_gap": _signed_pct(row.get("up_pct")),
         "rr": _num(row.get("rr")),
@@ -232,6 +268,7 @@ def build_context(delivered: Optional[pd.DataFrame], watch: Optional[pd.DataFram
         "breakdown_done": sum(b["done"] for b in breakdown),
         "breakdown_watch": sum(b["watch"] for b in breakdown),
         "target_note": TARGET_NOTE,
+        "first_take_note": FIRST_TAKE_NOTE,
         "watch_note": WATCH_NOTE,
         "sector_note": SECTOR_NOTE,
         "disclaimer": DISCLAIMER,

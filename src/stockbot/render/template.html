@@ -56,6 +56,9 @@
   .val.stop .v { color: var(--warn); }
   .val.target { border-color: #c6ddcd; background: #f4faf6; }
   .val.target .v { color: var(--ok); }
+  /* 利確の目安（1段目）は測定目標と**別物**。枠線を破線にして「文献値ではない」を見た目でも分ける */
+  .val.firsttake { border-style: dashed; border-color: #cfd4da; background: #fafbfc; }
+  .val.firsttake .k .note { font-weight: 700; color: var(--warn); margin-left: 4px; }
   .row { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); }
   .row .em { color: var(--ink); font-weight: 700; }
   .row .warn { color: var(--warn); font-weight: 700; }
@@ -128,11 +131,16 @@
     </div>
     <div class="val stop">
       <div class="k">撤退の目安</div><div class="v">{{ c.stop }}円</div>
-      <div class="g">終値から {{ c.stop_gap }}</div>
+      <div class="g">終値から {{ c.stop_yen }}円（{{ c.stop_gap }}）</div>
     </div>
     <div class="val target">
       <div class="k">測定目標（文献上の目安）</div><div class="v">{{ c.target }}円</div>
       <div class="g">終値から {{ c.target_gap }}</div>
+    </div>
+    <div class="val firsttake">
+      <div class="k">利確の目安・1段目（{{ c.first_take_mult }}）<span class="note">運用上の目安</span></div>
+      <div class="v">{{ c.first_take }}円</div>
+      <div class="g">終値から {{ c.first_take_yen }}円・文献値でも検証済みでもない</div>
     </div>
     <div class="val">
       <div class="k">比率（目標÷撤退）</div><div class="v">{{ c.rr }}</div>
@@ -142,6 +150,7 @@
   {{ extremes("谷", c.troughs) }}
   {{ extremes("山", c.peaks) }}
   <div class="row">
+    <span>ATR <span class="em">{{ c.atr }}</span></span>
     <span>20日平均売買代金 <span class="em">{{ c.adv }}</span></span>
     {% if c.scatter %}<span>上辺の散らばり
       <span class="scatter{% if c.scatter_wide %} wide{% endif %}">{{ c.scatter }}</span></span>{% endif %}
@@ -176,7 +185,7 @@
   {% endif %}
 
   <div class="foot">
-    {{ ctx.target_note }}<br>{{ ctx.watch_note }}<br>{{ ctx.sector_note }}<br>{{ ctx.disclaimer }}
+    {{ ctx.target_note }}<br>{{ ctx.first_take_note }}<br>{{ ctx.watch_note }}<br>{{ ctx.sector_note }}<br>{{ ctx.disclaimer }}
   </div>
 </div>
 
