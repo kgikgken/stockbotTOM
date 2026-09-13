@@ -57,7 +57,7 @@ from .notify import line_send, message
 from .render import context as render_context
 from .render import render as render_images_mod
 from .screener import pattern_record, record, resolver
-from .validation import pattern_exit, pattern_replay, pattern_report
+from .validation import pattern_exit, pattern_replay, pattern_report, pattern_stop
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -976,6 +976,62 @@ def step_pattern_exit(cfg: Settings, window: str, include_holdout: bool,
         "（r20 とは別物）。約定は指定価格ちょうどで、手数料もスリッページも見ていない")
 
 
+def step_pattern_stop(cfg: Settings, window: str, include_holdout: bool,
+                      log=print) -> None:
+    """撤退基準の 3 案を当てて集計する（docs/BACKTEST.md §11）。**最後の探索。**
+
+    **検出はやり直さない。** 保存済みの再生結果に T+1..T+20 の四本値を当てるだけ。
+    撤退ラインは保存済みの極値（`l1..l3` とその位置）から引き直す。
+
+    **ホールドアウトは `--include-holdout` を明示したときだけ**（CLAUDE.md の絶対規則）。
+    """
+    if window == "holdout" and not include_holdout:
+        log("[pattern-stop] ホールドアウトは --include-holdout を明示したときだけ走る"
+            "（CLAUDE.md の絶対規則）")
+        return
+    base = cfg.data_dir / "pattern_replay"
+    replay = pattern_replay.load_table(base / window)
+    cov = pattern_report.coverage(replay)
+    log(f"[pattern-stop] 窓={window} 成立 {cov['n_rows']}件 / 評価日 {cov['n_days']}日")
+    if cov["n_rows"] == 0:
+        log("[pattern-stop] 行が無い（先に cli pattern-replay を実行）")
+        return
+    log(f"[pattern-stop] カバーした期間: {cov['first'].date()}〜{cov['last'].date()}")
+
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    if not include_holdout:
+        ohlcv = pattern_exit.truncate_before_holdout(ohlcv)
+    table = pattern_stop.run(replay, ohlcv, log=log)
+    if len(table) == 0:
+        log("[pattern-stop] 撤退基準を当てられる行が無い")
+        return
+    out_dir = cfg.data_dir / "pattern_exit"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"pattern_stop_{window}.csv.gz"
+    table.to_csv(path, index=False, compression="gzip")
+    log(f"[pattern-stop] 書き出し {len(table)}行 → {path}")
+
+    log(f"[pattern-stop] 検定 {pattern_stop.N_TESTS_TOTAL} 件"
+        f"（既存 11 件 + 撤退基準 {pattern_stop.N_TESTS_HERE} 件）。これ以上増やさない")
+    log("[pattern-stop] 利確は測定目標のみ（ATR 基準は使わない）。"
+        "評価窓 T+1..T+20 / エントリー Open[T+1] / 同日は撤退（BACKTEST.md §11）")
+
+    chk = pattern_stop.check_positions(replay, table)
+    n_cens = int(table["censored"].astype(bool).sum())
+    log(f"[pattern-stop] 母数 {len(table)}件 / 評価窓が 20 本に満たない行 {n_cens}件 "
+        f"/ S1 が現行より下 {chk['s1_below_low']}件（0 が正常）"
+        f" / S2 が終値[T] より上 {chk['s2_above_close']}件（0 が正常）")
+
+    log("[pattern-stop] --- 撤退基準別の成績 ---")
+    for line in pattern_stop.format_stop_table(pattern_stop.by_variant(table)):
+        log(f"[pattern-stop] {line}")
+    log("[pattern-stop] **判定対象は S1・S2・S3 の 3 行（検定12〜14）。** 現行の行は"
+        "比較の基準で、判定に使わない（BACKTEST.md §11）")
+    log("[pattern-stop] 平均損益は**ベンチマークを引いていない素のリターン**である"
+        "（r20 とは別物）。撤退距離は終値[T] 基準の中央値")
+
+
 def step_pattern_report(cfg: Settings, window: str, log=print) -> None:
     """探索の集計を出す（docs/BACKTEST.md §4・§6）。**表のみ。解釈はしない。**
 
@@ -1038,7 +1094,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("command", choices=["daily", "listed", "fetch", "index", "backfill",
                                        "references", "universe", "features", "pattern",
                                        "resolve", "notify", "refetch-recent-splits",
-                                       "pattern-replay", "pattern-report", "pattern-exit"])
+                                       "pattern-replay", "pattern-report", "pattern-exit",
+                                       "pattern-stop"])
     ap.add_argument("--window", choices=list(PATTERN_WINDOWS), default="search",
                     help="バックテストの窓（docs/BACKTEST.md §1）")
     # **ホールドアウトはこれを明示したときだけ**（CLAUDE.md の絶対規則）
@@ -1077,6 +1134,8 @@ def main(argv: list[str] | None = None) -> int:
             step_pattern_report(cfg, args.window, log)
         elif args.command == "pattern-exit":
             step_pattern_exit(cfg, args.window, args.include_holdout, log)
+        elif args.command == "pattern-stop":
+            step_pattern_stop(cfg, args.window, args.include_holdout, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":

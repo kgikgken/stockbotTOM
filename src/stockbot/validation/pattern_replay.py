@@ -61,6 +61,10 @@ SUFFIX = ".csv.gz"
 # 記録と突き合わせられるようにするため
 DETECT_COLS = [
     "date", "ticker", "pattern",
+    # T の位置と谷のタッチ点（docs/BACKTEST.md §11）。**撤退基準の検証に要る** ——
+    # 直近の谷（S1）と下値支持線（S3）は極値の位置が無いと引けない。
+    # `t_pos` と `l*_pos` は**同じ銘柄の同じ配列上の位置**なので、そのまま回帰に使える
+    "t_pos", "l1_pos", "l1", "l2_pos", "l2", "l3_pos", "l3",
     "neckline", "close_t", "atr_t", "breakout_pct", "breakout_h", "span",
     "pattern_low", "height", "target", "up_pct", "down_pct", "rr", "breakeven_win_rate",
     "upper_slope", "lower_slope", "pole_pct", "upper_scatter",
