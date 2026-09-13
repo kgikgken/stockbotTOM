@@ -11,7 +11,9 @@ import numpy as np
 import pandas as pd
 
 from . import _path  # noqa: F401
+from stockbot.render import context as render_context
 from stockbot.render.context import (
+    FIRST_TAKE_NOTE,
     NO_DONE_NOTE,
     PATTERN_LABELS,
     PATTERN_ORDER,
@@ -36,7 +38,7 @@ def row(ticker="5202.T", pattern="inverse_hs", **kw):
         "h2_date": pd.Timestamp("2026-09-01"), "h2": 493.0,
         "h3_date": pd.NaT, "h3": np.nan,
         "upper_slope": np.nan, "lower_slope": np.nan, "pole_pct": np.nan,
-        "upper_scatter": np.nan,
+        "upper_scatter": np.nan, "atr_t": 10.4,
         "adv_jpy": 5.2e8, "earnings_days": np.nan, "earnings_unknown": True,
     }
     base.update(kw)
@@ -207,6 +209,50 @@ class CardTest(unittest.TestCase):
         self.assertEqual(c["rr"], "—")
         self.assertEqual(c["adv"], "—")
 
+    def test_atr_in_yen_and_percent_of_close(self):
+        """ATR は円と終値比 % の両方（§6.2）。**表示のみ。**"""
+        self.assertEqual(build_card(pd.Series(row()))["atr"], "10.4円 / 2.1%")
+
+    def test_atr_falls_back_to_yen_without_a_close(self):
+        self.assertEqual(build_card(pd.Series(row(close_t=np.nan)))["atr"], "10.4円")
+
+    def test_atr_missing_is_a_dash(self):
+        self.assertEqual(build_card(pd.Series(row(atr_t=np.nan)))["atr"], "—")
+
+    def test_stop_carries_yen_as_well_as_percent(self):
+        """撤退ラインは円建ての差額も出す —— **株数計算に使う**（§6.2）。"""
+        c = build_card(pd.Series(row()))
+        self.assertEqual(c["stop_yen"], "-17.0")
+        self.assertEqual(c["stop_gap"], "-3.4%")
+
+    def test_stop_yen_is_a_dash_without_a_close(self):
+        self.assertEqual(build_card(pd.Series(row(close_t=np.nan)))["stop_yen"], "—")
+
+    def test_first_take_is_close_plus_one_atr(self):
+        """利確の目安（1段目）は終値 + ATR×1（§6.2）。**測定目標とは別物。**"""
+        c = build_card(pd.Series(row()))
+        self.assertEqual(c["first_take"], "505.4")
+        self.assertEqual(c["first_take_yen"], "+10.4")
+        self.assertEqual(c["first_take_mult"], "ATR×1")
+
+    def test_first_take_multiplier_is_one(self):
+        """**倍率は 1.0。** 判定にも記録にも使わないが、勝手に動かさない（§6.7）。"""
+        self.assertEqual(render_context.FIRST_TAKE_ATR_MULT, 1.0)
+
+    def test_first_take_is_a_dash_without_atr(self):
+        c = build_card(pd.Series(row(atr_t=np.nan)))
+        self.assertEqual(c["first_take"], "—")
+        self.assertEqual(c["first_take_yen"], "—")
+
+    def test_first_take_is_not_the_measured_target(self):
+        """**記録の reached_target は測定目標が基準。** カード上で別物と分かること。"""
+        c = build_card(pd.Series(row()))
+        self.assertNotEqual(c["first_take"], c["target"])
+        note = render_context.FIRST_TAKE_NOTE
+        self.assertIn("運用上の目安", note)
+        self.assertIn("文献値でも検証済みでもありません", note)
+        self.assertIn("測定目標", note)
+
 
 class BreakdownTest(unittest.TestCase):
     """2枚目の内訳（§6.3）。表の合計は表の行から出す（食い違わせない）。"""
@@ -251,6 +297,21 @@ class HtmlTest(unittest.TestCase):
         html = self._html(frame([row()]), frame([row("2.T", "ascending_triangle")]))
         body = html.split('id="page1"')[1]
         self.assertNotIn("**", body)
+
+    def test_card_shows_atr_stop_yen_and_first_take(self):
+        """追加した 3 項目が実際にページに出る（§6.2）。"""
+        html = self._html(frame([row()]), None)
+        for token in ("ATR", "10.4円 / 2.1%", "-17.0円", "505.4円", "利確の目安・1段目"):
+            self.assertIn(token, html)
+
+    def test_first_take_is_labelled_apart_from_the_measured_target(self):
+        """**カード上で別物と分かること。** 記録は測定目標が基準（§6.7）。"""
+        html = self._html(frame([row()]), None)
+        self.assertIn("測定目標（文献上の目安）", html)
+        self.assertIn("ATR×1", html)
+        self.assertIn("運用上の目安", html)
+        self.assertIn("文献値でも検証済みでもない", html)
+        self.assertIn(FIRST_TAKE_NOTE, html)
 
     def test_no_nan_in_the_output(self):
         html = self._html(frame([row(target=np.nan, rr=np.nan)]), None)
