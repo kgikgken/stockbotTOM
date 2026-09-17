@@ -9,6 +9,12 @@ name: store-repair
 #
 # ここは**既に store に入ってしまった破損**を直すための手動ワークフロー。
 # `refetch-tickers` は全履歴を取り直して**置換**する（マージだと壊れた古い行が残る）。
+#
+# **2026-09-17: 1909.T は取り直しても直らなかった**（yfinance 側が全期間を壊れた値で
+# 返すようになっており、400 行の破損が全 2,597 行に広がった）。以後 `refetch-tickers`
+# は置換前に取得データを検査し、壊れていれば置換しない。直らない銘柄は
+# `layer1.DATA_QUALITY_EXCLUDED_2026_09` に入れて計算から外す（store の行は消さない）。
+# **tickers の既定は空**にしてある —— 既定で走査だけになるようにするため。
 
 on:
   workflow_dispatch:
@@ -16,7 +22,7 @@ on:
       tickers:
         description: "修復する銘柄（カンマ区切り。空なら走査だけ）"
         required: false
-        default: "1909.T"
+        default: ""
 
 permissions:
   contents: read
@@ -72,6 +78,12 @@ jobs:
       - name: Scan after
         if: always()
         run: python scripts/store_scan.py
+
+      # 除外した銘柄が、除外前に各窓のプールとベンチマークにどれだけ入っていたか
+      # （2026-09-17・設計責任者の指示）。**除外後は 0 日になるのが期待値**
+      - name: Excluded impact
+        if: always()
+        run: python scripts/excluded_impact.py
 
       - name: Upload store metadata
         if: always()

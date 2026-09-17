@@ -110,3 +110,42 @@ def check_all(ohlcv: Dict[str, pd.DataFrame], **kw) -> Tuple[Dict[str, pd.DataFr
         rows.extend(issues)
     cols = ["ticker", "date", "kind", "ratio", "observed", "action"]
     return out, (pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols))
+
+# ------------------------------------------------------------------ 取得データの健全性
+# 2026-09-17 追加。**置換する前に、取ってきた値が壊れていないか見る。**
+#
+# 1909.T を全履歴再取得したら、yfinance が**全 2,597 行**を時価総額らしき値で返し、
+# 出来高を全行 0 にした。`upsert_replace` は取れたものをそのまま入れるので、
+# **取得元が壊れていると良い行を壊れた行で置き換えてしまう**（2026-09-17 に実際に起きた）。
+# `check_splits` はフレーム内の段差しか見ないので、全体が一様に壊れていると素通りする。
+FETCH_ABSURD_CLOSE = 1e7          # 日本株の終値の上限の目安（1,000 万円）
+FETCH_ZERO_VOLUME_RATIO = 0.95    # 出来高 0 の行がこの割合を超えたら異常
+
+
+def fetch_sanity_issues(ohlcv: Dict[str, pd.DataFrame],
+                        absurd_close: float = FETCH_ABSURD_CLOSE,
+                        zero_volume_ratio: float = FETCH_ZERO_VOLUME_RATIO) -> Dict[str, str]:
+    """取得したフレームが**そのまま store に入れてよい形か**を見る（2026-09-17）。
+
+    - 終値に `absurd_close` を超える行がある → **異常**
+    - 出来高 0 の行が `zero_volume_ratio` を超える → **異常**
+
+    戻り値は {銘柄: 理由}。**判定はここでは行わない** —— 呼び出し側が「置換しない」を決める。
+    **分割や急騰では引っかからない** —— 見ているのは水準であって変化率ではない。
+    """
+    out: Dict[str, str] = {}
+    for ticker, df in (ohlcv or {}).items():
+        if df is None or len(df) == 0 or "Close" not in df.columns:
+            continue
+        c = pd.to_numeric(df["Close"], errors="coerce").to_numpy(dtype=float)
+        n_absurd = int(np.sum(np.isfinite(c) & (c > absurd_close)))
+        if n_absurd:
+            out[ticker] = (f"終値が {absurd_close:,.0f} 円を超える行が {n_absurd}/{len(df)} 行"
+                           f"（最大 {np.nanmax(c):,.1f}）")
+            continue
+        if "Volume" in df.columns:
+            v = pd.to_numeric(df["Volume"], errors="coerce").fillna(0).to_numpy(dtype=float)
+            zero = float(np.mean(v == 0)) if len(v) else 0.0
+            if zero > zero_volume_ratio:
+                out[ticker] = f"出来高 0 の行が {zero:.1%}（{int(np.sum(v == 0))}/{len(df)} 行）"
+    return out

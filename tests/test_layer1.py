@@ -525,11 +525,22 @@ class ExcludeDataQualityTickersTest(unittest.TestCase):
 
     def test_default_list_matches_check_splits_full_history_findings(self):
         # T-402(2026-08-28): check_splits_full_history.py の実測(10銘柄)と
-        # 一致していることを固定する(機械的規則、個別判断はしない)
-        self.assertEqual(layer1.DATA_QUALITY_EXCLUDED_TICKERS, frozenset({
+        # 一致していることを固定する(機械的規則、個別判断はしない)。
+        # **事前登録セットは字面のまま**（「適用時の変更禁止」）。2026-09-17 に別の
+        # 破損で 2 銘柄を足したが、それは別の集合にしてある
+        self.assertEqual(layer1.DATA_QUALITY_EXCLUDED_T402, frozenset({
             "1364.T", "3477.T", "4316.T", "5103.T", "6731.T",
             "6834.T", "7649.T", "7877.T", "7983.T", "9900.T",
         }))
+
+    def test_combined_list_is_t402_plus_the_2026_09_corruption(self):
+        # 2026-09-17: yfinance が価格欄に時価総額らしき値を返した 2 銘柄
+        # （1909.T・8303.T）。**データ品質による除外なので検定数は増えない**
+        self.assertEqual(layer1.DATA_QUALITY_EXCLUDED_2026_09,
+                         frozenset({"1909.T", "8303.T"}))
+        self.assertEqual(
+            layer1.DATA_QUALITY_EXCLUDED_TICKERS,
+            layer1.DATA_QUALITY_EXCLUDED_T402 | layer1.DATA_QUALITY_EXCLUDED_2026_09)
 
 
 class SurvivorshipNoteTest(unittest.TestCase):
