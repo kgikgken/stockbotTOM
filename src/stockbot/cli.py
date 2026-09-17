@@ -164,6 +164,17 @@ def step_fetch(cfg: Settings, listed: pd.DataFrame, log=print) -> tuple[dict, di
     store.save(merged)
     files = store.write_daily_increments(added)
     store.append_revisions(revisions, now)
+    # **継ぎ目の検査で止めた銘柄**（2026-09-17）。壊れた行は store に入っていない。
+    # **赤にはしない** —— 1 銘柄のために 1,200 銘柄の取得を落とすほうが害が大きい。
+    # 代わりに毎回ログに出し、`seam_issues.csv` に積む。修復は `cli refetch-tickers`
+    seam = store.last_seam_issues
+    store.append_seam_issues(seam, now)
+    if len(seam):
+        log(f"[fetch] **継ぎ目の検査で止めた銘柄 {len(seam)}件**（store に入れていない）: "
+            + ", ".join(f"{r['ticker']}({r['kind']} 比 {r['close_ratio']:,.0f}倍)"
+                        for _i, r in seam.iterrows()))
+        log("[fetch] 直すには `python -m stockbot.cli refetch-tickers --tickers <銘柄>`"
+            "（全履歴を取り直して置換する）")
     if len(issues):
         p = cfg.store_dir / "split_issues.csv"
         prev = pd.read_csv(p) if p.exists() else None
@@ -287,6 +298,69 @@ def step_backfill(cfg: Settings, log=print) -> dict:
     log(f"[backfill] 累計 {cumulative_done}/{len(eq)} ({completion_rate:.1%}) / "
         f"今回取得 {meta['data_ok']} / 新規行 {len(added)}")
     return meta
+
+
+def step_refetch_tickers(cfg: Settings, tickers: list[str], log=print,
+                         fetch_fn=fetch_ohlcv) -> dict:
+    """指定した銘柄を**全履歴再取得して置換する**（store の修復）。
+
+    2026-09-17 に 1909.T の破損（終値が一定倍率 4,399,472 倍・出来高が全行 0）を
+    直すために足した。`refetch-recent-splits` と同じ `upsert_replace` の経路で、
+    **対象銘柄の既存行を先に消してから入れ直す** —— マージだと壊れた古い行が
+    取得ウィンドウの外に残る。
+
+    置換なので**継ぎ目の検査には引っかからない**（既存行が無くなるため）。
+    修復の経路を自分のガードで止めないための設計である（`store.seam_issues`）。
+    """
+    cfg.ensure_dirs()
+    now = _now()
+    tickers = sorted({t.strip() for t in tickers if t and t.strip()})
+    if not tickers:
+        log("[refetch-tickers] 銘柄が指定されていない（--tickers 1909.T,7203.T）")
+        return {"tickers": [], "n_added": 0, "n_revisions": 0}
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir, cfg.rev_close_tol, cfg.rev_volume_tol)
+    before = store.load()
+    log(f"[refetch-tickers] 対象 {len(tickers)}銘柄: {tickers}")
+    for t in tickers:
+        g = before[before["ticker"] == t] if len(before) else before
+        if len(g):
+            log(f"[refetch-tickers]   修復前 {t}: {len(g)}行 "
+                f"{g['date'].min():%Y-%m-%d}〜{g['date'].max():%Y-%m-%d} / "
+                f"終値 最小 {g['close'].min():,.1f} 最大 {g['close'].max():,.1f}")
+        else:
+            log(f"[refetch-tickers]   修復前 {t}: store に行が無い")
+
+    if cfg.dryrun:
+        full = make_synthetic(tickers, n_bars=cfg.history_full_days,
+                              end=now.tz_localize(None))
+    else:
+        full, _meta = fetch_fn(tickers, cfg.history_full_days, cfg.fetch_deadline_sec,
+                               now_jst=now, close_hhmm=cfg.market_close_hhmm, log=log)
+    if not full:
+        # **黙って成功にしない。** 取得できなければ store は触らない
+        log("[refetch-tickers] 取得できた銘柄が無い。store は変更しない")
+        return {"tickers": tickers, "n_added": 0, "n_revisions": 0, "fetched": 0}
+    full, issues = check_all(full)
+    merged, added, revisions = store.upsert_replace(to_long(full), tickers)
+    store.save(merged)
+    store.write_daily_increments(added)
+    store.append_revisions(revisions, now)
+    store.append_seam_issues(store.last_seam_issues, now)
+
+    after = store.load()
+    for t in tickers:
+        g = after[after["ticker"] == t]
+        if len(g):
+            log(f"[refetch-tickers]   修復後 {t}: {len(g)}行 "
+                f"{g['date'].min():%Y-%m-%d}〜{g['date'].max():%Y-%m-%d} / "
+                f"終値 最小 {g['close'].min():,.1f} 最大 {g['close'].max():,.1f} / "
+                f"出来高ゼロ {int((g['volume'] == 0).sum())}行")
+        else:
+            log(f"[refetch-tickers]   修復後 {t}: 行が無い（取得できなかった）")
+    log(f"[refetch-tickers] 完了: {len(tickers)}銘柄 / 新規行 {len(added)} / "
+        f"改訂 {len(revisions)} / issue {len(issues)}件")
+    return {"tickers": tickers, "n_added": int(len(added)),
+            "n_revisions": int(len(revisions)), "fetched": len(full)}
 
 
 def step_refetch_recent_splits(cfg: Settings, log=print, fetch_fn=fetch_ohlcv) -> dict:
@@ -1095,9 +1169,11 @@ def main(argv: list[str] | None = None) -> int:
                                        "references", "universe", "features", "pattern",
                                        "resolve", "notify", "refetch-recent-splits",
                                        "pattern-replay", "pattern-report", "pattern-exit",
-                                       "pattern-stop"])
+                                       "pattern-stop", "refetch-tickers"])
     ap.add_argument("--window", choices=list(PATTERN_WINDOWS), default="search",
                     help="バックテストの窓（docs/BACKTEST.md §1）")
+    ap.add_argument("--tickers", default="",
+                    help="refetch-tickers の対象（カンマ区切り。例: 1909.T,7203.T）")
     # **ホールドアウトはこれを明示したときだけ**（CLAUDE.md の絶対規則）
     ap.add_argument("--include-holdout", action="store_true",
                     help="ホールドアウトを生成する（確認窓を通過してから・1回のみ）")
@@ -1118,6 +1194,8 @@ def main(argv: list[str] | None = None) -> int:
             step_backfill(cfg, log)
         elif args.command == "refetch-recent-splits":
             step_refetch_recent_splits(cfg, log)
+        elif args.command == "refetch-tickers":
+            step_refetch_tickers(cfg, args.tickers.split(","), log)
         elif args.command == "references":
             step_references(cfg, log)
         elif args.command == "pattern":
