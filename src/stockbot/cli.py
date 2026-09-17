@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from .config import Settings
-from .data.adjust import check_all
+from .data.adjust import check_all, fetch_sanity_issues
 from .data.jpx_lists import (
     fetch_delistings,
     fetch_earnings_schedule,
@@ -58,6 +58,7 @@ from .render import context as render_context
 from .render import render as render_images_mod
 from .screener import pattern_record, record, resolver
 from .validation import pattern_exit, pattern_replay, pattern_report, pattern_stop
+from .validation.layer1 import DATA_QUALITY_EXCLUDED_TICKERS
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
 JST = "Asia/Tokyo"
@@ -341,6 +342,19 @@ def step_refetch_tickers(cfg: Settings, tickers: list[str], log=print,
         log("[refetch-tickers] 取得できた銘柄が無い。store は変更しない")
         return {"tickers": tickers, "n_added": 0, "n_revisions": 0, "fetched": 0}
     full, issues = check_all(full)
+    # **置換する前に健全性を見る**（2026-09-17）。取得元が壊れていると、良い行を
+    # 壊れた行で置き換えてしまう —— 1909.T で実際に起きた（400 行の破損が全 2,597 行に
+    # 広がった）。**壊れている銘柄は置換しない。store は触らない**
+    sane_issues = fetch_sanity_issues(full)
+    for ticker, why in sorted(sane_issues.items()):
+        log(f"[refetch-tickers] **{ticker} は置換しない**（取得データが壊れている）: {why}")
+    full = {t: df for t, df in full.items() if t not in sane_issues}
+    tickers = [t for t in tickers if t not in sane_issues]
+    if not full or not tickers:
+        log("[refetch-tickers] 置換できる銘柄が無い。store は変更しない"
+            "（取得元が壊れている場合は取り直しても直らない。除外リストを検討する）")
+        return {"tickers": sorted(sane_issues), "n_added": 0, "n_revisions": 0,
+                "fetched": 0, "refused": sorted(sane_issues)}
     merged, added, revisions = store.upsert_replace(to_long(full), tickers)
     store.save(merged)
     store.write_daily_increments(added)
@@ -360,7 +374,8 @@ def step_refetch_tickers(cfg: Settings, tickers: list[str], log=print,
     log(f"[refetch-tickers] 完了: {len(tickers)}銘柄 / 新規行 {len(added)} / "
         f"改訂 {len(revisions)} / issue {len(issues)}件")
     return {"tickers": tickers, "n_added": int(len(added)),
-            "n_revisions": int(len(revisions)), "fetched": len(full)}
+            "n_revisions": int(len(revisions)), "fetched": len(full),
+            "refused": sorted(sane_issues)}
 
 
 def step_refetch_recent_splits(cfg: Settings, log=print, fetch_fn=fetch_ohlcv) -> dict:
@@ -453,6 +468,11 @@ def step_universe(cfg: Settings, listed: pd.DataFrame, ohlcv: dict | None = None
     if manual:
         log(f"[universe] 手動除外リスト（データ品質）: {manual}")
         exclude = sorted(set(exclude) | set(manual))
+    # **データ品質による除外**（T-402 の 10 銘柄 + 2026-09-17 の 1909.T・8303.T）。
+    # store から行は消さずに、ここから先のすべての計算に入れない
+    dq = sorted(DATA_QUALITY_EXCLUDED_TICKERS)
+    log(f"[universe] データ品質による除外 {len(dq)}銘柄: {dq}")
+    exclude = sorted(set(exclude) | set(dq))
     stats = liquidity_stats(ohlcv, cfg.adv_window)
     u = build_universe(listed, stats, cfg.min_adv_jpy, cfg.min_price, cfg.min_history_bars,
                        exclude, asof=_now(), max_staleness_days=cfg.max_staleness_days)
@@ -626,6 +646,12 @@ def step_pattern(cfg: Settings, universe: pd.DataFrame, ohlcv: dict,
     実装が間違っているのかを切り分けるため（設計責任者の指示）。
     """
     tickers = universe[universe["passes"]]["ticker"].tolist()
+    # **保存済みのユニバースを読む経路でも除外を効かせる**（2026-09-17）。
+    # `latest.csv` は前日までに作られたものかもしれず、除外前の銘柄が残りうる
+    n_before = len(tickers)
+    tickers = [t for t in tickers if str(t) not in DATA_QUALITY_EXCLUDED_TICKERS]
+    if len(tickers) != n_before:
+        log(f"[pattern] データ品質による除外: {n_before - len(tickers)}銘柄を外した")
     rows = []
     n_eval = 0
     n_swings_short = 0

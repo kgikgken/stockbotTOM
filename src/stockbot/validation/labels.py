@@ -47,7 +47,8 @@ LABEL_UNDETERMINED = "undetermined"
 
 
 def universe_benchmark_returns(universe_ohlcv: Dict[str, pd.DataFrame], date_t: pd.Timestamp,
-                               h_list: Iterable[int] = H_LIST) -> Dict[int, dict]:
+                               h_list: Iterable[int] = H_LIST,
+                               excluded: Optional[Iterable[str]] = None) -> Dict[int, dict]:
     """T+1 の始値でユニバース全銘柄を等金額買い、T+h の終値（無ければ入手できる最後の
     有効な終値、打ち切り扱い）まで保有した場合の対数リターンを銘柄間で単純平均する
     （h ごと）。除外するのは T+1 の始値自体が無い銘柄だけ（date_t が系列に無い、
@@ -65,6 +66,11 @@ def universe_benchmark_returns(universe_ohlcv: Dict[str, pd.DataFrame], date_t: 
     T-403 でこれらの件数を集計できるようにするための診断情報。
     """
     date_t = pd.Timestamp(date_t)
+    # **データ品質で除外する銘柄はベンチマークにも入れない**（2026-09-17）。
+    # 等加重なので、壊れた 1 銘柄がその日の平均を支配しうる
+    from .layer1 import DATA_QUALITY_EXCLUDED_TICKERS
+    drop = set(DATA_QUALITY_EXCLUDED_TICKERS if excluded is None else excluded)
+    universe_ohlcv = {t: df for t, df in universe_ohlcv.items() if t not in drop}
     result: Dict[int, dict] = {}
     for h in h_list:
         rs: list[float] = []

@@ -35,6 +35,7 @@ from ..features import pattern as pattern_mod
 from ..features.indicators import atr_wilder
 from ..features.swings import alternate_swings, detect_raw_swings
 from . import labels as labels_mod
+from .layer1 import DATA_QUALITY_EXCLUDED_TICKERS
 from .replay import (
     HOLDOUT_WINDOW,
     MIN_HISTORY_BARS,
@@ -203,6 +204,10 @@ def universe_at(prepared: dict, equities: set, date_t: pd.Timestamp,
     """
     out = []
     for ticker in sorted(equities):
+        # **データ品質で除外する銘柄は入れない**（2026-09-17）。プールにもベンチマークにも
+        # 入らなくなる（ベンチマークはこの並びから作る）
+        if ticker in DATA_QUALITY_EXCLUDED_TICKERS:
+            continue
         item = prepared.get(ticker)
         if item is None:
             continue

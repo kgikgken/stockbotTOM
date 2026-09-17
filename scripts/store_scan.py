@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stockbot.config import Settings                      # noqa: E402
 from stockbot.data.store import IDX_TICKER, OhlcvStore    # noqa: E402
+from stockbot.validation.layer1 import DATA_QUALITY_EXCLUDED_TICKERS  # noqa: E402
 from stockbot.validation.pattern_replay import CONFIRM_WINDOW, SEARCH_WINDOW  # noqa: E402
 from stockbot.validation.replay import HOLDOUT_WINDOW     # noqa: E402
 
@@ -61,7 +62,11 @@ def scan(df: pd.DataFrame) -> pd.DataFrame:
         jump = ok & ((r > JUMP_RATIO_MAX) | (r < 1.0 / JUMP_RATIO_MAX))
         n_absurd = int(np.sum(np.isfinite(c) & (c > ABSURD_CLOSE)))
         zero_run = longest_zero_run(v)
-        if not jump.any() and n_absurd == 0 and zero_run < ZERO_VOLUME_MIN_RUN:
+        # **出来高 0 の連続は単独では発火させない**（2026-09-17 修正）。単独だと
+        # 非流動銘柄と ETF を 43 件拾ってしまい、破損の signal にならなかった。
+        # **桁違い行か段差と同時のときだけ**「破損の兆候」として出す
+        broken = bool(jump.any()) or n_absurd > 0
+        if not broken:
             continue
         idx = np.flatnonzero(jump)
         rows.append({
@@ -95,8 +100,9 @@ def main() -> int:
     n_t = df["ticker"].nunique()
     print(f"[store-scan] 銘柄 {n_t} / 行 {len(df):,} / "
           f"{df['date'].min():%Y-%m-%d}〜{df['date'].max():%Y-%m-%d}")
-    print(f"[store-scan] 基準: 隣接終値比 >{JUMP_RATIO_MAX:.0f}倍 または "
-          f"終値 >{ABSURD_CLOSE:,.0f}円 または 出来高0が{ZERO_VOLUME_MIN_RUN}行以上連続")
+    print(f"[store-scan] 基準: **隣接終値比 >{JUMP_RATIO_MAX:.0f}倍 または "
+          f"終値 >{ABSURD_CLOSE:,.0f}円**。出来高0の連続（{ZERO_VOLUME_MIN_RUN}行以上）は"
+          "**単独では出さない** —— 非流動銘柄と ETF を拾うだけだった（2026-09-17 修正）")
 
     bad = scan(df)
     if not len(bad):
@@ -115,9 +121,19 @@ def main() -> int:
               f"{r['n_absurd_close']:>9}{r['max_close']:>16,.1f}"
               f"{r['longest_zero_volume_run']:>11}  {d}")
 
-    for name, lo, hi, n in window_rows(df, set(bad["ticker"])):
-        print(f"[store-scan] 該当銘柄の行数 {name}（{lo:%Y-%m-%d}〜{hi:%Y-%m-%d}）: {n}行")
-    print("[store-scan] 修復は `python -m stockbot.cli refetch-tickers --tickers <銘柄>`")
+    for ticker in bad["ticker"]:
+        for name, lo, hi, n in window_rows(df, {ticker}):
+            print(f"[store-scan]   {ticker} の行数 {name}"
+                  f"（{lo:%Y-%m-%d}〜{hi:%Y-%m-%d}）: {n}行")
+    print("[store-scan] 修復は `python -m stockbot.cli refetch-tickers --tickers <銘柄>`"
+          "（取得元が壊れていれば置換されない）")
+    print(f"[store-scan] 除外中の銘柄: {sorted(DATA_QUALITY_EXCLUDED_TICKERS)}")
+    still = sorted(set(bad["ticker"]) - set(DATA_QUALITY_EXCLUDED_TICKERS))
+    if still:
+        print(f"[store-scan] **除外リストに入っていない該当銘柄: {still}**")
+    else:
+        print("[store-scan] 該当銘柄はすべて除外リストに入っている"
+              "（どの計算にも入らない）")
     return 0
 
 
