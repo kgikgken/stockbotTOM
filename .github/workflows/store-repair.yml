@@ -1,0 +1,86 @@
+name: store-repair
+
+# store の修復と走査（2026-09-17・1909.T の破損を受けて追加）。
+#
+# 1909.T は 2026-09-13 の取得で終値が一定倍率 4,399,472 倍（時価総額らしき値）に
+# なり、出来高が全行 0 になった。**取得ウィンドウ全体が一様に再スケールされると
+# `check_splits` は素通りする** —— 段差は「新しく取った行」と「既存の古い行」の
+# 継ぎ目にあり、そこを検査していなかった（`store.seam_issues` で塞いだ）。
+#
+# ここは**既に store に入ってしまった破損**を直すための手動ワークフロー。
+# `refetch-tickers` は全履歴を取り直して**置換**する（マージだと壊れた古い行が残る）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "修復する銘柄（カンマ区切り。空なら走査だけ）"
+        required: false
+        default: "1909.T"
+
+permissions:
+  contents: read
+
+# data-daily と同じグループ。**store の読み書きが重ならないようにする**
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      # 修復した store を**同じ世代（store-v2-）で保存し直す** ので、次の data-daily が
+      # 直ったほうを復元する
+      - name: Restore store
+        uses: actions/cache@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Scan before
+        run: python scripts/store_scan.py
+
+      - name: Repair
+        if: github.event.inputs.tickers != ''
+        env:
+          HISTORY_DAYS: "400"
+          FETCH_DEADLINE_SEC: "1800"
+        run: |
+          python -m stockbot.cli refetch-tickers \
+            --tickers "${{ github.event.inputs.tickers }}"
+
+      - name: Scan after
+        if: always()
+        run: python scripts/store_scan.py
+
+      - name: Upload store metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-repair-${{ github.run_id }}
+          path: |
+            data/store/fetch_meta.json
+            data/store/revisions.csv.gz
+            data/store/split_issues.csv
+            data/store/seam_issues.csv
+          if-no-files-found: ignore
