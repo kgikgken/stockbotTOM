@@ -57,7 +57,8 @@ from .notify import line_send, message
 from .render import context as render_context
 from .render import render as render_images_mod
 from .screener import pattern_record, record, resolver
-from .validation import pattern_exit, pattern_replay, pattern_report, pattern_stop
+from .validation import (pattern_exit, pattern_replay, pattern_report,
+                         pattern_stop, pattern_target)
 from .validation.layer1 import DATA_QUALITY_EXCLUDED_TICKERS
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
@@ -1132,6 +1133,79 @@ def step_pattern_stop(cfg: Settings, window: str, include_holdout: bool,
         "（r20 とは別物）。撤退距離は終値[T] 基準の中央値")
 
 
+def step_pattern_target(cfg: Settings, window: str, include_holdout: bool,
+                        log=print) -> None:
+    """測定目標の到達率係数補正（docs/BACKTEST.md §12）。**ホールドアウトで 1 回だけ。**
+
+    **探索ではない。文献値の 1 回検証である。** 係数は Bulkowski の measure rule の
+    値をそのまま使い、振らない。
+
+    **検出はやり直さない。** 保存済みの再生結果の `neckline` と `height` から利確値を
+    引き直し、T+1..T+20 の四本値を当てるだけ。
+
+    **ホールドアウトは `--include-holdout` を明示したときだけ**（CLAUDE.md の絶対規則）。
+    §12 はホールドアウト専用で、探索窓・確認窓では走らせない。
+    """
+    if window != "holdout":
+        # **探索窓・確認窓では実行しない**（§12 の禁止事項「先に見ない」）
+        log(f"[pattern-target] 窓={window} では実行しない。"
+            "§12 はホールドアウト専用（--window holdout --include-holdout）")
+        return
+    if not include_holdout:
+        log("[pattern-target] ホールドアウトは --include-holdout を明示したときだけ走る"
+            "（CLAUDE.md の絶対規則）")
+        return
+    base = cfg.data_dir / "pattern_replay"
+    replay = pattern_replay.load_table(base / window)
+    cov = pattern_report.coverage(replay)
+    log(f"[pattern-target] 窓={window} 成立 {cov['n_rows']}件 / 評価日 {cov['n_days']}日")
+    if cov["n_rows"] == 0:
+        log("[pattern-target] 行が無い（先に cli pattern-replay --window holdout "
+            "--include-holdout を実行）")
+        return
+    log(f"[pattern-target] カバーした期間: {cov['first'].date()}〜{cov['last'].date()}")
+
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    # **除外が効いていることを実行前に確認する**（§12 の実行条件）
+    dq = sorted(DATA_QUALITY_EXCLUDED_TICKERS)
+    in_replay = sorted(set(replay["ticker"].astype(str)) & set(dq))
+    log(f"[pattern-target] データ品質の除外 {len(dq)}銘柄: {dq}")
+    log(f"[pattern-target] 再生結果に含まれる除外銘柄: {in_replay if in_replay else 'なし'}"
+        + ("" if in_replay else "（除外が効いている）"))
+
+    table = pattern_target.run(replay, ohlcv, log=log)
+    if len(table) == 0:
+        log("[pattern-target] 利確値を当てられる行が無い")
+        return
+    out_dir = cfg.data_dir / "pattern_exit"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"pattern_target_{window}.csv.gz"
+    table.to_csv(path, index=False, compression="gzip")
+    log(f"[pattern-target] 書き出し {len(table)}行 → {path}")
+
+    log(f"[pattern-target] 検定 {pattern_target.N_TESTS_TOTAL} 件"
+        f"（既存 14 件 + 係数補正 {pattern_target.N_TESTS_HERE} 件）。これ以上増やさない")
+    log("[pattern-target] 係数は文献値（Bulkowski の measure rule）。**振って比較しない**: "
+        + " ".join(f"{k}={v:.2f}" for k, v in pattern_target.TARGET_RATIO.items()))
+    log("[pattern-target] 撤退は現行（パターン内最安値）。評価窓 T+1..T+20 / "
+        "エントリー Open[T+1] / 同日は撤退（BACKTEST.md §12）")
+
+    chk = pattern_target.check_base_matches_saved(replay, table)
+    n_cens = int(table["censored"].astype(bool).sum())
+    log(f"[pattern-target] 母数 {len(table)}件 / 評価窓が 20 本に満たない行 {n_cens}件 "
+        f"/ 現行の利確値が保存済み target と一致しない行 {chk['n_mismatch']}/{chk['n']}"
+        "（0 が正常）")
+
+    log("[pattern-target] --- 利確の作り方別の成績 ---")
+    for line in pattern_target.format_target_table(pattern_target.by_variant(table)):
+        log(f"[pattern-target] {line}")
+    log("[pattern-target] **判定は平均損益の大小だけ**。係数補正が現行を上回れば採用、"
+        "下回れば現行のまま（BACKTEST.md §12.4）")
+    log("[pattern-target] **t の基準は設けない** —— ホールドアウトは 122 営業日で"
+        "有意性検定に足りない。平均損益は素のリターン（r20 とは別物）")
+
+
 def step_pattern_report(cfg: Settings, window: str, log=print) -> None:
     """探索の集計を出す（docs/BACKTEST.md §4・§6）。**表のみ。解釈はしない。**
 
@@ -1195,7 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
                                        "references", "universe", "features", "pattern",
                                        "resolve", "notify", "refetch-recent-splits",
                                        "pattern-replay", "pattern-report", "pattern-exit",
-                                       "pattern-stop", "refetch-tickers"])
+                                       "pattern-stop", "pattern-target", "refetch-tickers"])
     ap.add_argument("--window", choices=list(PATTERN_WINDOWS), default="search",
                     help="バックテストの窓（docs/BACKTEST.md §1）")
     ap.add_argument("--tickers", default="",
@@ -1240,6 +1314,8 @@ def main(argv: list[str] | None = None) -> int:
             step_pattern_exit(cfg, args.window, args.include_holdout, log)
         elif args.command == "pattern-stop":
             step_pattern_stop(cfg, args.window, args.include_holdout, log)
+        elif args.command == "pattern-target":
+            step_pattern_target(cfg, args.window, args.include_holdout, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":
