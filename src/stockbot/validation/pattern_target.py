@@ -46,8 +46,9 @@ N_TESTS_HERE = 1
 N_TESTS_TOTAL = 14 + N_TESTS_HERE
 
 # **到達率の係数（文献値・変更禁止）。** 出典は Bulkowski の measure rule。
-# **振って比較しない**（§12 の禁止事項）。C3・C4 は係数が与えられていないので対象外
-# （日足かつ k=3 では検出 0 件。PATTERN.md D-10）
+# **振って比較しない**（§12 の禁止事項）。C3・C4 は文献に係数が無いので対象外。
+# **ペナントは極めて稀だが 0 件ではない**（ホールドアウトで 5 件）。**係数は与えない**
+# —— 与えれば新しい裁量値になる。該当行は空にして母数から外す（PATTERN.md D-10・Q-5）
 TARGET_RATIO: Dict[str, float] = {
     DOUBLE_BOTTOM: 0.73,
     TRIPLE_BOTTOM: 0.74,

@@ -42,9 +42,23 @@ class RatioTest(unittest.TestCase):
         self.assertEqual(tgt_mod.N_TESTS_TOTAL, 15)
 
     def test_flag_and_pennant_have_no_coefficient(self):
-        """C3・C4 は係数が与えられていない（検出 0 件。PATTERN.md D-10）。"""
+        """C3・C4 は係数が与えられていない（文献に値が無い。PATTERN.md D-10）。
+
+        **ペナントは極めて稀だが 0 件ではない** —— ホールドアウト 122 営業日で 5 件出た
+        （PATTERN.md §4 Q-5・2026-09-18）。**係数は与えない**と決めたので、該当行は
+        係数補正側で空になり母数から外れる（下の `test_pennant_row_...`）。
+        """
         for p in ("bull_flag", "bull_pennant"):
             self.assertTrue(np.isnan(tgt_mod.ratio_for(p)), p)
+
+    def test_pennant_target_is_blank_while_current_is_not(self):
+        """**ペナントは係数補正の対象外**（PATTERN.md §4 Q-5 の回答・2026-09-18）。
+
+        現行（高さ×1.0）は引けるが、係数補正は空になる。
+        """
+        t = tgt_mod.targets(row(pattern=pattern_mod.BULL_PENNANT))
+        self.assertAlmostEqual(t[tgt_mod.BASE], 120.0)
+        self.assertTrue(np.isnan(t[tgt_mod.RATIO]))
 
 
 class TargetsTest(unittest.TestCase):
@@ -181,6 +195,27 @@ class RunTest(unittest.TestCase):
         chk = tgt_mod.check_base_matches_saved(self.replay, out)
         self.assertEqual(chk["n"], 2)
         self.assertEqual(chk["n_mismatch"], 0)
+
+    def test_pennant_row_leaves_the_ratio_denominator(self):
+        """**ペナントは係数補正の母数から外れる**（PATTERN.md §4 Q-5・2026-09-18）。
+
+        現行側には残る。**時間切れにも到達にも数えない**（BACKTEST.md §12.2）。
+        """
+        rep = pd.DataFrame([
+            {"date": self.df.index[0], "ticker": "1234.T", **row()},
+            {"date": self.df.index[1], "ticker": "1234.T",
+             **row(pattern=pattern_mod.BULL_PENNANT)},
+        ])
+        out = tgt_mod.run(rep, self.ohlcv, log=lambda *_a: None)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(int(out["ratio_target"].isna().sum()), 1)
+        self.assertEqual(int(out["base_target"].isna().sum()), 0)
+        self.assertEqual(out.loc[1, "ratio_outcome"], "")
+        by = tgt_mod.by_variant(out).set_index("group")
+        self.assertEqual(int(by.loc[tgt_mod.VARIANT_LABELS[tgt_mod.RATIO], "n"]), 1)
+        self.assertEqual(
+            int(by.loc[tgt_mod.VARIANT_LABELS[tgt_mod.RATIO], "n_no_target"]), 1)
+        self.assertEqual(int(by.loc[tgt_mod.VARIANT_LABELS[tgt_mod.BASE], "n"]), 2)
 
     def test_mismatch_is_counted(self):
         bad = self.replay.copy()
