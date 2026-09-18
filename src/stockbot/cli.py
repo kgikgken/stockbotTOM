@@ -1228,6 +1228,16 @@ def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
         return
     base = cfg.data_dir / "pattern_replay"
     replay = pattern_replay.load_table(base / window)
+    # **除外リスト 12 銘柄を先に適用する**（§13.5）。古い世代の再生結果には除外前の
+    # 行が残っている —— `universe_at` が除外を見るようになったのは 2026-09-17 で、
+    # 探索窓の再生はそれより前だから（§11.12）。**再生はやり直さない**のでここで落とす。
+    # **株価帯の境界を作る前に落とす** —— 境界も除外後の分布から引くため
+    dq = sorted(DATA_QUALITY_EXCLUDED_TICKERS)
+    replay, n_dropped, hit = pattern_strata.drop_excluded(replay, dq)
+    log(f"[pattern-strata] データ品質の除外 {len(dq)}銘柄 / 再生結果から落とした行 "
+        f"{n_dropped}件"
+        + (f"（{hit}）。**§9・§10・§11 の記録はこの除外より前に取ったものなので、"
+           "その分だけ数字がずれる**" if hit else "（もともと入っていない）"))
     cov = pattern_report.coverage(replay)
     log(f"[pattern-strata] 窓={window} 成立 {cov['n_rows']}件 / 評価日 {cov['n_days']}日")
     if cov["n_rows"] == 0:
@@ -1235,6 +1245,11 @@ def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
             "この窓は集計しない（先に cli pattern-replay が要る）")
         return
     log(f"[pattern-strata] カバーした期間: {cov['first'].date()}〜{cov['last'].date()}")
+    if "l1_pos" not in replay.columns:
+        # **黙って空にしない。** 古い世代（v2）の再生結果には極値の列が無いので、
+        # S1（直近の谷）と S3（下値支持線）は引けない（§11 と同じ制約）
+        log("[pattern-strata] この窓の再生結果に極値の列（l1_pos）が無い。"
+            "**S1・S3 は全行「対象外」になる**（古い世代の再生結果）")
 
     # 株価帯の境界（§13.2）。**探索窓で作り、全窓で固定する**
     edges = pattern_strata.load_frozen_bands()
@@ -1260,11 +1275,6 @@ def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
     ohlcv = from_long(store.load())
     if not include_holdout:
         ohlcv = pattern_exit.truncate_before_holdout(ohlcv)
-    dq = sorted(DATA_QUALITY_EXCLUDED_TICKERS)
-    in_replay = sorted(set(replay["ticker"].astype(str)) & set(dq))
-    log(f"[pattern-strata] データ品質の除外 {len(dq)}銘柄 / 再生結果に含まれるもの: "
-        + (f"{in_replay}" if in_replay else "なし（除外が効いている）"))
-
     table = pattern_strata.run(replay, ohlcv, edges, log=log)
     if len(table) == 0:
         log("[pattern-strata] 当てられる行が無い")

@@ -62,12 +62,26 @@ jobs:
             pattern-replay-v3-search-
 
       - name: Restore replay (confirm)
+        id: confirm_v3
         uses: actions/cache/restore@v4
         with:
           path: data/pattern_replay
           key: pattern-replay-v3-confirm-${{ github.run_id }}
           restore-keys: |
             pattern-replay-v3-confirm-
+
+      # 確認窓の再生は §9（2026-09-12）で回したきりで、**世代が v2 のまま**の
+      # 可能性がある（v3 は §11 の撤退基準で極値の列を足したときに上げた）。
+      # v3 が戻らなかったときだけ v2 を試す。**混ぜない**ために条件付きにしてある。
+      # v2 には極値の列が無いので、その場合 S1・S3 は全行「対象外」になる
+      - name: Restore replay (confirm, v2)
+        if: steps.confirm_v3.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: data/pattern_replay
+          key: pattern-replay-v2-confirm-${{ github.run_id }}
+          restore-keys: |
+            pattern-replay-v2-confirm-
 
       - name: Restore replay (holdout)
         uses: actions/cache/restore@v4
