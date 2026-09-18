@@ -58,7 +58,7 @@ from .render import context as render_context
 from .render import render as render_images_mod
 from .screener import pattern_record, record, resolver
 from .validation import (pattern_exit, pattern_replay, pattern_report,
-                         pattern_stop, pattern_target)
+                         pattern_stop, pattern_strata, pattern_target)
 from .validation.layer1 import DATA_QUALITY_EXCLUDED_TICKERS
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
@@ -1206,6 +1206,123 @@ def step_pattern_target(cfg: Settings, window: str, include_holdout: bool,
         "有意性検定に足りない。平均損益は素のリターン（r20 とは別物）")
 
 
+def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
+                        log=print) -> None:
+    """既存 4 案の株価帯別・年別の記述統計（docs/BACKTEST.md §13）。**判定ではない。**
+
+    **検定は増やさない**（§13.1）。判定基準を設けず、採用も不採用も決めない。
+
+    **検出はやり直さない。** 保存済みの再生結果に、既存 3 モジュール（§10 の
+    `pattern_exit`・§11 の `pattern_stop`・§12 の `pattern_target`）の当て方を
+    そのまま適用するだけ。
+
+    **株価帯の境界は探索窓で作り、全窓で固定する**（§13.2）。無ければ探索窓で
+    作って `data/reference/` に書く。ほかの窓では作らない。
+
+    **ホールドアウトは `--include-holdout` を明示したときだけ**（CLAUDE.md の
+    絶対規則）。§12 で使用済みなので追加の使用にはあたらない（§13.1）。
+    """
+    if window == "holdout" and not include_holdout:
+        log("[pattern-strata] ホールドアウトは --include-holdout を明示したときだけ走る"
+            "（CLAUDE.md の絶対規則）")
+        return
+    base = cfg.data_dir / "pattern_replay"
+    replay = pattern_replay.load_table(base / window)
+    cov = pattern_report.coverage(replay)
+    log(f"[pattern-strata] 窓={window} 成立 {cov['n_rows']}件 / 評価日 {cov['n_days']}日")
+    if cov["n_rows"] == 0:
+        log(f"[pattern-strata] 窓={window} の再生結果が無い。"
+            "この窓は集計しない（先に cli pattern-replay が要る）")
+        return
+    log(f"[pattern-strata] カバーした期間: {cov['first'].date()}〜{cov['last'].date()}")
+
+    # 株価帯の境界（§13.2）。**探索窓で作り、全窓で固定する**
+    edges = pattern_strata.load_frozen_bands()
+    if edges is None:
+        if window != "search":
+            log(f"[pattern-strata] 株価帯の境界（{pattern_strata.PRICE_BAND_EDGES_PATH}）"
+                "が無い。**窓ごとに切り直さない**ので、先に --window search を実行する")
+            return
+        edges = pattern_strata.price_band_edges(replay)
+        if edges is None:
+            log("[pattern-strata] 株価帯の境界を作れない（close_t が足りない）")
+            return
+        path = pattern_strata.save_frozen_bands(edges, {
+            "window": "search", "window_start": str(PATTERN_WINDOWS["search"][0]),
+            "window_end": str(PATTERN_WINDOWS["search"][1]),
+            "n_rows": int(len(replay)), "n_bands": pattern_strata.N_PRICE_BANDS,
+            "note": "docs/BACKTEST.md §13.2。探索窓で作って全窓で固定する"})
+        log(f"[pattern-strata] 株価帯の境界を探索窓で作って固定した → {path}")
+    log("[pattern-strata] 株価帯（固定・全窓共通）: "
+        + " / ".join(pattern_strata.band_labels(edges)))
+
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    if not include_holdout:
+        ohlcv = pattern_exit.truncate_before_holdout(ohlcv)
+    dq = sorted(DATA_QUALITY_EXCLUDED_TICKERS)
+    in_replay = sorted(set(replay["ticker"].astype(str)) & set(dq))
+    log(f"[pattern-strata] データ品質の除外 {len(dq)}銘柄 / 再生結果に含まれるもの: "
+        + (f"{in_replay}" if in_replay else "なし（除外が効いている）"))
+
+    table = pattern_strata.run(replay, ohlcv, edges, log=log)
+    if len(table) == 0:
+        log("[pattern-strata] 当てられる行が無い")
+        return
+    out_dir = cfg.data_dir / "pattern_exit"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = pattern_strata.strata_path(out_dir, window)
+    table.to_csv(path, index=False, compression="gzip")
+    log(f"[pattern-strata] 書き出し {len(table)}行 → {path}")
+
+    chk = pattern_strata.check_current_sources(table)
+    n_cens = int(table["censored"].astype(bool).sum())
+    log(f"[pattern-strata] 母数 {len(table)}件 / 評価窓が 20 本に満たない行 {n_cens}件 "
+        f"/ 現行基準の 3 経路（§10 tgt・§11 current・§12 base）が一致しない行 "
+        f"{chk['n_mismatch']}/{chk['n']}（0 が正常）")
+
+    qedges = pattern_report.load_frozen_edges()
+    if qedges is None:
+        log("[pattern-strata] 抜け幅の分位境界が無いので Q1〜Q5 の行は出さない"
+            f"（{pattern_report.FROZEN_EDGES_PATH}）")
+    summary = pd.concat(
+        [pattern_strata.by_strata(table, window, axis, edges, qedges)
+         for axis in (pattern_strata.AXIS_BAND, pattern_strata.AXIS_YEAR)],
+        ignore_index=True)
+    spath = pattern_strata.summary_path(out_dir, window)
+    summary.to_csv(spath, index=False)
+    log(f"[pattern-strata] 集計 {len(summary)}行 → {spath}")
+
+    # **3 窓ぶんそろっていればまとめて出す。** そろっていなければある窓だけ
+    frames, have = [], []
+    for w in PATTERN_WINDOWS:
+        f = pattern_strata.summary_path(out_dir, w)
+        if f.exists():
+            frames.append(pd.read_csv(f))
+            have.append(w)
+    combined = pd.concat(frames, ignore_index=True) if frames else summary
+    log(f"[pattern-strata] 表に出す窓: {have if have else [window]}")
+
+    log(f"[pattern-strata] 検定 {pattern_strata.N_TESTS_TOTAL} 件のまま。"
+        f"ここで増やすのは {pattern_strata.N_TESTS_HERE} 件（BACKTEST.md §13.1）")
+    log("[pattern-strata] **記述統計であって判定ではない。** 判定基準は設けず、"
+        "採用も不採用も決めない。NW t は参考で、判定には使わない（§13.1・§13.4）")
+    log("[pattern-strata] 平均損益は**ベンチマークを引いていない素のリターン**"
+        "（r20 とは別物）。評価窓 T+1..T+20 / エントリー Open[T+1] / 同日は撤退")
+    log("[pattern-strata] 「対象外」はその案を当てられなかった行（母数から外した数）")
+
+    for axis, axis_name in ((pattern_strata.AXIS_BAND, "株価帯別"),
+                            (pattern_strata.AXIS_YEAR, "年別")):
+        part = combined[combined["axis"] == axis] if len(combined) else combined
+        for plan in (pattern_strata.PLAN_BREAKOUT, pattern_strata.PLAN_ATR,
+                     pattern_strata.PLAN_STOP, pattern_strata.PLAN_TARGET):
+            log(f"[pattern-strata] --- {axis_name}: "
+                f"{pattern_strata.PLAN_LABELS[plan]} ---")
+            for line in pattern_strata.format_strata_table(
+                    part, plan, with_r20=(plan == pattern_strata.PLAN_BREAKOUT)):
+                log(f"[pattern-strata] {line}")
+
+
 def step_pattern_report(cfg: Settings, window: str, log=print) -> None:
     """探索の集計を出す（docs/BACKTEST.md §4・§6）。**表のみ。解釈はしない。**
 
@@ -1269,7 +1386,8 @@ def main(argv: list[str] | None = None) -> int:
                                        "references", "universe", "features", "pattern",
                                        "resolve", "notify", "refetch-recent-splits",
                                        "pattern-replay", "pattern-report", "pattern-exit",
-                                       "pattern-stop", "pattern-target", "refetch-tickers"])
+                                       "pattern-stop", "pattern-target",
+                                       "pattern-strata", "refetch-tickers"])
     ap.add_argument("--window", choices=list(PATTERN_WINDOWS), default="search",
                     help="バックテストの窓（docs/BACKTEST.md §1）")
     ap.add_argument("--tickers", default="",
@@ -1316,6 +1434,8 @@ def main(argv: list[str] | None = None) -> int:
             step_pattern_stop(cfg, args.window, args.include_holdout, log)
         elif args.command == "pattern-target":
             step_pattern_target(cfg, args.window, args.include_holdout, log)
+        elif args.command == "pattern-strata":
+            step_pattern_strata(cfg, args.window, args.include_holdout, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":

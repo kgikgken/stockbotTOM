@@ -1,0 +1,117 @@
+name: pattern-strata
+
+# docs/BACKTEST.md §13。**既存 4 案の株価帯別・年別の記述統計。**
+#
+# **記述統計であって判定ではない**（設計責任者・2026-09-18）。判定基準を設けず、
+# 採用も不採用も決めない。**検定は 15 件のまま増やさない。**
+#
+# **再生はしない。** 3 窓ぶんの再生結果をキャッシュから戻して、既存 3 モジュール
+# （§10 pattern_exit・§11 pattern_stop・§12 pattern_target）の当て方を適用するだけ。
+#
+# **ホールドアウトは §12 で使用済みなので、ここでの集計は追加の使用にあたらない**
+# （§13.1）。新しい仮説の検定はしない。
+#
+# 株価帯の境界は**探索窓で作って全窓で固定する**（§13.2）。無ければ探索窓の実行が
+# `data/reference/pattern_price_band_edges.json` を作るので、**成果物から取って
+# リポジトリにコミットする**（抜け幅 5 分位の境界と同じ扱い）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# data-daily と同じグループ。store の読み書きが重ならないようにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  strata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      # 3 窓ぶんを同じ path に順に展開する。**どれも読み取り専用**（保存しない）
+      - name: Restore replay (search)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/pattern_replay
+          key: pattern-replay-v3-search-${{ github.run_id }}
+          restore-keys: |
+            pattern-replay-v3-search-
+
+      - name: Restore replay (confirm)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/pattern_replay
+          key: pattern-replay-v3-confirm-${{ github.run_id }}
+          restore-keys: |
+            pattern-replay-v3-confirm-
+
+      - name: Restore replay (holdout)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/pattern_replay
+          key: pattern-replay-v3-holdout-${{ github.run_id }}
+          restore-keys: |
+            pattern-replay-v3-holdout-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      # **どの窓の再生結果が戻ったか**を先に出す。戻っていない窓は集計しない
+      # （キャッシュには期限があるので、黙って 0 件にしない）
+      - name: Replay inventory
+        run: |
+          for w in search confirm holdout; do
+            n=$(ls data/pattern_replay/$w 2>/dev/null | wc -l)
+            echo "[inventory] $w: $n 日ぶん"
+          done
+
+      # 探索窓を最初に回す。**株価帯の境界はここで作って固定する**（§13.2）
+      - name: Strata (search)
+        if: always()
+        run: python -m stockbot.cli pattern-strata --window search
+
+      - name: Strata (confirm)
+        if: always()
+        run: python -m stockbot.cli pattern-strata --window confirm
+
+      # ホールドアウトは --include-holdout を明示したときだけ読む（CLAUDE.md）。
+      # §12 で使用済みなので追加の使用にはあたらない（§13.1）
+      - name: Strata (holdout)
+        if: always()
+        run: |
+          python -m stockbot.cli pattern-strata \
+            --window holdout --include-holdout
+
+      - name: Upload tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pattern-strata-${{ github.run_id }}
+          path: |
+            data/pattern_exit
+            data/reference/pattern_price_band_edges.json
+          if-no-files-found: ignore
