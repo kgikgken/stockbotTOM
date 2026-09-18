@@ -113,6 +113,38 @@ class BandEdgeTest(unittest.TestCase):
         self.assertTrue(all(g != "" for g in got))
 
 
+class DropExcludedTest(unittest.TestCase):
+    """**除外リスト 12 銘柄を適用する**（§13.5）。古い再生結果には除外前の行が残る。"""
+
+    def frame(self):
+        return pd.DataFrame({"ticker": ["1234.T", "9900.T", "5678.T", "1909.T"],
+                             "date": pd.to_datetime(["2024-01-02"] * 4)})
+
+    def test_drops_the_excluded_rows_and_reports_them(self):
+        out, n, hit = st_mod.drop_excluded(self.frame(), ["9900.T", "1909.T"])
+        self.assertEqual(list(out["ticker"]), ["1234.T", "5678.T"])
+        self.assertEqual(n, 2)
+        self.assertEqual(hit, ["1909.T", "9900.T"])
+
+    def test_nothing_to_drop(self):
+        out, n, hit = st_mod.drop_excluded(self.frame(), ["7203.T"])
+        self.assertEqual(len(out), 4)
+        self.assertEqual((n, hit), (0, []))
+
+    def test_empty_inputs(self):
+        out, n, hit = st_mod.drop_excluded(pd.DataFrame(), ["9900.T"])
+        self.assertEqual(len(out), 0)
+        self.assertEqual((n, hit), (0, []))
+        out2, n2, _ = st_mod.drop_excluded(self.frame(), [])
+        self.assertEqual(len(out2), 4)
+        self.assertEqual(n2, 0)
+
+    def test_does_not_mutate_the_input(self):
+        df = self.frame()
+        st_mod.drop_excluded(df, ["9900.T"])
+        self.assertEqual(len(df), 4)
+
+
 class StrataOneTest(unittest.TestCase):
     def setUp(self):
         self.df = frame(n=60, highs=[100.0] * 60, lows=[100.0] * 60)
@@ -152,6 +184,17 @@ class StrataOneTest(unittest.TestCase):
         got = st_mod.strata_one(self.df, 30, row(pattern=pattern_mod.BULL_PENNANT))
         self.assertEqual(got["ratio_outcome"], "")
         self.assertNotEqual(got["cur_outcome"], "")
+
+    def test_s1_and_s3_are_blank_without_the_extremum_columns(self):
+        """古い世代（v2）の再生結果には極値の列が無い。**空にする。落とさない。**"""
+        r = row()
+        for k in ("l1_pos", "l1", "l2_pos", "l2", "l3_pos", "l3"):
+            r.pop(k)
+        got = st_mod.strata_one(self.df, 30, r)
+        self.assertEqual(got["s1_outcome"], "")
+        self.assertEqual(got["s3_outcome"], "")
+        self.assertNotEqual(got["cur_outcome"], "")
+        self.assertNotEqual(got["s2_outcome"], "")
 
     def test_no_future_reference_beyond_the_horizon(self):
         """**T+20 より先のバーを足しても結果が変わらない**（未来参照の禁止）。"""

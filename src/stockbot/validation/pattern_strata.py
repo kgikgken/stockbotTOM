@@ -97,6 +97,24 @@ SUMMARY_COLS = ["window", "axis", "bucket", "plan", "group", "n", "n_days",
 PRICE_BAND_EDGES_PATH = Path("data/reference/pattern_price_band_edges.json")
 
 
+def drop_excluded(replay: pd.DataFrame, excluded) -> tuple:
+    """データ品質で除外した銘柄の行を落とす（§13.5）。
+
+    **古い世代の再生結果には除外前の行が残っている** —— `universe_at` が除外リストを
+    見るようになったのは 2026-09-17 で、探索窓の再生はそれより前だから（§11.12）。
+    **再生はやり直さない**ので、ここで落とす。
+
+    返すのは `(落としたあとの表, 落とした行数, 該当した銘柄)`。**黙って落とさない。**
+    """
+    ex = set(excluded or ())
+    if not len(replay) or "ticker" not in replay.columns or not ex:
+        return replay, 0, []
+    tick = replay["ticker"].astype(str)
+    mask = tick.isin(ex)
+    hit = sorted(set(tick[mask]))
+    return replay[~mask].copy(), int(mask.sum()), hit
+
+
 def _f(value) -> Optional[float]:
     try:
         v = float(value)
