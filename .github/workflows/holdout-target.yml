@@ -1,0 +1,103 @@
+name: holdout-target
+
+# docs/BACKTEST.md §12。**測定目標の到達率係数補正をホールドアウトで 1 回だけ検証する。**
+#
+# **探索ではない。文献値の 1 回検証である**（設計責任者・2026-09-18）。§11.7 の
+# 「これを最後の探索とする」と矛盾しない —— **探索窓を使わない**ため。
+#
+# **このワークフローはホールドアウト専用で、走らせるのはこの 1 回だけ。**
+# pattern-backtest.yml とは別にしてあるのは、**Report / Exit / Stop の各ステップに
+# ホールドアウトを読ませないため**（§12 の「ホールドアウトの使用はこれ 1 回」）。
+#
+# 実行するのは 2 つだけ:
+#   1. pattern-replay --window holdout --include-holdout  （再生。約 15〜20 分）
+#   2. pattern-target --window holdout --include-holdout  （係数補正の比較）
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "ホールドアウトを使う。実行するには RUN-HOLDOUT-ONCE と入力"
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+# data-daily と同じグループ。store の読み書きが重ならないようにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  holdout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      # **合言葉を要求する。** ホールドアウトは 1 回きりなので、誤って起動したら
+      # 取り返しがつかない（CLAUDE.md「ホールドアウトを見ない」）
+      - name: Confirm
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "RUN-HOLDOUT-ONCE" ]; then
+            echo "confirm に RUN-HOLDOUT-ONCE を入れないと走らない（BACKTEST.md §12）"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      # ホールドアウト専用の世代。探索窓・確認窓のキャッシュと混ぜない
+      - name: Restore holdout replay
+        uses: actions/cache@v4
+        with:
+          path: data/pattern_replay
+          key: pattern-replay-v3-holdout-${{ github.run_id }}
+          restore-keys: |
+            pattern-replay-v3-holdout-
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      # 除外が効いていることを実行前に確かめる（§12 の実行条件）
+      - name: Excluded impact
+        run: python scripts/excluded_impact.py
+
+      - name: Replay (holdout)
+        env:
+          K: "3"
+        run: |
+          python -m stockbot.cli pattern-replay \
+            --window holdout --include-holdout
+
+      - name: Target (holdout)
+        run: |
+          python -m stockbot.cli pattern-target \
+            --window holdout --include-holdout
+
+      - name: Upload tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holdout-target-${{ github.run_id }}
+          path: |
+            data/pattern_replay/holdout
+            data/pattern_exit
+          if-no-files-found: ignore

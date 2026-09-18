@@ -25,6 +25,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stockbot.config import Settings                                   # noqa: E402
+from stockbot.data.jpx_lists import load_listed                        # noqa: E402
 from stockbot.data.store import IDX_TICKER, OhlcvStore, from_long      # noqa: E402
 from stockbot.validation.layer1 import DATA_QUALITY_EXCLUDED_2026_09   # noqa: E402
 from stockbot.validation.pattern_replay import (                       # noqa: E402
@@ -36,10 +37,15 @@ WINDOWS = (("探索窓", SEARCH_WINDOW), ("確認窓", CONFIRM_WINDOW),
            ("ホールドアウト", HOLDOUT_WINDOW))
 
 
-def gate_days(df: pd.DataFrame, lo: pd.Timestamp, hi: pd.Timestamp, cfg: Settings):
-    """窓の中で**ユニバースのゲートを通っていた日**（`universe_at` と同じ条件）。"""
-    if df is None or len(df) == 0:
-        return pd.DatetimeIndex([]), 0
+def gate_days(df: pd.DataFrame, lo: pd.Timestamp, hi: pd.Timestamp, cfg: Settings,
+              is_equity: bool = True):
+    """窓の中で**ユニバースのゲートを通っていた日**（`universe_at` と同じ条件）。
+
+    **上場一覧に無い銘柄は 0 日**（`universe_at` は上場株式の集合で先に絞る）。
+    """
+    if df is None or len(df) == 0 or not is_equity:
+        return pd.DatetimeIndex([]), (0 if df is None or len(df) == 0
+                                      else int(((df.index >= lo) & (df.index <= hi)).sum()))
     adv = (df["Close"] * df.get("Volume", pd.Series(np.nan, index=df.index))) \
         .rolling(20, min_periods=20).mean()
     close = df["Close"]
@@ -65,6 +71,12 @@ def horizon_return(df: pd.DataFrame, t: pd.Timestamp, horizon: int = HORIZON) ->
 
 def main() -> int:
     cfg = Settings.from_env()
+    listed_path = cfg.reference_dir / "listed_latest.csv"
+    equities = set()
+    if listed_path.exists():
+        listed = load_listed(listed_path)
+        equities = set(listed[listed["is_equity"].astype(bool)]["ticker"].astype(str))
+    print(f"[excluded-impact] 上場一覧（{listed_path.name}）の株式: {len(equities)}銘柄")
     store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
     long = store.load()
     if not len(long):
@@ -85,10 +97,12 @@ def main() -> int:
         if df is None or len(df) == 0:
             print(f"[excluded-impact] {ticker}: store に行が無い")
             continue
+        eq = (ticker in equities) if equities else True
         print(f"[excluded-impact] --- {ticker} "
-              f"({df.index.min():%Y-%m-%d}〜{df.index.max():%Y-%m-%d} {len(df)}行) ---")
+              f"({df.index.min():%Y-%m-%d}〜{df.index.max():%Y-%m-%d} {len(df)}行) / "
+              f"上場一覧に{'あり' if eq else '**なし**（プールに入らない）'} ---")
         for name, (lo, hi) in WINDOWS:
-            days, n_rows = gate_days(df, lo, hi, cfg)
+            days, n_rows = gate_days(df, lo, hi, cfg, is_equity=eq)
             if not len(days):
                 print(f"[excluded-impact]   {name}: 行 {n_rows} / "
                       f"**ゲート通過 0 日**（プールに入っていない）")
