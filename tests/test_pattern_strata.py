@@ -6,6 +6,7 @@
 落ちないこと**、**T+20 より先のバーを足しても結果が変わらないこと**。
 """
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,8 +15,11 @@ import numpy as np
 import pandas as pd
 
 from . import _path  # noqa: F401
+from stockbot import cli as cli_mod
+from stockbot.config import Settings
 from stockbot.features import pattern as pattern_mod
 from stockbot.validation import pattern_exit as exit_mod
+from stockbot.validation import pattern_replay
 from stockbot.validation import pattern_stop as stop_mod
 from stockbot.validation import pattern_strata as st_mod
 from stockbot.validation import pattern_target as tgt_mod
@@ -348,6 +352,55 @@ class ByStrataTest(unittest.TestCase):
         head = st_mod.format_strata_table(out, st_mod.PLAN_BREAKOUT,
                                           with_r20=True)[0]
         self.assertIn("平均r20", head)
+
+
+class DryrunEdgesPathTest(unittest.TestCase):
+    """境界ファイルは cfg.reference_dir 経由で読み書きする。**DRYRUN では
+    data-dryrun/reference/ になり、本番の data/reference/ を合成データで
+    上書きしない**（CLAUDE.md の落とし穴1・2026-08-22 のデータ混入事故と同じ形）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._cwd = os.getcwd()
+        os.chdir(self._tmp.name)
+        self._env_names = ("SCREEN_DRYRUN", "DATA_DIR")
+        self._saved = {k: os.environ.get(k) for k in self._env_names}
+        os.environ["SCREEN_DRYRUN"] = "1"
+        os.environ.pop("DATA_DIR", None)
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        self._tmp.cleanup()
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _write_replay(self, cfg):
+        out = Path(cfg.data_dir) / "pattern_replay" / "search"
+        out.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([
+            {"date": pd.Timestamp("2024-01-0%d" % (i + 1)), "ticker": f"{1000 + i}.T",
+             "close_t": close_t}
+            for i, close_t in enumerate((100.0, 200.0, 300.0))])
+        df.to_csv(out / f"{pattern_replay.PREFIX}20240101{pattern_replay.SUFFIX}",
+                  index=False, compression="gzip")
+
+    def test_boundary_file_goes_to_dryrun_dir_not_production(self):
+        """境界ファイルが無い状態から --window search を実行しても、
+        本番の data/reference/ には書かれない。"""
+        cfg = Settings.from_env()
+        self.assertEqual(str(cfg.data_dir), "data-dryrun")
+        self._write_replay(cfg)
+        cli_mod.step_pattern_strata(cfg, "search", False, log=lambda *_a: None)
+
+        prod_path = Path("data") / "reference" / st_mod.PRICE_BAND_EDGES_FILENAME
+        self.assertFalse(prod_path.exists())
+
+        dryrun_path = cfg.reference_dir / st_mod.PRICE_BAND_EDGES_FILENAME
+        self.assertTrue(dryrun_path.exists())
 
 
 if __name__ == "__main__":
