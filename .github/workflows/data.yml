@@ -91,9 +91,14 @@ jobs:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
         run: python -m stockbot.cli pattern
 
-      # 配信記録に5営業日後の結果を付ける（docs/SCREENER.md §3.3）。references と同じく
-      # daily とは別ステップにして、ここが失敗しても取得・保存の成果を失わないようにする。
-      # **パターンの記録は飛ばす**（成功の定義が未決。docs/PATTERN.md §4 Q-3）。
+      # 配信記録に結果を付ける。references と同じく daily とは別ステップにして、
+      # ここが失敗しても取得・保存の成果を失わないようにする。
+      # **押し目型とパターンで評価窓が違う**（列も別。混ぜない）:
+      #   - 押し目型: 5 営業日（docs/SCREENER.md §3.3）→ `outcome_*.csv`
+      #   - パターン: 20 営業日（docs/PATTERN.md §3.4・§4 Q-3 でクローズ済み）
+      #     → `pattern_outcome_*.csv`
+      # `resolve_pending` が配信記録の列で見分けて振り分ける。**評価窓が経過した
+      # ファイルだけに付ける** —— 経過前のものは次回に持ち越す。
       - name: Resolve delivered records
         env:
           SCREEN_DRYRUN: ${{ github.event.inputs.dryrun || '0' }}
@@ -103,6 +108,8 @@ jobs:
       # 指示で再開した（19条件のスクリーナー撤去に伴い 2026-09-08 に外していた）。
       # **成立0件の日も送る** —— 送らないと動いているのか壊れているのか分からない。
       # continue-on-error にする: 配信が失敗しても取得・保存・記録は残す。
+      # なお `cli notify` は**その日のパターン要約が無いと何も送らない**ので、手で
+      # 叩いても古い候補が流れることはない。
       - name: Notify
         if: github.event.inputs.dryrun != '1'
         continue-on-error: true
@@ -121,14 +128,6 @@ jobs:
           if ! git push; then
             git pull --rebase && git push
           fi
-
-      # LINE 配信は停止中（2026-09-08）。19 条件のスクリーナーを外して候補が
-      # 出なくなったので、空の配信を送らないためにステップごと外してある
-      # （docs/SCREENER_CLOSING.md）。**配信経路そのものは消していない** ——
-      # worker.js・Secrets・notify コマンド・画像カードの描画はすべて残っており、
-      # パターン実装が入ったらこのステップを戻すだけで再開できる。
-      # なお `cli notify` は「今日の配信日の要約」が無いと何も送らないので、
-      # 手で叩いても古い候補が流れることはない。
 
       - name: Upload artifacts
         if: always()
