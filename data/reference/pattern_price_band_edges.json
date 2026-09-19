@@ -1,0 +1,15 @@
+{
+  "window": "search",
+  "window_start": "2021-08-01",
+  "window_end": "2026-01-30",
+  "n_rows": 43487,
+  "n_bands": 3,
+  "note": "docs/BACKTEST.md §13.2。探索窓で作って全窓で固定する",
+  "value": "close_t",
+  "edges": [
+    null,
+    1511.0,
+    2706.666748046875,
+    null
+  ]
+}

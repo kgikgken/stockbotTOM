@@ -94,7 +94,11 @@ SUMMARY_COLS = ["window", "axis", "bucket", "plan", "group", "n", "n_days",
 # これをそのまま使う。** 窓ごとに切り直すと「低位」が窓ごとに別の値段を指す。
 # Actions の cache は窓ごとに分かれていて期限もあるので、**リポジトリに置いて
 # 確定値にする**（§4.2 の抜け幅 5 分位と同じ扱い）
-PRICE_BAND_EDGES_PATH = Path("data/reference/pattern_price_band_edges.json")
+PRICE_BAND_EDGES_FILENAME = "pattern_price_band_edges.json"
+# 本番の既定パス。**cfg がある呼び出し元（cli.py）は cfg.reference_dir /
+# PRICE_BAND_EDGES_FILENAME を明示的に渡すこと** —— DRYRUN では data-dryrun/reference/
+# になり、本番の境界ファイルを合成データで上書きしない（CLAUDE.md の落とし穴1）
+PRICE_BAND_EDGES_PATH = Path("data/reference") / PRICE_BAND_EDGES_FILENAME
 
 
 def drop_excluded(replay: pd.DataFrame, excluded) -> tuple:

@@ -1217,7 +1217,9 @@ def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
     そのまま適用するだけ。
 
     **株価帯の境界は探索窓で作り、全窓で固定する**（§13.2）。無ければ探索窓で
-    作って `data/reference/` に書く。ほかの窓では作らない。
+    作って `cfg.reference_dir` に書く。ほかの窓では作らない。**`cfg.reference_dir`
+    経由にする** —— DRYRUN では `data-dryrun/reference/` になり、本番の境界ファイルを
+    合成データで上書きしない（CLAUDE.md の落とし穴1と同じ理由）。
 
     **ホールドアウトは `--include-holdout` を明示したときだけ**（CLAUDE.md の
     絶対規則）。§12 で使用済みなので追加の使用にはあたらない（§13.1）。
@@ -1252,10 +1254,13 @@ def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
             "**S1・S3 は全行「対象外」になる**（古い世代の再生結果）")
 
     # 株価帯の境界（§13.2）。**探索窓で作り、全窓で固定する**
-    edges = pattern_strata.load_frozen_bands()
+    # **cfg.reference_dir 経由。** DRYRUN では data-dryrun/reference/ になり、
+    # 本番の境界ファイルを合成データで上書きしない
+    edges_path = cfg.reference_dir / pattern_strata.PRICE_BAND_EDGES_FILENAME
+    edges = pattern_strata.load_frozen_bands(edges_path)
     if edges is None:
         if window != "search":
-            log(f"[pattern-strata] 株価帯の境界（{pattern_strata.PRICE_BAND_EDGES_PATH}）"
+            log(f"[pattern-strata] 株価帯の境界（{edges_path}）"
                 "が無い。**窓ごとに切り直さない**ので、先に --window search を実行する")
             return
         edges = pattern_strata.price_band_edges(replay)
@@ -1266,7 +1271,7 @@ def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
             "window": "search", "window_start": str(PATTERN_WINDOWS["search"][0]),
             "window_end": str(PATTERN_WINDOWS["search"][1]),
             "n_rows": int(len(replay)), "n_bands": pattern_strata.N_PRICE_BANDS,
-            "note": "docs/BACKTEST.md §13.2。探索窓で作って全窓で固定する"})
+            "note": "docs/BACKTEST.md §13.2。探索窓で作って全窓で固定する"}, edges_path)
         log(f"[pattern-strata] 株価帯の境界を探索窓で作って固定した → {path}")
     log("[pattern-strata] 株価帯（固定・全窓共通）: "
         + " / ".join(pattern_strata.band_labels(edges)))
