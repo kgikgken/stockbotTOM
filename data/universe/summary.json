@@ -6,7 +6,7 @@
  "fail_price": 200,
  "fail_history": 12,
  "fail_split": 10,
- "fail_fresh": 8,
+ "fail_fresh": 9,
  "by_market": {
   "Prime": 1097,
   "Standard": 99,
