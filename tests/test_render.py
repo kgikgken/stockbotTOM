@@ -298,6 +298,20 @@ class HtmlTest(unittest.TestCase):
         body = html.split('id="page1"')[1]
         self.assertNotIn("**", body)
 
+    def test_stop_cell_shows_both_the_yen_gap_and_the_percent(self):
+        """撤退の目安は**円建ての差額と乖離率の両方**（§6.2）。
+
+        円は 1 株あたりの想定損失で株数計算に使い、% は終値からの距離である。
+        圧縮時に % が落ちていたので、表示されることをここで固定する。
+        数値と単位が行をまたいで割れないよう `nb`（nowrap）で囲ってある。
+        """
+        html = self._html(frame([row()]), None)
+        self.assertIn("撤退の目安", html)
+        self.assertIn("-17.0円", html)            # 円建ての差額
+        self.assertIn("（-3.4%）", html)           # 乖離率
+        self.assertIn('<span class="nb">-17.0円</span>', html)
+        self.assertIn('<span class="nb">（-3.4%）</span>', html)
+
     def test_card_shows_atr_stop_yen_and_first_take(self):
         """追加した 3 項目が実際にページに出る（§6.2）。"""
         html = self._html(frame([row()]), None)

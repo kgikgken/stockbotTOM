@@ -55,6 +55,9 @@
            overflow: hidden; text-overflow: ellipsis; }
   .cv .v { font-size: 14px; font-weight: 700; }
   .cv .v .g { font-size: 10.5px; font-weight: 400; color: var(--muted); }
+  /* 値が 2 行になるときに**数値と単位の間で割れない**ようにする。折り返しは
+     数値どうしの境目だけで起きる（8766.T の「-1,112.0 / 円」で実際に割れた） */
+  .cv .v .nb { white-space: nowrap; }
   .cv.stop { border-left-color: #d99a90; }
   .cv.stop .v { color: var(--warn); }
   .cv.target { border-left-color: #8bbfa2; }
@@ -130,27 +133,27 @@
   <div class="cvals">
     <div class="cv">
       <div class="k">終値</div>
-      <div class="v">{{ c.close }}円</div>
+      <div class="v"><span class="nb">{{ c.close }}円</span></div>
     </div>
     <div class="cv">
       <div class="k">{{ c.neckline_label }}</div>
-      <div class="v">{{ c.neckline }}円<span class="g"> {{ c.breakout }}</span></div>
+      <div class="v"><span class="nb">{{ c.neckline }}円</span><span class="g"> <span class="nb">{{ c.breakout }}</span></span></div>
     </div>
     <div class="cv stop">
       <div class="k">撤退の目安</div>
-      <div class="v">{{ c.stop }}円<span class="g"> {{ c.stop_yen }}円</span></div>
+      <div class="v"><span class="nb">{{ c.stop }}円</span><span class="g"> <span class="nb">{{ c.stop_yen }}円</span><span class="nb">（{{ c.stop_gap }}）</span></span></div>
     </div>
     <div class="cv target">
       <div class="k">測定目標（文献上の目安）</div>
-      <div class="v">{{ c.target }}円<span class="g"> {{ c.target_gap }}</span></div>
+      <div class="v"><span class="nb">{{ c.target }}円</span><span class="g"> <span class="nb">{{ c.target_gap }}</span></span></div>
     </div>
     <div class="cv firsttake">
       <div class="k">利確の目安・1段目（{{ c.first_take_mult }}）<span class="note">運用上の目安</span></div>
-      <div class="v">{{ c.first_take }}円<span class="g"> {{ c.first_take_yen }}円・文献値ではない</span></div>
+      <div class="v"><span class="nb">{{ c.first_take }}円</span><span class="g"> <span class="nb">{{ c.first_take_yen }}円</span><span class="nb">・文献値ではない</span></span></div>
     </div>
     <div class="cv">
       <div class="k">比率（目標÷撤退）</div>
-      <div class="v">{{ c.rr }}<span class="g">／形成 {{ c.span }}</span></div>
+      <div class="v"><span class="nb">{{ c.rr }}</span><span class="g"><span class="nb">／形成 {{ c.span }}</span></span></div>
     </div>
   </div>
   <div class="ext">
