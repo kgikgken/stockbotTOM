@@ -30,69 +30,71 @@
   .box h3 { font-size: 17px; margin-bottom: 4px; }
   .box .sub { font-size: 13px; color: var(--muted); line-height: 1.6; }
   .box .sub.warn { color: var(--warn); font-weight: 700; }
-  .secrank { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 9px;
-             background: #f1ece3; border: 1px solid var(--line); font-size: 11px;
-             font-weight: 700; color: var(--accent); }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
 
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
-          padding: 12px 14px; margin-bottom: 11px; }
-  .card .top { display: flex; align-items: baseline; gap: 9px; margin-bottom: 2px; }
-  .card .num { background: var(--band); color: #fff; width: 24px; height: 24px;
-               border-radius: 50%; display: inline-flex; align-items: center;
-               justify-content: center; font-size: 13px; flex: none; }
-  .card .code { font-size: 20px; font-weight: 700; }
-  .card .name { font-size: 19px; font-weight: 700; }
   .tag { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: #f3e7d8;
          color: var(--accent); font-weight: 700; }
   .tag.streak { background: #e8f1ec; color: var(--ok); }
-  .card .meta { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
-  .vals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-bottom: 8px; }
-  .val { border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; }
-  .val .k { font-size: 11.5px; color: var(--muted); }
-  .val .v { font-size: 17px; font-weight: 700; margin-top: 1px; }
-  .val .g { font-size: 11.5px; color: var(--muted); }
-  .val.stop { border-color: #e6c3bd; background: #fdf6f5; }
-  .val.stop .v { color: var(--warn); }
-  .val.target { border-color: #c6ddcd; background: #f4faf6; }
-  .val.target .v { color: var(--ok); }
-  /* 利確の目安（1段目）は測定目標と**別物**。枠線を破線にして「文献値ではない」を見た目でも分ける */
-  .val.firsttake { border-style: dashed; border-color: #cfd4da; background: #fafbfc; }
-  .val.firsttake .k .note { font-weight: 700; color: var(--warn); margin-left: 4px; }
-  .row { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); }
+  .tag.watchtag { background: #eee9e0; color: var(--muted); }
+  /* 同じ銘柄が複数パターンで出ていることの印（§6.4）。**表示だけ**で記録は行単位のまま */
+  .tag.multi { background: #eef1f6; color: #4a5a72; }
+
+  /* ---- 圧縮カード（2・3枚目）。全件を載せるため 1 枚あたりの高さを詰める ---- */
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 9px 11px; margin-bottom: 8px; }
+  .card.watchcard { border-style: dashed; background: #fcfbf8; }
+  .card .top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+  .card .code { font-size: 17px; font-weight: 700; }
+  .card .name { font-size: 16px; font-weight: 700; }
+  /* 業種はヘッダ行の右端へ。表示のみで並び順には使わない（§6.5） */
+  .card .sect { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+
+  .cvals { display: grid; grid-template-columns: repeat(6, 1fr); gap: 7px; margin-bottom: 5px; }
+  .cv { border-left: 3px solid var(--line); padding-left: 7px; }
+  .cv .k { font-size: 10.5px; color: var(--muted); white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; }
+  .cv .v { font-size: 14px; font-weight: 700; }
+  .cv .v .g { font-size: 10.5px; font-weight: 400; color: var(--muted); }
+  .cv.stop { border-left-color: #d99a90; }
+  .cv.stop .v { color: var(--warn); }
+  .cv.target { border-left-color: #8bbfa2; }
+  .cv.target .v { color: var(--ok); }
+  /* 利確の目安（1段目）は測定目標と**別物**（§6.7）。名前・破線の枠・赤字の注記の
+     3 つで分ける。圧縮しても 3 つとも落とさない */
+  .cv.firsttake { border: 1px dashed #cfd4da; border-left: 1px dashed #cfd4da;
+                  background: #fafbfc; padding: 1px 5px; border-radius: 5px; }
+  .cv.firsttake .k .note { font-weight: 700; color: var(--warn); margin-left: 3px; }
+
+  .ext { font-size: 11px; color: var(--muted); line-height: 1.5; margin-bottom: 3px; }
+  .ext b { color: var(--ink); }
+  .ext .d { font-weight: 700; color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 3px 14px; font-size: 11px; color: var(--muted); }
   .row .em { color: var(--ink); font-weight: 700; }
   .row .warn { color: var(--warn); font-weight: 700; }
-  .exit { margin-top: 7px; font-size: 12.5px; color: var(--accent); font-weight: 700; }
+  .scatter { font-weight: 700; }
+  .scatter.wide { color: var(--warn); }
+
+  .sec { margin-bottom: 12px; }
+  .sec > h2 { font-size: 17px; margin: 12px 0 7px; padding-left: 9px;
+              border-left: 5px solid var(--accent); }
+
+  /* ---- 一覧・内訳の表（1枚目） ---- */
+  table.t { border-collapse: collapse; font-size: 13px; width: 100%; }
+  table.t td, table.t th { padding: 4px 8px; border-bottom: 1px solid var(--line);
+                           text-align: left; }
+  table.t th { font-size: 11.5px; color: var(--muted); font-weight: 700; }
+  table.t td.n, table.t th.n { text-align: right; }
+  table.t td.code { font-weight: 700; font-size: 14px; white-space: nowrap; }
+  table.t td.nm { font-weight: 700; }
+  table.t td.pt { white-space: nowrap; }
+  table.t tr.multi td { background: #f7f8fb; }
+  table.t td.stopv { color: var(--warn); font-weight: 700; }
+  table.t td.tgtv { color: var(--ok); font-weight: 700; }
 
   .zero { text-align: center; padding: 20px 12px; }
   .zero .lead { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
-  .zero table { margin: 0 auto; border-collapse: collapse; font-size: 14px; }
-  .zero td { padding: 4px 12px; }
-  .zero td.n { text-align: right; font-weight: 700; }
   .foot { font-size: 12px; color: var(--muted); line-height: 1.7; border-top: 1px solid var(--line);
           padding-top: 9px; margin-top: 4px; }
-
-  .sumlist .item { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line);
-                   border-radius: 11px; padding: 12px 14px; margin-bottom: 9px; background: var(--card); }
-  .sumlist .item .code { font-size: 21px; font-weight: 700; }
-  .sumlist .item .name { font-size: 20px; font-weight: 700; }
-  .sumlist .item .tag { margin-left: auto; }
-
-  .sec { margin-bottom: 14px; }
-  .sec > h2 { font-size: 18px; margin: 14px 0 8px; padding-left: 9px;
-              border-left: 5px solid var(--accent); }
-  .sec .subhead { font-size: 13.5px; font-weight: 700; color: var(--muted);
-                  margin: 6px 0 7px; }
-  .card.watchcard { border-style: dashed; background: #fcfbf8; }
-  .tag.watchtag { background: #eee9e0; color: var(--muted); }
-  .ext { font-size: 12.5px; color: var(--muted); margin-bottom: 7px; line-height: 1.7; }
-  .ext b { color: var(--ink); }
-  .ext .d { font-weight: 700; color: var(--accent); }
-  .scatter { font-weight: 700; }
-  .scatter.wide { color: var(--warn); }
-  .brk table { border-collapse: collapse; font-size: 14px; width: 100%; }
-  .brk td, .brk th { padding: 5px 10px; border-bottom: 1px solid var(--line); text-align: left; }
-  .brk td.n, .brk th.n { text-align: right; }
 </style>
 
 {% macro header(title) %}
@@ -102,16 +104,16 @@
   <div class="datebadge">{{ ctx.delivered_on }}（判定 {{ ctx.asof }} の引け）</div>
 </div>
 <div class="box regime">
-  <h3>成立 {{ ctx.n_done }}件 ／ 監視 {{ ctx.n_watch }}件（1枚目に上位 {{ ctx.n_watch_shown }}件）</h3>
+  <h3>{{ ctx.headline }}</h3>
   <div class="sub">判定対象 {{ "{:,}".format(ctx.n_evaluated) }}銘柄</div>
   {% if ctx.no_done_note %}<div class="sub warn">※ {{ ctx.no_done_note }}</div>{% endif %}
 </div>
 {% endmacro %}
 
 {% macro extremes(label, items) %}
-  {% if items %}<div class="ext"><b>{{ label }}</b>
+  {% if items %}<b>{{ label }}</b>
     {% for e in items %}<span class="d">{{ e.date }}</span> {{ e.value }}{% if not loop.last %} / {% endif %}{% endfor %}
-  </div>{% endif %}
+  {% endif %}
 {% endmacro %}
 
 {% macro card(c) %}
@@ -121,34 +123,39 @@
     <span class="name">{{ c.name }}</span>
     <span class="tag">{{ c.pattern_label }}</span>
     {% if c.watch %}<span class="tag watchtag">監視</span>{% endif %}
+    {% if c.multi %}<span class="tag multi">複数パターン</span>{% endif %}
     {% if c.streak %}<span class="tag streak">{{ c.streak }}</span>{% endif %}
+    <span class="sect">{{ c.sector33 }}</span>
   </div>
-  <div class="meta">{{ c.sector33 }}</div>
-  <div class="vals">
-    <div class="val">
-      <div class="k">終値</div><div class="v">{{ c.close }}円</div>
-      <div class="g">{{ c.neckline_label }} {{ c.neckline }}円（{{ c.breakout }}）</div>
+  <div class="cvals">
+    <div class="cv">
+      <div class="k">終値</div>
+      <div class="v">{{ c.close }}円</div>
     </div>
-    <div class="val stop">
-      <div class="k">撤退の目安</div><div class="v">{{ c.stop }}円</div>
-      <div class="g">終値から {{ c.stop_yen }}円（{{ c.stop_gap }}）</div>
+    <div class="cv">
+      <div class="k">{{ c.neckline_label }}</div>
+      <div class="v">{{ c.neckline }}円<span class="g"> {{ c.breakout }}</span></div>
     </div>
-    <div class="val target">
-      <div class="k">測定目標（文献上の目安）</div><div class="v">{{ c.target }}円</div>
-      <div class="g">終値から {{ c.target_gap }}</div>
+    <div class="cv stop">
+      <div class="k">撤退の目安</div>
+      <div class="v">{{ c.stop }}円<span class="g"> {{ c.stop_yen }}円</span></div>
     </div>
-    <div class="val firsttake">
+    <div class="cv target">
+      <div class="k">測定目標（文献上の目安）</div>
+      <div class="v">{{ c.target }}円<span class="g"> {{ c.target_gap }}</span></div>
+    </div>
+    <div class="cv firsttake">
       <div class="k">利確の目安・1段目（{{ c.first_take_mult }}）<span class="note">運用上の目安</span></div>
-      <div class="v">{{ c.first_take }}円</div>
-      <div class="g">終値から {{ c.first_take_yen }}円・文献値でも検証済みでもない</div>
+      <div class="v">{{ c.first_take }}円<span class="g"> {{ c.first_take_yen }}円・文献値ではない</span></div>
     </div>
-    <div class="val">
-      <div class="k">比率（目標÷撤退）</div><div class="v">{{ c.rr }}</div>
-      <div class="g">形成 {{ c.span }}</div>
+    <div class="cv">
+      <div class="k">比率（目標÷撤退）</div>
+      <div class="v">{{ c.rr }}<span class="g">／形成 {{ c.span }}</span></div>
     </div>
   </div>
-  {{ extremes("谷", c.troughs) }}
-  {{ extremes("山", c.peaks) }}
+  <div class="ext">
+    {{ extremes("谷", c.troughs) }}{% if c.troughs and c.peaks %} ・ {% endif %}{{ extremes("山", c.peaks) }}
+  </div>
   <div class="row">
     <span>ATR <span class="em">{{ c.atr }}</span></span>
     <span>20日平均売買代金 <span class="em">{{ c.adv }}</span></span>
@@ -163,70 +170,111 @@
 <div class="page" id="page1">
   {{ header("チャートパターン検出") }}
 
-  {% for s in ctx.sections %}
-  <div class="sec">
-    <h2>{{ s.label }}（成立 {{ s.n_done }}件 / 監視 {{ s.n_watch }}件）</h2>
-    {% if s.done %}
-      <div class="subhead">候補（上値抵抗線を抜けた）</div>
-      {% for c in s.done %}{{ card(c) }}{% endfor %}
-    {% endif %}
-    {% if s.watch %}
-      <div class="subhead">監視（形は揃い、まだ抜けていない）</div>
-      {% for c in s.watch %}{{ card(c) }}{% endfor %}
-    {% endif %}
+  <div class="grid2">
+    <div class="box">
+      <h3 style="font-size:15px">パターン別の検出数</h3>
+      {% if ctx.breakdown %}
+      <table class="t" style="margin-top:6px">
+        <tr><th>パターン</th><th class="n">成立</th><th class="n">監視</th></tr>
+        {% for b in ctx.breakdown %}
+        <tr><td>{{ b.label }}</td><td class="n">{{ b.done }}</td><td class="n">{{ b.watch }}</td></tr>
+        {% endfor %}
+        <tr><td><b>合計</b></td><td class="n"><b>{{ ctx.breakdown_done }}</b></td>
+            <td class="n"><b>{{ ctx.breakdown_watch }}</b></td></tr>
+      </table>
+      {% else %}<div class="sub">検出なし。</div>{% endif %}
+    </div>
+
+    <div class="box">
+      <h3 style="font-size:15px">業種別の成立数</h3>
+      {% if ctx.sectors %}
+      <table class="t" style="margin-top:6px">
+        <tr><th>業種</th><th class="n">成立</th></tr>
+        {% for s in ctx.sectors %}
+        <tr><td>{{ s.label }}</td><td class="n">{{ s.n }}</td></tr>
+        {% endfor %}
+      </table>
+      {% else %}<div class="sub">成立なし。</div>{% endif %}
+    </div>
   </div>
+
+  <div class="box">
+    <h3 style="font-size:15px">成立した銘柄（全 {{ ctx.n_done }}件）</h3>
+    {% if ctx.compact %}
+    <table class="t" style="margin-top:6px">
+      <tr><th>コード</th><th>銘柄名</th><th>パターン</th><th>業種</th>
+          <th class="n">終値</th><th class="n">撤退の目安</th>
+          <th class="n">測定目標</th><th class="n">比率</th></tr>
+      {% for c in ctx.compact %}
+      <tr{% if c.multi %} class="multi"{% endif %}>
+        <td class="code">{{ c.ticker }}</td>
+        <td class="nm">{{ c.name }}</td>
+        <td class="pt">{{ c.pattern_label }}{% if c.multi %}
+          <span class="tag multi">複数</span>{% endif %}</td>
+        <td>{{ c.sector33 }}</td>
+        <td class="n">{{ c.close }}</td>
+        <td class="n stopv">{{ c.stop }}</td>
+        <td class="n tgtv">{{ c.target }}</td>
+        <td class="n">{{ c.rr }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}<div class="sub">{{ ctx.no_done_note }}</div>{% endif %}
+  </div>
+
+  <div class="foot">
+    {{ ctx.target_note }}<br>{{ ctx.sector_note }}<br>
+    詳細（利確の目安・極値の日付・ATR・売買代金・決算）は2枚目。監視は3枚目。<br>
+    {{ ctx.disclaimer }}
+  </div>
+</div>
+
+<div class="page" id="page2">
+  {{ header("成立の詳細") }}
+
+  {% for s in ctx.sections %}
+  {% if s.done %}
+  <div class="sec">
+    <h2>{{ s.label }}（成立 {{ s.n_done }}件）</h2>
+    {% for c in s.done %}{{ card(c) }}{% endfor %}
+  </div>
+  {% endif %}
   {% endfor %}
 
-  {% if not ctx.sections %}
+  {% if ctx.n_done == 0 %}
   <div class="box zero">
-    <div class="lead">本日は成立も監視もありません。</div>
+    <div class="lead">{{ ctx.no_done_note }}</div>
+    <div class="sub" style="margin-top:9px">監視は3枚目を参照。</div>
+  </div>
+  {% endif %}
+
+  <div class="foot">
+    {{ ctx.target_note }}<br>{{ ctx.first_take_note }}<br>{{ ctx.sector_note }}<br>
+    {{ ctx.disclaimer }}
+  </div>
+</div>
+
+<div class="page" id="page3">
+  {{ header("監視（形は揃い、まだ抜けていない）") }}
+
+  {% for s in ctx.sections %}
+  {% if s.watch %}
+  <div class="sec">
+    <h2>{{ s.label }}（監視 {{ s.n_watch }}件）</h2>
+    {% for c in s.watch %}{{ card(c) }}{% endfor %}
+  </div>
+  {% endif %}
+  {% endfor %}
+
+  {% if ctx.n_watch_shown == 0 %}
+  <div class="box zero">
+    <div class="lead">本日の監視はありません。</div>
     <div class="sub" style="margin-top:9px">判定対象 {{ "{:,}".format(ctx.n_evaluated) }}銘柄。</div>
   </div>
   {% endif %}
 
   <div class="foot">
-    {{ ctx.target_note }}<br>{{ ctx.first_take_note }}<br>{{ ctx.watch_note }}<br>{{ ctx.sector_note }}<br>{{ ctx.disclaimer }}
-  </div>
-</div>
-
-<div class="page" id="page2">
-  {{ header("本日のまとめ") }}
-
-  <div class="box brk">
-    <h3 style="font-size:15px">パターン別の検出数</h3>
-    {% if ctx.breakdown %}
-    <table>
-      <tr><th>パターン</th><th class="n">成立</th><th class="n">監視</th></tr>
-      {% for b in ctx.breakdown %}
-      <tr><td>{{ b.label }}</td><td class="n">{{ b.done }}</td><td class="n">{{ b.watch }}</td></tr>
-      {% endfor %}
-      <tr><td><b>合計</b></td><td class="n"><b>{{ ctx.breakdown_done }}</b></td>
-          <td class="n"><b>{{ ctx.breakdown_watch }}</b></td></tr>
-    </table>
-    {% else %}
-    <div class="sub">検出なし。</div>
-    {% endif %}
-  </div>
-
-  <div class="box">
-    <h3 style="font-size:15px">成立した銘柄</h3>
-    {% if ctx.cards %}
-    <div class="sumlist" style="margin-top:8px">
-      {% for c in ctx.cards %}
-      <div class="item">
-        <span class="code">{{ c.ticker }}</span>
-        <span class="name">{{ c.name }}</span>
-        <span class="tag">{{ c.pattern_label }}</span>
-      </div>
-      {% endfor %}
-    </div>
-    {% else %}
-    <div class="sub">{{ ctx.no_done_note }}</div>
-    {% endif %}
-  </div>
-
-  <div class="foot">
-    監視は記録に残しません（推移は日次スナップショットに残ります）。<br>
-    詳細（撤退の目安・測定目標・比率・極値の日付）は1枚目を参照。<br>{{ ctx.disclaimer }}
+    {{ ctx.watch_note }}<br>監視は記録に残しません（推移は日次スナップショットに残ります）。<br>
+    {{ ctx.first_take_note }}<br>{{ ctx.disclaimer }}
   </div>
 </div>

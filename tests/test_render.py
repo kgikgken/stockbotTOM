@@ -305,18 +305,158 @@ class HtmlTest(unittest.TestCase):
             self.assertIn(token, html)
 
     def test_first_take_is_labelled_apart_from_the_measured_target(self):
-        """**カード上で別物と分かること。** 記録は測定目標が基準（§6.7）。"""
+        """**カード上で別物と分かること。** 記録は測定目標が基準（§6.7）。
+
+        §6.7 が挙げる 3 つ（名前・破線の枠・赤字の「運用上の目安」）を全部残す。
+        カード内の但し書きは圧縮時に短くしたが、全文は脚注（`FIRST_TAKE_NOTE`）にある。
+        """
         html = self._html(frame([row()]), None)
         self.assertIn("測定目標（文献上の目安）", html)
         self.assertIn("ATR×1", html)
         self.assertIn("運用上の目安", html)
-        self.assertIn("文献値でも検証済みでもない", html)
+        self.assertIn("文献値ではない", html)
+        self.assertIn("cv firsttake", html)          # 破線の枠
         self.assertIn(FIRST_TAKE_NOTE, html)
 
     def test_no_nan_in_the_output(self):
         html = self._html(frame([row(target=np.nan, rr=np.nan)]), None)
         self.assertNotIn("nan", html.split("<style>")[1].lower().split("</style>")[1])
         self.assertNotIn("NaT", html)
+
+
+class SectorBreakdownTest(unittest.TestCase):
+    """業種別の件数（§6.5）。**表示のみ。並び順にも判定にも使わない。**"""
+
+    def test_counts_descending_and_ties_keep_record_order(self):
+        d = frame([row("1.T", sector33="銀行業"), row("2.T", sector33="卸売業"),
+                   row("3.T", sector33="銀行業"), row("4.T", sector33="建設業")])
+        got = render_context.build_sector_breakdown(d)
+        self.assertEqual([(s["label"], s["n"]) for s in got],
+                         [("銀行業", 2), ("卸売業", 1), ("建設業", 1)])
+
+    def test_missing_sector_is_not_dropped(self):
+        got = render_context.build_sector_breakdown(frame([row(sector33="")]))
+        self.assertEqual(got, [{"label": "業種不明", "n": 1}])
+
+    def test_empty(self):
+        self.assertEqual(render_context.build_sector_breakdown(None), [])
+
+    def test_sector_note_is_kept(self):
+        ctx = build_context(frame([row()]), None, summary())
+        self.assertIn("並び順にも判定にも使っていません", ctx["sector_note"])
+
+
+class CompactListTest(unittest.TestCase):
+    """1枚目の成立一覧（全件）。**記録の並びをそのまま使う**（§6.6）。"""
+
+    def test_keeps_the_delivered_order_without_sorting(self):
+        d = frame([row("3.T"), row("1.T"), row("2.T")])
+        got = render_context.build_compact_rows(d)
+        self.assertEqual([c["ticker"] for c in got], ["3.T", "1.T", "2.T"])
+
+    def test_same_ticker_stays_adjacent(self):
+        """記録では売買代金が同値なので既に隣り合っている。並べ替えない。"""
+        d = frame([row("8766.T", "ascending_triangle"), row("8766.T", "inverse_hs"),
+                   row("9301.T", "ascending_triangle")])
+        got = render_context.build_compact_rows(d)
+        self.assertEqual([c["ticker"] for c in got],
+                         ["8766.T", "8766.T", "9301.T"])
+        self.assertEqual([c["multi"] for c in got], [True, True, False])
+
+    def test_every_row_has_its_numbers(self):
+        got = render_context.build_compact_rows(frame([row()]))[0]
+        self.assertEqual((got["close"], got["stop"], got["target"], got["rr"]),
+                         ("495.0", "478.0", "508.0", "0.76"))
+
+    def test_all_done_rows_appear(self):
+        d = frame([row(f"{i}.T") for i in range(44)])
+        ctx = build_context(d, None, summary())
+        self.assertEqual(len(ctx["compact"]), 44)
+        self.assertEqual(ctx["n_done"], 44)
+
+    def test_empty(self):
+        self.assertEqual(render_context.build_compact_rows(None), [])
+
+
+class MultiPatternTest(unittest.TestCase):
+    """同じ銘柄が複数パターンで成立しても**落とさない**（§6.4）。印を付けるだけ。"""
+
+    def test_rows_are_not_deduplicated(self):
+        d = frame([row("8424.T", "ascending_box"), row("8424.T", "ascending_triangle")])
+        ctx = build_context(d, None, summary())
+        self.assertEqual(ctx["n_done"], 2)          # 記録の数え方は行単位のまま
+        self.assertEqual(ctx["n_done_tickers"], 1)
+        self.assertEqual(ctx["n_multi"], 1)
+
+    def test_badge_is_on_both_cards(self):
+        d = frame([row("8424.T", "ascending_box"), row("8424.T", "ascending_triangle")])
+        ctx = build_context(d, None, summary())
+        cards = [c for s in ctx["sections"] for c in s["done"]]
+        self.assertEqual([c["multi"] for c in cards], [True, True])
+
+    def test_single_pattern_has_no_badge(self):
+        ctx = build_context(frame([row()]), None, summary())
+        self.assertFalse(ctx["sections"][0]["done"][0]["multi"])
+
+    def test_watch_badge_counts_only_the_rows_shown(self):
+        """切られた行まで数えると、1 件しか出ていないカードに「複数」と出る。"""
+        watch = frame([row(f"{i}.T", "ascending_triangle") for i in range(WATCH_MAX)]
+                      + [row("0.T", "ascending_box")])
+        ctx = build_context(None, watch, summary())
+        shown = [c for s in ctx["sections"] for c in s["watch"]]
+        self.assertEqual(len(shown), WATCH_MAX)
+        self.assertFalse(any(c["multi"] for c in shown))
+
+
+class HeadlineTest(unittest.TestCase):
+    """見出しの件数（§6.1）。**何の件数かが文として読めること。**"""
+
+    def test_plain_day(self):
+        ctx = build_context(frame([row()]), None, summary(n_watch=196))
+        self.assertEqual(ctx["headline"], "成立 1件 ／ 監視 196件")
+
+    def test_multi_pattern_is_spelled_out(self):
+        d = frame([row("8424.T", "ascending_box"), row("8424.T", "ascending_triangle"),
+                   row("1.T")])
+        ctx = build_context(d, None, summary(n_watch=217))
+        self.assertEqual(ctx["headline"],
+                         "成立 3件（2銘柄・複数パターン1銘柄） ／ 監視 217件")
+
+    def test_watch_says_what_the_shown_count_means(self):
+        ctx = build_context(None, frame([row("2.T", "ascending_triangle")]),
+                            summary(n_watch=217))
+        self.assertIn("監視 217件（うち上値抵抗線に近い1件を掲載）", ctx["headline"])
+        self.assertIn("成立 0件", ctx["headline"])
+
+
+class ThreePagesTest(unittest.TestCase):
+    """1枚目=まとめと全件一覧、2枚目=成立の詳細、3枚目=監視の詳細。"""
+
+    def _html(self, delivered, watch, **kw):
+        return render_html(delivered, watch, summary(**kw))
+
+    def test_three_pages_are_rendered(self):
+        html = self._html(frame([row()]), frame([row("2.T", "ascending_triangle")]))
+        for page_id in ("page1", "page2", "page3"):
+            self.assertIn(f'id="{page_id}"', html)
+
+    def test_page_ids_match_the_template(self):
+        from stockbot.render.render import PAGE_IDS
+        self.assertEqual(PAGE_IDS, ("page1", "page2", "page3"))
+
+    def test_done_details_on_page2_and_watch_on_page3(self):
+        html = self._html(frame([row("1.T")]), frame([row("2.T", "ascending_triangle")]))
+        page2 = html.split('id="page2"')[1].split('id="page3"')[0]
+        page3 = html.split('id="page3"')[1]
+        self.assertIn("1.T", page2)
+        self.assertNotIn("2.T", page2)
+        self.assertIn("2.T", page3)
+
+    def test_page1_lists_every_done_row_with_numbers(self):
+        html = self._html(frame([row("1.T"), row("2.T", "ascending_triangle")]), None)
+        page1 = html.split('id="page1"')[1].split('id="page2"')[0]
+        for token in ("1.T", "2.T", "478.0", "508.0", "0.76", "業種別の成立数"):
+            self.assertIn(token, page1)
 
 
 if __name__ == "__main__":
