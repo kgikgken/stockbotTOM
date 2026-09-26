@@ -21,7 +21,10 @@ import pandas as pd
 from .context import build_context
 
 TEMPLATE_NAME = "template.html"
-PAGE_IDS = ("page1", "page2")
+# 1枚目=まとめと成立の全件一覧、2枚目=成立の詳細、3枚目=監視の詳細。
+# 送信側は `for img in images` で回すだけなので、枚数はここだけで決まる
+# （`worker.js`・Secrets 名には触らない。CLAUDE.md）
+PAGE_IDS = ("page1", "page2", "page3")
 VIEWPORT = {"width": 1000, "height": 1400}
 SCALE = 2          # Retina 相当。LINE で読める解像度にする
 TIMEOUT_MS = 60000
