@@ -137,8 +137,12 @@ def _streak(row) -> Optional[str]:
     return f"監視{n}日目" if n > 1 else None
 
 
-def build_card(row, watch: bool = False) -> dict:
-    """1 行ぶんの表示内容。値はすべて記録・検出の列から来る（何も計算し直さない）。"""
+def build_card(row, watch: bool = False, multi: bool = False) -> dict:
+    """1 行ぶんの表示内容。値はすべて記録・検出の列から来る（何も計算し直さない）。
+
+    `multi` は同じ銘柄が複数パターンで出ていることの印（§6.4）。**表示だけ**で、
+    記録の数え方（行単位）も検出側も変えない。
+    """
     pattern = str(row.get("pattern") or "")
     close = _f(row.get("close_t"))
     scatter = _f(row.get("upper_scatter"))
@@ -183,6 +187,7 @@ def build_card(row, watch: bool = False) -> dict:
                 if _f(row.get("adv_jpy")) is not None else "—"),
         "earnings": _earnings(row),
         "streak": _streak(row) if watch else None,
+        "multi": bool(multi),
     }
 
 
@@ -190,6 +195,81 @@ def _rows(df: Optional[pd.DataFrame]) -> list:
     if df is None or len(df) == 0:
         return []
     return [row for _i, row in df.iterrows()]
+
+
+def multi_pattern_tickers(delivered: Optional[pd.DataFrame]) -> set:
+    """同じ日に複数パターンで成立した銘柄コード（§6.4）。
+
+    **落とさない。** 判定式には包含関係があるので重複は通常起きる（§2.2）。
+    記録は行単位（`ticker` + `asof` + `pattern`）のままで、ここは表示の印だけ。
+    """
+    counts: dict = {}
+    for r in _rows(delivered):
+        t = str(r.get("ticker") or "")
+        counts[t] = counts.get(t, 0) + 1
+    return {t for t, n in counts.items() if n > 1}
+
+
+def build_compact_rows(delivered: Optional[pd.DataFrame]) -> list:
+    """1 枚目の成立一覧（**全件**）。値は記録の列をそのまま整形するだけ。
+
+    **配信記録の並びをそのまま使う**（§6.6 の売買代金の降順を引き継ぐ）。
+    ソートを書き足さない —— 同じ銘柄の複数パターンは売買代金が同値なので、
+    記録の時点で既に隣り合っている。並べ替えずに隣接表示になる。
+    """
+    multi = multi_pattern_tickers(delivered)
+    out = []
+    for r in _rows(delivered):
+        ticker = str(r.get("ticker") or "")
+        pattern = str(r.get("pattern") or "")
+        out.append({
+            "ticker": ticker,
+            "name": str(r.get("name") or ""),
+            "pattern_label": PATTERN_LABELS.get(pattern, pattern),
+            "sector33": str(r.get("sector33") or ""),
+            "close": _yen(r.get("close_t")),
+            "stop": _yen(r.get("pattern_low")),
+            "target": _yen(r.get("target")),
+            "rr": _num(r.get("rr")),
+            "multi": ticker in multi,
+        })
+    return out
+
+
+def build_sector_breakdown(delivered: Optional[pd.DataFrame]) -> list:
+    """業種別の件数（件数の降順）。**表示のみ**（§6.5）。
+
+    **並び順にも判定にも使わない。** 同数のときは配信記録に出てきた順にする
+    （名前順にすると、業種に順位があるように見えるため）。
+    """
+    counts: dict = {}
+    order: list = []
+    for r in _rows(delivered):
+        label = str(r.get("sector33") or "") or "業種不明"
+        if label not in counts:
+            counts[label] = 0
+            order.append(label)
+        counts[label] += 1
+    seen = {label: i for i, label in enumerate(order)}
+    return [{"label": label, "n": counts[label]}
+            for label in sorted(order, key=lambda s: (-counts[s], seen[s]))]
+
+
+def build_headline(n_done: int, n_tickers: int, n_multi: int,
+                   n_watch: int, n_watch_shown: int) -> str:
+    """見出しの件数（§6.1）。**何の件数かを文として読めるようにする。**
+
+    成立は**行数**が記録の数え方（`ticker` + `asof` + `pattern`）で、銘柄数は
+    その補足である。監視の掲載数は「上位 N 件」とだけ書くと成立の話に読めるので、
+    何を基準に何件載せたかまで書く。
+    """
+    done = f"成立 {n_done}件"
+    if n_multi:
+        done += f"（{n_tickers}銘柄・複数パターン{n_multi}銘柄）"
+    watch = f"監視 {n_watch}件"
+    if n_watch_shown:
+        watch += f"（うち上値抵抗線に近い{n_watch_shown}件を掲載）"
+    return f"{done} ／ {watch}"
 
 
 def build_sections(delivered: Optional[pd.DataFrame],
@@ -209,13 +289,25 @@ def build_sections(delivered: Optional[pd.DataFrame],
     watch_rows = [r for r in _rows(watch)
                   if str(r.get("ticker") or "") not in done_tickers][:WATCH_MAX]
 
+    # **複数パターンの印**（§6.4）。監視側は**載せる 10 件の中**で数える ——
+    # 切られた行まで数えると、1 件しか出ていないカードに「複数」と出てしまう
+    done_multi = multi_pattern_tickers(delivered)
+    watch_counts: dict = {}
+    for r in watch_rows:
+        t = str(r.get("ticker") or "")
+        watch_counts[t] = watch_counts.get(t, 0) + 1
+    watch_multi = {t for t, n in watch_counts.items() if n > 1}
+
     by_pattern: dict = {}
     for r in done_rows:
         by_pattern.setdefault(str(r.get("pattern") or ""), {"done": [], "watch": []})
-        by_pattern[str(r.get("pattern") or "")]["done"].append(build_card(r))
+        by_pattern[str(r.get("pattern") or "")]["done"].append(
+            build_card(r, multi=str(r.get("ticker") or "") in done_multi))
     for r in watch_rows:
         by_pattern.setdefault(str(r.get("pattern") or ""), {"done": [], "watch": []})
-        by_pattern[str(r.get("pattern") or "")]["watch"].append(build_card(r, watch=True))
+        by_pattern[str(r.get("pattern") or "")]["watch"].append(
+            build_card(r, watch=True,
+                       multi=str(r.get("ticker") or "") in watch_multi))
 
     order = [p for p in PATTERN_ORDER if p in by_pattern]
     order += [p for p in by_pattern if p not in PATTERN_ORDER]   # 未知名も落とさない
@@ -250,18 +342,31 @@ def build_context(delivered: Optional[pd.DataFrame], watch: Optional[pd.DataFram
     breakdown = build_breakdown(summary)
     n_done = sum(s["n_done"] for s in sections)
     n_watch_shown = sum(s["n_watch"] for s in sections)
+    multi = multi_pattern_tickers(delivered)
+    n_tickers = len({str(r.get("ticker") or "") for r in _rows(delivered)})
+    n_watch_all = int(summary.get("n_watch") or 0)
     return {
         "delivered_on": str(summary.get("delivered_on") or ""),
         "asof": str(summary.get("asof") or ""),
         "n_evaluated": int(summary.get("n_evaluated") or 0),
         "n_done": n_done,
-        "n_watch": int(summary.get("n_watch") or 0),     # 検出された監視の全件数
-        "n_watch_shown": n_watch_shown,                  # 1枚目に載せた件数
+        "n_watch": n_watch_all,                          # 検出された監視の全件数
+        "n_watch_shown": n_watch_shown,                  # 3枚目に載せた件数
+        # 成立の**銘柄数**と**複数パターンの銘柄数**。記録の数え方は行単位のままで、
+        # これは見出しの補足である（§6.4）
+        "n_done_tickers": n_tickers,
+        "n_multi": len(multi),
+        "headline": build_headline(n_done, n_tickers, len(multi),
+                                   n_watch_all, n_watch_shown),
         "sections": sections,
         # **成立 0 件の日も配信する**（§6.1）。何も送らないと、動いているのか壊れて
         # いるのか分からない。0 件であることを明記したうえで監視だけ出す
         "no_done_note": None if n_done else NO_DONE_NOTE,
-        "cards": [c for s in sections for c in s["done"]],   # 2枚目の銘柄一覧
+        # 1枚目の成立一覧（全件）。配信記録の並びのままで、パターン別には束ねない
+        # —— 束ねると同じ銘柄の複数パターンが離れる
+        "compact": build_compact_rows(delivered),
+        # 1枚目の業種別件数（§6.5 のとおり**表示のみ**）
+        "sectors": build_sector_breakdown(delivered),
         "breakdown": breakdown,
         # **表の合計は表の行から出す。** 見出しの件数（配信記録の行数）と別々に作ると、
         # 食い違ったときにカードが嘘をつく
