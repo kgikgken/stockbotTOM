@@ -49,7 +49,7 @@
 - **LINE 経路を変えない**: `src/worker.js`、`wrangler.toml`、Secrets 名（`LINE_CHANNEL_ACCESS_TOKEN` / `LINE_TO` / `WORKER_URL` / `WORKER_AUTH_TOKEN`）
 - **保存データをコミットしない**: `data/store/` は `.gitignore`。`data/daily/`、`data/universe/`、`data/reference/` はコミットする
 - **配信記録を消さない**: `data/daily/` の `delivered_*.csv` / `screen_summary_*.json` / `outcome_*.csv` は撤去後も保全する（SCREENER_CLOSING.md）
-- **配信を勝手に再開しない**: ワークフローの Notify ステップは外してある。戻すのは設計責任者の指示があったときだけ
+- **配信を勝手に止めない・変えない**: ワークフローの Notify ステップは**動いている**（2026-09-11 に設計責任者の指示で再開。19 条件のスクリーナー撤去に伴い 2026-09-08 に外していた）。外す・戻す・送る中身や条件を変えるのは設計責任者の指示があったときだけ
 - **検証結果を解釈しない**: 表と図を出すまで。採否・継続・撤退の判断は設計責任者
 
 ## 環境と規約
