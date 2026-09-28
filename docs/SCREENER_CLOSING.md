@@ -36,7 +36,7 @@
 | `features/sector.py`（33 業種の等加重リターンと順位） | 維持 |
 | `universe/`・`data/store`・日次スナップショット | 維持 |
 | `notify/`（Worker 経由の LINE 配信経路）・Secrets・`worker.js` | 維持（呼んでいないだけ） |
-| `render/`（画像カード2枚の描画） | 維持 |
+| `render/`（画像カード2枚の描画。**撤去時点の枚数。現在は 3 枚**・`PATTERN.md` §6.1） | 維持 |
 | `screener/record.py`・`resolver.py` | 維持。記録と結果付けはスクリーナーではない |
 
 ## 配信は停止状態
