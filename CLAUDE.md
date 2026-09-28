@@ -1,14 +1,27 @@
 # CLAUDE.md — 作業規約（Claude Code / 実装者向け）
 
-このリポジトリは日本株のスイングトレード向け「順張り押し目」スクリーナー（stockbotTOM v8）。
-毎営業日 7:00 JST に GitHub Actions で動き、候補をランキングして LINE に画像で配信する。
+このリポジトリは日本株のスイングトレード向けのチャートパターン検出（stockbotTOM v8）。
+毎営業日 7:00 JST に GitHub Actions で動き、条件を満たした銘柄を LINE に画像で配信する。
+**ランキングではない。** 並びは 20 日平均売買代金の降順＝**流動性順であって優劣ではない**
+（`docs/PATTERN.md` §6.6。「上がりやすい順」に並べる根拠は得られていない）。
 
 ## 正の情報源（この順で優先）
 
 **19 条件のスクリーナーは 2026-09-08 に撤去した**（`docs/SCREENER_CLOSING.md`）。
 現在の作業対象は 7 パターンの検出（`docs/PATTERN.md`）。判定式は 2026-09-08 に揃い
-（§4 Q-1 クローズ）、7 つとも実装済み。**検出数を出すだけで、記録も配信もまだしない。**
+（§4 Q-1 クローズ）、7 つとも実装済み。
 検証プロジェクト（v8 順張り押し目）は 2026-08-30 に終了している（`docs/CLOSING.md`）。
+
+**記録と配信はどちらも稼働している**（2026-09-11 に設計責任者の指示で再開）。
+
+- **配信**: ワークフローの Notify ステップ（`.github/workflows/data.yml` L113）。
+  画像カード 3 枚（PATTERN.md §6）
+- **記録**: 成立を `data/daily/delivered_*.csv` に書く。パターン期は 2026-09-14 以降で
+  432 行（2026-09-28 時点）。監視は記録に残さず `pattern_summary_*.json` にのみ入る
+- **結果付け**: パターンは T+20（`pattern_outcome_*.csv`）。**最初の 1 本が出るのは
+  2026-10-15 前後**で、現時点では 0 ファイル（`docs/PREREGISTRATION_H123.md` §7.3）
+- この記録が事前登録 H1 の母集団である。**行を増減させる変更をしない**
+  （PREREGISTRATION_H123.md §4.2）
 
 1. `docs/PATTERN.md` — **現在の作業対象。決定事項もここ。** 7 パターンの仕様と
    事前登録パラメータ（§1）、判定式（§2）、配信（§6）、決定ログ（D-1〜）。
@@ -55,7 +68,7 @@
 - **ホールドアウト（2026-02〜2026-08）を見ない**: 検証 L1 や設計途中で参照するコードを書かない。`validation/replay.py` はホールドアウト生成を明示フラグなしで行わない
 - **LINE 経路を変えない**: `src/worker.js`、`wrangler.toml`、Secrets 名（`LINE_CHANNEL_ACCESS_TOKEN` / `LINE_TO` / `WORKER_URL` / `WORKER_AUTH_TOKEN`）
 - **保存データをコミットしない**: `data/store/` は `.gitignore`。`data/daily/`、`data/universe/`、`data/reference/` はコミットする
-- **配信記録を消さない**: `data/daily/` の `delivered_*.csv` / `screen_summary_*.json` / `outcome_*.csv` は撤去後も保全する（SCREENER_CLOSING.md）
+- **配信記録を消さない**: `data/daily/` の `delivered_*.csv` / `pattern_summary_*.json` / `pattern_outcome_*.csv`（パターン期）と、`screen_summary_*.json` / `outcome_*.csv`（押し目型。撤去後も保全する・SCREENER_CLOSING.md）
 - **配信を勝手に止めない・変えない**: ワークフローの Notify ステップは**動いている**（2026-09-11 に設計責任者の指示で再開。19 条件のスクリーナー撤去に伴い 2026-09-08 に外していた）。外す・戻す・送る中身や条件を変えるのは設計責任者の指示があったときだけ
 - **検証結果を解釈しない**: 表と図を出すまで。採否・継続・撤退の判断は設計責任者
 
@@ -65,19 +78,24 @@
 - `SCREEN_DRYRUN=1` で合成データにより全工程が通ること。新しい段を足したら DRYRUN 経路も足す
 - yfinance は関数内で遅延 import（テストと DRYRUN で不要）
 - ログは `print`。日本語可。絵文字は使わない
-- 型ヒント必須。docstring に SCREENER.md の節番号を書く（既存の検証コードは DESIGN.md の節番号のまま）
+- 型ヒント必須。docstring に**根拠の節番号**を書く。パターン系は `PATTERN.md`、バックテストは `BACKTEST.md`（既存の押し目型のコードは SCREENER.md / DESIGN.md の節番号のまま）
 - ファイル配置
   ```
   src/stockbot/
     config.py  cli.py  pipeline.py
     screener/    record.py  resolver.py          (conditions.py / screen.py は撤去済み)
+                 pattern_record.py  pattern_resolver.py（パターン期。評価窓 20 日）
     notify/      message.py  line_send.py
     data/        yf_fetch.py  adjust.py  store.py  jpx_lists.py  synthetic.py
     universe/    build.py
     features/    indicators.py  swings.py  pullback.py  dimensions.py  regime.py  sector.py
+                 gates.py
                  pattern.py（7 パターン。PATTERN.md §2.1・§2.2）
-    scoring/     composite.py  template.py  ranking.py
+    scoring/     composite.py  template.py
     validation/  labels.py  replay.py  layer1.py  report.py  calibration.py
+                 pattern_replay.py  pattern_report.py（再生と集計）
+                 pattern_exit.py  pattern_stop.py  pattern_target.py（§10・§11・§12）
+                 pattern_strata.py（§13 の記述統計）
     render/      context.py  template.html  render.py
   tests/
   docs/
