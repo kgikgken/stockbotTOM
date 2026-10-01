@@ -1,0 +1,157 @@
+name: pattern-early
+
+# docs/BACKTEST.md §16。**T+1 終値による早期撤退の記述統計。**
+#
+# **記述統計であって判定ではない**（設計責任者・2026-10-01）。判定基準を設けず、
+# 採用も不採用も決めない。**検定は 15 件のまま増やさない。** 事前登録（H1）に触れない。
+#
+# **検出はやり直さない。** 3 窓ぶんの再生結果を戻して、出口の当て方だけを変えて当てる。
+#
+# **既存の出力を上書きしない。** 書き出し先は `data/pattern_early/` で、
+# §10〜§13 の出力（`data/pattern_exit/`）には触らない。
+#
+# 再生結果は**キャッシュではなく成果物から戻す** —— Actions の cache は 7 日
+# 使われないと消えるので、§13 の実行（2026-09-18）から日が経つと戻らない。
+# 成果物は作成から 90 日残るので、どの実行のどの成果物を使ったかを入力で固定できる。
+#
+# **ホールドアウトは §12 で使用済みなので、ここでの集計は追加の使用にあたらない**
+# （§13.1・§16.1）。新しい仮説の検定はしない。
+
+on:
+  workflow_dispatch:
+    inputs:
+      search_run_id:
+        description: "探索窓の再生結果を持つ実行 ID"
+        default: "34756130164"
+      search_artifact:
+        description: "探索窓の成果物名"
+        default: "pattern-backtest-search-34756130164"
+      confirm_run_id:
+        description: "確認窓の再生結果を持つ実行 ID"
+        default: "34677480282"
+      confirm_artifact:
+        description: "確認窓の成果物名"
+        default: "pattern-backtest-confirm-34677480282"
+      holdout_run_id:
+        description: "ホールドアウトの再生結果を持つ実行 ID"
+        default: "35306721128"
+      holdout_artifact:
+        description: "ホールドアウトの成果物名"
+        default: "holdout-target-35306721128"
+
+permissions:
+  contents: read
+  # 別の実行の成果物を取るのに要る
+  actions: read
+
+# data-daily と同じグループ。store の読み書きが重ならないようにする
+concurrency:
+  group: data-daily
+  cancel-in-progress: false
+
+jobs:
+  early:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Restore store (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/store
+          key: store-v2-${{ github.run_id }}
+          restore-keys: |
+            store-v2-
+
+      # 3 窓ぶんの再生結果を成果物から取る。**どれも読み取り専用**（保存しない）。
+      # 成果物の中の並びは作られた実行によって違う（path の共通祖先で決まる）ので、
+      # 次の段で `find` して正しい場所に移す
+      - name: Download replay (search)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.search_artifact }}
+          run-id: ${{ github.event.inputs.search_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dl/search
+
+      - name: Download replay (confirm)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.confirm_artifact }}
+          run-id: ${{ github.event.inputs.confirm_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dl/confirm
+
+      - name: Download replay (holdout)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.holdout_artifact }}
+          run-id: ${{ github.event.inputs.holdout_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dl/holdout
+
+      # 成果物の中身を窓ごとのディレクトリに揃える。**窓をまたいで混ぜない** ——
+      # その窓の成果物の中にあった日次ファイルだけをその窓に置く
+      - name: Place replay tables
+        run: |
+          for w in search confirm holdout; do
+            mkdir -p "data/pattern_replay/$w"
+            if [ -d "dl/$w" ]; then
+              find "dl/$w" -name 'pattern_replay_*.csv.gz' -exec \
+                cp {} "data/pattern_replay/$w/" \;
+            fi
+            echo "[place] $w: $(ls data/pattern_replay/$w 2>/dev/null | wc -l) 日ぶん"
+          done
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      # **どの窓の再生結果が戻ったか**を先に出す。戻っていない窓は集計しない
+      # （黙って 0 件にしない）
+      - name: Replay inventory
+        run: |
+          for w in search confirm holdout; do
+            n=$(ls data/pattern_replay/$w 2>/dev/null | wc -l)
+            echo "[inventory] $w: $n 日ぶん"
+          done
+          echo "[inventory] store: $(ls data/store 2>/dev/null | wc -l) ファイル"
+
+      - name: Early exit (search)
+        if: always()
+        run: python -m stockbot.cli pattern-early --window search
+
+      - name: Early exit (confirm)
+        if: always()
+        run: python -m stockbot.cli pattern-early --window confirm
+
+      # ホールドアウトは --include-holdout を明示したときだけ読む（CLAUDE.md）。
+      # §12 で使用済みなので追加の使用にはあたらない（§13.1・§16.1）
+      - name: Early exit (holdout)
+        if: always()
+        run: |
+          python -m stockbot.cli pattern-early \
+            --window holdout --include-holdout
+
+      # **`data/pattern_exit` は上げない。** この節は既存の出力に触らない（§16.1）
+      - name: Upload tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pattern-early-${{ github.run_id }}
+          path: data/pattern_early
+          if-no-files-found: ignore

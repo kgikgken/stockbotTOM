@@ -23,3 +23,6 @@ data-dryrun/pattern_replay/
 # ATR 基準の出口の中間出力（docs/BACKTEST.md §10）。再生結果から作り直せるので入れない
 data/pattern_exit/
 data-dryrun/pattern_exit/
+# §16 の出口シミュレーション（日次ファイルで肥大する。成果物で受け渡す）
+data/pattern_early/
+data-dryrun/pattern_early/
