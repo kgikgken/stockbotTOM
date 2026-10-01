@@ -111,7 +111,10 @@ def by_pattern(df: pd.DataFrame, lag: int = HORIZON) -> pd.DataFrame:
 # **確認窓とホールドアウトはこれをそのまま使う。** 窓ごとに切り直すと分位の意味が
 # 変わって再現を見たことにならない。Actions の cache は窓ごとに分かれていて期限も
 # あるので、**リポジトリに置いて確定値にしてある**
-FROZEN_EDGES_PATH = Path("data/reference/pattern_quantile_edges.json")
+FROZEN_EDGES_FILENAME = "pattern_quantile_edges.json"
+# 本番の既定パス。**cfg がある呼び出し元は cfg.reference_dir /
+# FROZEN_EDGES_FILENAME を明示的に渡すこと** —— DRYRUN で本番の境界を読まない
+FROZEN_EDGES_PATH = Path("data/reference") / FROZEN_EDGES_FILENAME
 
 
 def load_frozen_edges(path: Optional[Path] = None) -> Optional[np.ndarray]:

@@ -59,6 +59,7 @@ from .render import render as render_images_mod
 from .screener import pattern_record, record, resolver
 from .validation import (pattern_exit, pattern_replay, pattern_report,
                          pattern_stop, pattern_strata, pattern_target)
+from .validation import pattern_early
 from .validation.layer1 import DATA_QUALITY_EXCLUDED_TICKERS
 from .universe.build import build_universe, liquidity_stats, load_latest_universe, save_universe, summarize
 
@@ -1338,6 +1339,106 @@ def step_pattern_strata(cfg: Settings, window: str, include_holdout: bool,
                 log(f"[pattern-strata] {line}")
 
 
+def step_pattern_early(cfg: Settings, window: str, include_holdout: bool,
+                       log=print) -> None:
+    """T+1 終値による早期撤退の記述統計（docs/BACKTEST.md §16）。**判定ではない。**
+
+    **検定は増やさない**（§16.1）。判定基準を設けず、採用も不採用も決めない。
+
+    **検出はやり直さない。** 保存済みの再生結果の行に、出口の当て方だけを変えて
+    当てる。**行集合は §13・§15 と同じ** —— データ品質の除外 12 銘柄を落とし、
+    確認窓の東証休業日の行はそのまま残す（§14.4 の既知の問題。やり直さない）。
+
+    **既存の出力を上書きしない。** 書き出し先は `data/pattern_early/` で、
+    `data/pattern_exit/`（§10〜§13 の出力）には触らない（§16.1）。
+
+    **抜け幅の分位境界は `cfg.reference_dir` 経由で読む** —— DRYRUN では
+    `data-dryrun/reference/` を見る（CLAUDE.md の落とし穴1と同じ理由）。
+
+    **ホールドアウトは `--include-holdout` を明示したときだけ**（CLAUDE.md の
+    絶対規則）。§12 で使用済みなので追加の使用にはあたらない（§13.1・§16.1）。
+    """
+    if window == "holdout" and not include_holdout:
+        log("[pattern-early] ホールドアウトは --include-holdout を明示したときだけ走る"
+            "（CLAUDE.md の絶対規則）")
+        return
+    base = cfg.data_dir / "pattern_replay"
+    replay = pattern_replay.load_table(base / window)
+    dq = sorted(DATA_QUALITY_EXCLUDED_TICKERS)
+    replay, n_dropped, hit = pattern_strata.drop_excluded(replay, dq)
+    log(f"[pattern-early] データ品質の除外 {len(dq)}銘柄 / 再生結果から落とした行 "
+        f"{n_dropped}件" + (f"（{hit}）" if hit else "（もともと入っていない）"))
+    cov = pattern_report.coverage(replay)
+    log(f"[pattern-early] 窓={window} 成立 {cov['n_rows']}件 / 評価日 {cov['n_days']}日")
+    if cov["n_rows"] == 0:
+        log(f"[pattern-early] 窓={window} の再生結果が無い。"
+            "この窓は集計しない（先に cli pattern-replay が要る）")
+        return
+    log(f"[pattern-early] カバーした期間: {cov['first'].date()}〜{cov['last'].date()}")
+
+    # **抜け幅の分位境界は探索窓の確定値をそのまま使う**（§4.2・D-3）。
+    # 窓ごとに切り直さない
+    edges_path = cfg.reference_dir / pattern_report.FROZEN_EDGES_FILENAME
+    edges = pattern_report.load_frozen_edges(edges_path)
+    if edges is None:
+        log(f"[pattern-early] 抜け幅の分位境界（{edges_path}）が無い。"
+            "**窓ごとに切り直さない**ので集計しない（§4.2・D-3）")
+        return
+
+    store = OhlcvStore(cfg.store_dir, cfg.daily_dir)
+    ohlcv = from_long(store.load())
+    if not include_holdout:
+        ohlcv = pattern_exit.truncate_before_holdout(ohlcv)
+    table = pattern_early.run(replay, ohlcv, edges, log=log)
+    if len(table) == 0:
+        log("[pattern-early] 当てられる行が無い")
+        return
+
+    out_dir = cfg.data_dir / "pattern_early"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = pattern_early.early_path(out_dir, window)
+    table.to_csv(path, index=False, compression="gzip")
+    log(f"[pattern-early] 書き出し {len(table)}行 → {path}")
+
+    ex = pattern_early.excluded_count(table)
+    log(f"[pattern-early] 集計から外した行: Q5 {ex['n_excluded']}件"
+        f"（b >= 境界。§16.3 の指示）/ 抜け幅が無く分位に入らない行 "
+        f"{ex['n_no_quantile']}件")
+    n_cens = int(table["censored"].astype(bool).sum())
+    n_cur = int((table["cur_outcome"].fillna("").astype(str) != "").sum())
+    n_early = int((table["early_outcome"].fillna("").astype(str) != "").sum())
+    log(f"[pattern-early] 母数 {len(table)}件 / 評価窓が 20 本に満たない行 {n_cens}件 "
+        f"/ 現行基準に出口がある行 {n_cur}件 / 本案に出口がある行 {n_early}件")
+
+    summary = pattern_early.by_quantile(table, window)
+    spath = pattern_early.summary_path(out_dir, window)
+    summary.to_csv(spath, index=False)
+    log(f"[pattern-early] 集計 {len(summary)}行 → {spath}")
+
+    # **3 窓ぶんそろっていればまとめて出す。** そろっていなければある窓だけ
+    frames, have = [], []
+    for w in PATTERN_WINDOWS:
+        f = pattern_early.summary_path(out_dir, w)
+        if f.exists():
+            frames.append(pd.read_csv(f))
+            have.append(w)
+    combined = pd.concat(frames, ignore_index=True) if frames else summary
+    log(f"[pattern-early] 表に出す窓: {have if have else [window]}")
+
+    log(f"[pattern-early] 検定 {pattern_early.N_TESTS_TOTAL} 件のまま。"
+        f"ここで増やすのは {pattern_early.N_TESTS_HERE} 件（BACKTEST.md §16.1）")
+    log("[pattern-early] **記述統計であって判定ではない。** 判定基準は設けず、"
+        "採用も不採用も決めない。事前登録（H1）にも触れない（§16.1）")
+    log("[pattern-early] 案: entry は Open[T+1]。T+1 の終値が建値未満なら T+2 始値で"
+        "手仕舞い、建値以上なら撤退ラインを建値に上げて以降は現行どおり（§16.2）")
+    log("[pattern-early] **T+1 の中は現行どおり**（利確・パターン最安値割れ・"
+        "同日は撤退）。引き上げは T+1 の引けを見てからで、T+1 の安値では降りない")
+    log("[pattern-early] 平均損益は**ベンチマークを引いていない素のリターン**"
+        "（r20 とは別物）。両方の案に出口がある行だけを母数にしている（§16.4）")
+    log("[pattern-early] --- 窓別・抜け幅分位別（Q5 は §16.3 により除外）---")
+    for line in pattern_early.format_table(combined):
+        log(f"[pattern-early] {line}")
+
 def step_pattern_report(cfg: Settings, window: str, log=print) -> None:
     """探索の集計を出す（docs/BACKTEST.md §4・§6）。**表のみ。解釈はしない。**
 
@@ -1402,7 +1503,8 @@ def main(argv: list[str] | None = None) -> int:
                                        "resolve", "notify", "refetch-recent-splits",
                                        "pattern-replay", "pattern-report", "pattern-exit",
                                        "pattern-stop", "pattern-target",
-                                       "pattern-strata", "refetch-tickers"])
+                                       "pattern-strata", "pattern-early",
+                                       "refetch-tickers"])
     ap.add_argument("--window", choices=list(PATTERN_WINDOWS), default="search",
                     help="バックテストの窓（docs/BACKTEST.md §1）")
     ap.add_argument("--tickers", default="",
@@ -1451,6 +1553,8 @@ def main(argv: list[str] | None = None) -> int:
             step_pattern_target(cfg, args.window, args.include_holdout, log)
         elif args.command == "pattern-strata":
             step_pattern_strata(cfg, args.window, args.include_holdout, log)
+        elif args.command == "pattern-early":
+            step_pattern_early(cfg, args.window, args.include_holdout, log)
         elif args.command == "resolve":
             step_resolve(cfg, log)
         elif args.command == "notify":
