@@ -54,7 +54,7 @@ EARLY_COLS = [
 
 SUMMARY_COLS = ["window", "q", "n", "n_cur_only", "n_early_only",
                 "cur_mean_pnl", "early_mean_pnl", "diff",
-                "cur_win_rate", "early_win_rate",
+                "cur_win_rate", "early_win_rate", "early_breakeven_rate",
                 "cur_exit_day_mean", "early_exit_day_mean", "t1_below_rate",
                 "early_rate", "target_rate", "stop_rate", "timeout_rate"]
 
@@ -266,6 +266,10 @@ def summarize(window: str, q: str, df: pd.DataFrame) -> dict:
         "diff": float(early.mean() - cur.mean()),
         "cur_win_rate": float((cur > 0).mean()),
         "early_win_rate": float((early > 0).mean()),
+        # **建値まで引き上げた撤退は損益ちょうど 0 で、勝率に入らない。**
+        # 勝率だけ見ると負けに見えるので、同じ行で割合を出しておく（§16.4）
+        "early_breakeven_rate": float(np.isclose(
+            early.to_numpy(dtype=float), 0.0, atol=1e-9).mean()),
         "cur_exit_day_mean": float(both["cur_exit_day"].astype(float).mean()),
         "early_exit_day_mean": float(both["early_exit_day"].astype(float).mean()),
         "t1_below_rate": float(both["t1_below_entry"].fillna(False).astype(bool).mean()),
@@ -312,8 +316,8 @@ def summary_path(out_dir: Path, window: str) -> Path:
 def format_table(summary: pd.DataFrame) -> List[str]:
     """ログに出す行（表のみ。解釈はしない）。"""
     head = (f"{'窓':<10}{'区分':<12}{'件数':>8}{'現行':>9}{'本案':>9}{'差':>8}"
-            f"{'現行勝率':>9}{'本案勝率':>9}{'現行日数':>9}{'本案日数':>9}"
-            f"{'T+1マイナス':>12}")
+            f"{'現行勝率':>9}{'本案勝率':>9}{'本案建値':>9}{'現行日数':>9}"
+            f"{'本案日数':>9}{'T+1マイナス':>12}")
     out = [head, "-" * len(head)]
 
     def num(v, nd=2, suffix=""):
@@ -328,6 +332,7 @@ def format_table(summary: pd.DataFrame) -> List[str]:
                    f"{num(r['early_mean_pnl'], 2, '%'):>9}"
                    f"{num(r['diff']):>8}"
                    f"{pct(r['cur_win_rate']):>9}{pct(r['early_win_rate']):>9}"
+                   f"{pct(r['early_breakeven_rate']):>9}"
                    f"{num(r['cur_exit_day_mean'], 1, ''):>9}"
                    f"{num(r['early_exit_day_mean'], 1, ''):>9}"
                    f"{pct(r['t1_below_rate']):>12}")

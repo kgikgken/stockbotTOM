@@ -224,6 +224,20 @@ class SummarizeTest(unittest.TestCase):
         self.assertAlmostEqual(r["early_mean_pnl"], -0.5)
         self.assertAlmostEqual(r["diff"], 3.5)
 
+    def test_breakeven_is_counted_apart_from_win_rate(self):
+        """**建値撤退は損益ちょうど 0 で勝率に入らない。** 割合を別に出す。"""
+        df = pd.DataFrame([
+            {"q": "Q1", "cur_outcome": OUTCOME_TIMEOUT, "early_outcome": OUTCOME_STOP,
+             "cur_pnl_pct": -3.0, "early_pnl_pct": 0.0, "cur_exit_day": 20,
+             "early_exit_day": 5, "t1_below_entry": False},
+            {"q": "Q1", "cur_outcome": OUTCOME_TIMEOUT, "early_outcome": OUTCOME_TARGET,
+             "cur_pnl_pct": 4.0, "early_pnl_pct": 8.0, "cur_exit_day": 20,
+             "early_exit_day": 6, "t1_below_entry": False},
+        ])
+        r = early_mod.summarize("探索窓", "Q1", df)
+        self.assertAlmostEqual(r["early_win_rate"], 0.5)
+        self.assertAlmostEqual(r["early_breakeven_rate"], 0.5)
+
     def test_rates(self):
         r = early_mod.summarize("探索窓", "Q1", summary_frame()[lambda d: d["q"] == "Q1"])
         self.assertAlmostEqual(r["t1_below_rate"], 0.5)
