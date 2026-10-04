@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+
+# EDINET downloads are large; raw archives are not committed (list files and annual_reports.csv are)
+data/edinet/docs/
