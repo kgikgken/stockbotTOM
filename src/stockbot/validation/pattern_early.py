@@ -38,6 +38,17 @@ N_TESTS_TOTAL = N_TESTS_BEFORE
 # この案だけの出口。T+1 の終値が建値を割ったので翌日の始値で降りた行
 OUTCOME_EARLY = "early"
 
+# **再生結果の水準と store の株価の目盛りが合っているか**（§16.6）。
+# 再生は 2026-09 に回したもので、store はその後も毎営業日更新されている。
+# **分割があった銘柄は store 側だけが調整され、再生結果に保存された
+# `close_t`・`target`・`pattern_low` は旧価格のまま**になる。混ぜると
+# 「建値 1,400 円・撤退ライン 3,810 円」のような行ができて損益が壊れる。
+# 許容差は store 自身の改訂判定と同じ値（`config.Settings.rev_close_tol` の既定 0.005）
+SCALE_TOL = 0.005
+# 評価窓の中で分割が起きた行を落とす。**隣り合うバーの終値がこの倍率を超えて動いたら
+# 目盛りが変わったとみなす** —— 値幅制限のある日本株で 1 日 1.5 倍は起きない
+SCALE_JUMP_MAX = 1.5
+
 # 抜け幅 5 分位のうち集計から外す群（§16.3）。**b >= 0.957 の Q5 は勝率 8% で、
 # この案の効果が見込めないため除外する**（設計責任者の指示）。
 # **行は落とさない。表から外すだけ** —— 除外した件数を数えられるようにしておく
@@ -45,6 +56,7 @@ EXCLUDED_QUANTILE = "Q5"
 
 EARLY_COLS = [
     "date", "ticker", "pattern", "q", "breakout_h", "close_t",
+    "store_close_t", "scale_ok", "scale_reason",
     "entry_open", "pattern_low", "target", "t1_close", "t1_below_entry",
     "n_bars", "censored", "already_at_target",
     "cur_outcome", "cur_exit_day", "cur_exit_price", "cur_pnl_pct",
@@ -52,7 +64,7 @@ EARLY_COLS = [
     "early_exit_at_open",
 ]
 
-SUMMARY_COLS = ["window", "q", "n", "n_cur_only", "n_early_only",
+SUMMARY_COLS = ["window", "q", "n", "n_scale_bad", "n_cur_only", "n_early_only",
                 "cur_mean_pnl", "early_mean_pnl", "diff",
                 "cur_win_rate", "early_win_rate", "early_breakeven_rate",
                 "cur_exit_day_mean", "early_exit_day_mean", "t1_below_rate",
@@ -133,6 +145,37 @@ def simulate_early(open_: np.ndarray, high: np.ndarray, low: np.ndarray,
                 False, False)
 
 
+def scale_check(close: np.ndarray, t_pos: int, end: int,
+                replay_close_t: float) -> tuple:
+    """再生結果の水準と store の株価が同じ目盛りかを見る（§16.6）。
+
+    **2 つを見る。** どちらかに引っかかった行は集計から外す（行は残す）。
+
+    1. **T の終値がずれていないか** —— 再生結果に保存された `close_t` と、いま store に
+       ある `Close[T]` を比べる。分割があった銘柄は store 側だけが調整されるのでここで
+       出る。許容差は store 自身の改訂判定と同じ `SCALE_TOL`
+    2. **評価窓の中で目盛りが変わっていないか** —— T..T+20 の隣り合う終値が
+       `SCALE_JUMP_MAX` 倍を超えて動いていたら、その窓の途中で分割が入っている。
+       この場合 1 は素通りする（T の時点ではまだ旧価格のため）
+
+    返すのは `(store_close_t, ok, reason)`。
+    """
+    store_close_t = float(close[t_pos]) if 0 <= t_pos < len(close) else np.nan
+    if not (np.isfinite(store_close_t) and np.isfinite(replay_close_t)
+            and replay_close_t > 0):
+        return store_close_t, False, "close_t が引けない"
+    if abs(store_close_t / replay_close_t - 1.0) > SCALE_TOL:
+        return store_close_t, False, "T の終値が再生結果とずれている"
+    win = close[t_pos:end + 1]
+    prev, cur = win[:-1], win[1:]
+    ok = np.isfinite(prev) & np.isfinite(cur) & (prev > 0) & (cur > 0)
+    if ok.any():
+        r = cur[ok] / prev[ok]
+        if (r > SCALE_JUMP_MAX).any() or (r < 1.0 / SCALE_JUMP_MAX).any():
+            return store_close_t, False, "評価窓の中で目盛りが変わっている"
+    return store_close_t, True, ""
+
+
 def early_one(df: pd.DataFrame, t_pos: int, row: dict, horizon: int = HORIZON,
               arrays: Optional[tuple] = None) -> dict:
     """1 行ぶん。**ここだけが T+1 以降を見る**（`label_one` と同じ範囲）。
@@ -145,7 +188,8 @@ def early_one(df: pd.DataFrame, t_pos: int, row: dict, horizon: int = HORIZON,
     out.update({"cur_outcome": "", "early_outcome": "",
                 "cur_exit_day": pd.NA, "early_exit_day": pd.NA,
                 "t1_below_entry": pd.NA, "early_exit_at_open": False,
-                "censored": True, "n_bars": 0})
+                "censored": True, "n_bars": 0,
+                "scale_ok": False, "scale_reason": "評価窓が無い"})
 
     stop = float(row.get("pattern_low", np.nan))
     target = float(row.get("target", np.nan))
@@ -162,6 +206,12 @@ def early_one(df: pd.DataFrame, t_pos: int, row: dict, horizon: int = HORIZON,
         return out
 
     o, h, lo, c = arrays if arrays is not None else ohlc_arrays(df)
+
+    # **再生結果と store の目盛りが合っているかを先に見る**（§16.6）。
+    # 合っていない行も当ててから落とす —— 証拠を残すため（行は消さない）
+    sct, sok, sreason = scale_check(c, t_pos, end, out["close_t"])
+    out.update({"store_close_t": sct, "scale_ok": sok, "scale_reason": sreason})
+
     entry = float(o[start])
     out["entry_open"] = entry
     if not np.isfinite(entry) or entry <= 0:
@@ -242,20 +292,51 @@ def _rate(series: pd.Series, kind: str, n: int) -> float:
     return float((series == kind).sum()) / n if n else float("nan")
 
 
+def _as_bool(df: pd.DataFrame, col: str, default: bool) -> pd.Series:
+    """真偽の列を bool に揃える。
+
+    CSV から読み直すと `True` / `"True"` / 空欄が混ざる。**列が無い表も読める**
+    ようにしておく（古い世代の出力を黙って落とさない）。
+    """
+    if col not in df.columns:
+        return pd.Series(default, index=df.index, dtype=bool)
+    out = []
+    for v in df[col].tolist():
+        if isinstance(v, str):
+            out.append(v.strip().lower() not in ("false", "0", "", "nan"))
+        elif v is None or (isinstance(v, float) and np.isnan(v)) or v is pd.NA:
+            out.append(default)
+        else:
+            out.append(bool(v))
+    return pd.Series(out, index=df.index, dtype=bool)
+
+
 def summarize(window: str, q: str, df: pd.DataFrame) -> dict:
     """1 群ぶんの行（§16.4）。
 
     **両方の案に出口がある行だけを母数にする。** 片方だけで平均を取ると、差の列が
     別々の行集合の平均の引き算になる（§14.4・§15.1 と同じ理由）。
     片方しか当てられなかった行は `n_cur_only` / `n_early_only` に数えて残す。
+
+    **目盛りが合っていない行も外す**（`scale_ok` が False・§16.6）。再生結果の水準と
+    store の株価が別の目盛りだと損益が壊れる。**件数は `n_scale_bad` に残す。**
     """
-    cur_ok = df["cur_outcome"].fillna("").astype(str) != "" if len(df) else df
-    early_ok = df["early_outcome"].fillna("").astype(str) != "" if len(df) else df
-    both = df[cur_ok & early_ok] if len(df) else df
+    if not len(df):
+        return {**{"window": window, "q": q, "n": 0, "n_scale_bad": 0,
+                   "n_cur_only": 0, "n_early_only": 0},
+                **{c: float("nan") for c in SUMMARY_COLS
+                   if c not in ("window", "q", "n", "n_scale_bad",
+                                "n_cur_only", "n_early_only")}}
+    scale_ok = _as_bool(df, "scale_ok", True)
+    cur_ok = df["cur_outcome"].fillna("").astype(str) != ""
+    early_ok = df["early_outcome"].fillna("").astype(str) != ""
+    usable = cur_ok & early_ok
+    both = df[usable & scale_ok]
     n = int(len(both))
     row = {"window": window, "q": q, "n": n,
-           "n_cur_only": int((cur_ok & ~early_ok).sum()) if len(df) else 0,
-           "n_early_only": int((~cur_ok & early_ok).sum()) if len(df) else 0}
+           "n_scale_bad": int((usable & ~scale_ok).sum()),
+           "n_cur_only": int((cur_ok & ~early_ok & scale_ok).sum()),
+           "n_early_only": int((~cur_ok & early_ok & scale_ok).sum())}
     if not n:
         return {**row, **{c: float("nan") for c in SUMMARY_COLS
                           if c not in row}}
@@ -300,8 +381,12 @@ def excluded_count(table: pd.DataFrame, excluded: str = EXCLUDED_QUANTILE) -> di
     if not len(table):
         return {"n_excluded": 0, "n_no_quantile": 0}
     q = table["q"].fillna("").astype(str)
+    ok = _as_bool(table, "scale_ok", True)
     return {"n_excluded": int((q == excluded).sum()),
-            "n_no_quantile": int((q == "").sum())}
+            "n_no_quantile": int((q == "").sum()),
+            "n_scale_bad": int((~ok).sum()),
+            "scale_reasons": table.loc[~ok, "scale_reason"].value_counts().to_dict()
+            if "scale_reason" in table.columns else {}}
 
 
 def early_path(out_dir: Path, window: str) -> Path:

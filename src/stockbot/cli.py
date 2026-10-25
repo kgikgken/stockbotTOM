@@ -1404,6 +1404,10 @@ def step_pattern_early(cfg: Settings, window: str, include_holdout: bool,
     log(f"[pattern-early] 集計から外した行: Q5 {ex['n_excluded']}件"
         f"（b >= 境界。§16.3 の指示）/ 抜け幅が無く分位に入らない行 "
         f"{ex['n_no_quantile']}件")
+    # **再生結果と store の目盛りが合っていない行**（§16.6）。分割があった銘柄は
+    # store 側だけが調整され、再生結果に保存された水準は旧価格のまま残る
+    log(f"[pattern-early] 目盛りが合わず集計から外した行: {ex['n_scale_bad']}件"
+        + (f" 内訳 {ex['scale_reasons']}" if ex["n_scale_bad"] else ""))
     n_cens = int(table["censored"].astype(bool).sum())
     n_cur = int((table["cur_outcome"].fillna("").astype(str) != "").sum())
     n_early = int((table["early_outcome"].fillna("").astype(str) != "").sum())
