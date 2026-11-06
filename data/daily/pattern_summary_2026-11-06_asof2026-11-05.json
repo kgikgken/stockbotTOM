@@ -1,0 +1,1088 @@
+{
+  "delivered_on": "2026-11-06",
+  "asof": "2026-11-05",
+  "n_evaluated": 1358,
+  "n_done": 101,
+  "n_watch": 109,
+  "counts": {
+    "ascending_triangle": {
+      "done": 39,
+      "watch": 69
+    },
+    "inverse_hs": {
+      "done": 39,
+      "watch": 11
+    },
+    "triple_bottom": {
+      "done": 14,
+      "watch": 13
+    },
+    "ascending_box": {
+      "done": 9,
+      "watch": 13
+    },
+    "double_bottom": {
+      "done": 0,
+      "watch": 3
+    }
+  },
+  "delivered_written": true,
+  "watch": [
+    {
+      "ticker": "9110.T",
+      "pattern": "ascending_box",
+      "breakout_pct": 0.0,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "9110.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": 0.0,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "8214.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": 0.0,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "8214.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": 0.0,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "8160.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -0.07824726134585402,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "4812.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.13908205841445254,
+      "watch_streak": 9
+    },
+    {
+      "ticker": "4812.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -0.13908205841446364,
+      "watch_streak": 9
+    },
+    {
+      "ticker": "8130.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.30864197530866555,
+      "watch_streak": 5
+    },
+    {
+      "ticker": "7944.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.31379832836405663,
+      "watch_streak": 12
+    },
+    {
+      "ticker": "9743.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -0.3315649867373982,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "8129.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -0.4137259673886562,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "8129.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.5408033055842476,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "9044.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.5441748082781528,
+      "watch_streak": 6
+    },
+    {
+      "ticker": "4578.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.5635246846308783,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "9743.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.6116713506364668,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "3395.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.6168204248016007,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "2695.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -0.6569551556698139,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "4343.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -0.7994438651372948,
+      "watch_streak": 8
+    },
+    {
+      "ticker": "5461.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -0.8261528264368545,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "1414.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -0.8849557522123908,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "8795.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -1.0009813542688928,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "7944.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -1.0831889081455714,
+      "watch_streak": 12
+    },
+    {
+      "ticker": "3002.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -1.305082890399778,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "2695.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -1.3613159387407814,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "3028.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -1.4440433212996373,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "2053.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -1.624462494027712,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "4928.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -1.6313000239897013,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "9364.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -1.8971945853952454,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "7296.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -2.1542128309754105,
+      "watch_streak": 12
+    },
+    {
+      "ticker": "4914.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -2.1561338289962872,
+      "watch_streak": 9
+    },
+    {
+      "ticker": "1720.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -2.3368251410153085,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "7988.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -2.435042530774667,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "4914.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -2.450776001853139,
+      "watch_streak": 9
+    },
+    {
+      "ticker": "4095.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -2.5218250619066573,
+      "watch_streak": 26
+    },
+    {
+      "ticker": "8771.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -2.526737910308796,
+      "watch_streak": 11
+    },
+    {
+      "ticker": "3563.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -2.7383863080684634,
+      "watch_streak": 5
+    },
+    {
+      "ticker": "9503.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -2.7436224775470697,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "4095.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -2.7905268955388363,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "7296.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -2.944595118171256,
+      "watch_streak": 12
+    },
+    {
+      "ticker": "4045.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -2.969502407704794,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "2296.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -3.2178849822021016,
+      "watch_streak": 6
+    },
+    {
+      "ticker": "7972.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -3.22834645669291,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "4206.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -3.4705892508762104,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "4552.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -3.505401263409702,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "5602.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -3.5316658807963752,
+      "watch_streak": 5
+    },
+    {
+      "ticker": "2331.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -3.7765538945711996,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "7744.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -3.8938756172010813,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "1518.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -3.9079461571862817,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "4958.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -4.050871408384382,
+      "watch_streak": 9
+    },
+    {
+      "ticker": "6750.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -4.056637168141652,
+      "watch_streak": 9
+    },
+    {
+      "ticker": "4553.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -4.199475065616798,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "6287.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -4.573502722323064,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "6209.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -4.573547589616811,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "5930.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -4.61538461538461,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "3167.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -5.119027969130563,
+      "watch_streak": 5
+    },
+    {
+      "ticker": "7613.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -5.2136329605509735,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "8020.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -5.546161650321224,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "1721.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -5.6990557525909535,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "7917.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -6.0871806021951524,
+      "watch_streak": 6
+    },
+    {
+      "ticker": "3569.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -6.185680247393566,
+      "watch_streak": 10
+    },
+    {
+      "ticker": "4051.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -6.240713224368499,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "2301.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -6.240713570491252,
+      "watch_streak": 8
+    },
+    {
+      "ticker": "4902.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -6.242857582213778,
+      "watch_streak": 5
+    },
+    {
+      "ticker": "5970.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -6.400343642611683,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "9101.T",
+      "pattern": "triple_bottom",
+      "breakout_pct": -7.38255033557047,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "9101.T",
+      "pattern": "inverse_hs",
+      "breakout_pct": -7.38255033557047,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "6458.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -7.385759829968119,
+      "watch_streak": 14
+    },
+    {
+      "ticker": "7979.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -7.593674312580134,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "4776.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -7.668436063128603,
+      "watch_streak": 12
+    },
+    {
+      "ticker": "9303.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -7.682039278791574,
+      "watch_streak": 8
+    },
+    {
+      "ticker": "6588.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -7.78635977924913,
+      "watch_streak": 8
+    },
+    {
+      "ticker": "8103.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -8.308605341246288,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "6136.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -8.492201039861257,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "4063.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -8.493063794852308,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "9722.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -8.786874703256341,
+      "watch_streak": 13
+    },
+    {
+      "ticker": "7856.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -9.021479713603819,
+      "watch_streak": 10
+    },
+    {
+      "ticker": "5186.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -9.295482084126693,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "9107.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -9.365195184239195,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "8739.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -9.770096872025459,
+      "watch_streak": 12
+    },
+    {
+      "ticker": "6794.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -9.948111214400267,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "6923.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -10.255359825208277,
+      "watch_streak": 9
+    },
+    {
+      "ticker": "7741.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -10.610999836494429,
+      "watch_streak": 1
+    },
+    {
+      "ticker": "6741.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -10.690506142033263,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "287A.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -10.725462304409684,
+      "watch_streak": 14
+    },
+    {
+      "ticker": "6737.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -10.738620005757948,
+      "watch_streak": 16
+    },
+    {
+      "ticker": "8015.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -10.785133054761376,
+      "watch_streak": 10
+    },
+    {
+      "ticker": "8151.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -10.790362861759895,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "6194.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -10.83410754533829,
+      "watch_streak": 6
+    },
+    {
+      "ticker": "8015.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -11.256834478140798,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "5020.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -11.571103060322386,
+      "watch_streak": 6
+    },
+    {
+      "ticker": "5332.T",
+      "pattern": "double_bottom",
+      "breakout_pct": -11.693800876643712,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "6454.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -11.874102357515747,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "7725.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -12.079348931841238,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "5393.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -12.60068188582929,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "5019.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -14.751132232466546,
+      "watch_streak": 6
+    },
+    {
+      "ticker": "6785.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -17.562966526482406,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "7047.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -20.54187299926188,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "4368.T",
+      "pattern": "double_bottom",
+      "breakout_pct": -20.92957746478873,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "6856.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -21.765307813934555,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "6504.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -22.647457104071478,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "8707.T",
+      "pattern": "ascending_box",
+      "breakout_pct": -23.875914952945287,
+      "watch_streak": 30
+    },
+    {
+      "ticker": "3104.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -25.54724866685467,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "6768.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -25.81873961395882,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "4980.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -26.54364111679134,
+      "watch_streak": 4
+    },
+    {
+      "ticker": "7715.T",
+      "pattern": "double_bottom",
+      "breakout_pct": -27.37186477644493,
+      "watch_streak": 7
+    },
+    {
+      "ticker": "5991.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -30.018876873415635,
+      "watch_streak": 18
+    },
+    {
+      "ticker": "6323.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -36.16597168311348,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "6227.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -41.501603703056375,
+      "watch_streak": 2
+    },
+    {
+      "ticker": "4461.T",
+      "pattern": "ascending_triangle",
+      "breakout_pct": -44.61253372034862,
+      "watch_streak": 2
+    }
+  ],
+  "watch_cards": [
+    {
+      "ticker": "9110.T",
+      "name": "ＮＳユナイテッド海運",
+      "sector33": "海運業",
+      "pattern": "ascending_box",
+      "neckline": 10540.0,
+      "close_t": 10540.0,
+      "atr_t": 24.045586567416432,
+      "breakout_pct": 0.0,
+      "pattern_low": 10480.0,
+      "height": 60.0,
+      "target": 10600.0,
+      "breakout_h": 0.0,
+      "up_pct": 0.5692599620493288,
+      "down_pct": -0.5692599620493399,
+      "rr": 0.9999999999999805,
+      "breakeven_win_rate": 0.5000000000000049,
+      "span": 31,
+      "l1_date": "2026-09-16",
+      "l1": 10480.0,
+      "l2_date": "2026-09-29",
+      "l2": 10500.0,
+      "l3_date": "2026-10-14",
+      "l3": 10510.0,
+      "h1_date": "2026-09-25",
+      "h1": 10540.0,
+      "h2_date": "2026-10-14",
+      "h2": 10540.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": 5.162458618379432e-18,
+      "lower_slope": 0.0001701220342058457,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 901455400.0,
+      "earnings_days": null,
+      "earnings_unknown": true,
+      "watch_streak": 1,
+      "to_neck_pct": 0.0
+    },
+    {
+      "ticker": "9110.T",
+      "name": "ＮＳユナイテッド海運",
+      "sector33": "海運業",
+      "pattern": "ascending_triangle",
+      "neckline": 10540.0,
+      "close_t": 10540.0,
+      "atr_t": 24.045586567416432,
+      "breakout_pct": 0.0,
+      "pattern_low": 10480.0,
+      "height": 60.0,
+      "target": 10600.0,
+      "breakout_h": 0.0,
+      "up_pct": 0.5692599620493288,
+      "down_pct": -0.5692599620493399,
+      "rr": 0.9999999999999805,
+      "breakeven_win_rate": 0.5000000000000049,
+      "span": 31,
+      "l1_date": "2026-09-16",
+      "l1": 10480.0,
+      "l2_date": "2026-09-29",
+      "l2": 10500.0,
+      "l3_date": "2026-10-14",
+      "l3": 10510.0,
+      "h1_date": "2026-09-25",
+      "h1": 10540.0,
+      "h2_date": "2026-10-14",
+      "h2": 10540.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": 5.162458618379432e-18,
+      "lower_slope": 0.0001701220342058457,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 901455400.0,
+      "earnings_days": null,
+      "earnings_unknown": true,
+      "watch_streak": 1,
+      "to_neck_pct": 0.0
+    },
+    {
+      "ticker": "8214.T",
+      "name": "ＡＯＫＩホールディングス",
+      "sector33": "小売業",
+      "pattern": "triple_bottom",
+      "neckline": 1780.0,
+      "close_t": 1780.0,
+      "atr_t": 30.57476319137685,
+      "breakout_pct": 0.0,
+      "pattern_low": 1651.0,
+      "height": 129.0,
+      "target": 1909.0,
+      "breakout_h": 0.0,
+      "up_pct": 7.247191011235965,
+      "down_pct": -7.247191011235953,
+      "rr": 1.0000000000000016,
+      "breakeven_win_rate": 0.49999999999999956,
+      "span": 35,
+      "l1_date": "2026-09-10",
+      "l1": 1675.0,
+      "l2_date": "2026-10-05",
+      "l2": 1651.0,
+      "l3_date": "2026-10-29",
+      "l3": 1684.0,
+      "h1_date": "2026-09-28",
+      "h1": 1753.0,
+      "h2_date": "2026-10-19",
+      "h2": 1780.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": null,
+      "lower_slope": null,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 259159850.0,
+      "earnings_days": 1.0,
+      "earnings_unknown": false,
+      "watch_streak": 2,
+      "to_neck_pct": 0.0
+    },
+    {
+      "ticker": "8214.T",
+      "name": "ＡＯＫＩホールディングス",
+      "sector33": "小売業",
+      "pattern": "inverse_hs",
+      "neckline": 1780.0,
+      "close_t": 1780.0,
+      "atr_t": 30.57476319137685,
+      "breakout_pct": 0.0,
+      "pattern_low": 1651.0,
+      "height": 129.0,
+      "target": 1909.0,
+      "breakout_h": 0.0,
+      "up_pct": 7.247191011235965,
+      "down_pct": -7.247191011235953,
+      "rr": 1.0000000000000016,
+      "breakeven_win_rate": 0.49999999999999956,
+      "span": 35,
+      "l1_date": "2026-09-10",
+      "l1": 1675.0,
+      "l2_date": "2026-10-05",
+      "l2": 1651.0,
+      "l3_date": "2026-10-29",
+      "l3": 1684.0,
+      "h1_date": "2026-09-28",
+      "h1": 1753.0,
+      "h2_date": "2026-10-19",
+      "h2": 1780.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": null,
+      "lower_slope": null,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 259159850.0,
+      "earnings_days": 1.0,
+      "earnings_unknown": false,
+      "watch_streak": 2,
+      "to_neck_pct": 0.0
+    },
+    {
+      "ticker": "8160.T",
+      "name": "木曽路",
+      "sector33": "小売業",
+      "pattern": "inverse_hs",
+      "neckline": 2556.0,
+      "close_t": 2554.0,
+      "atr_t": 49.68349631399559,
+      "breakout_pct": -0.07824726134585402,
+      "pattern_low": 2266.0,
+      "height": 290.0,
+      "target": 2846.0,
+      "breakout_h": -0.006896551724137931,
+      "up_pct": 11.433046202036024,
+      "down_pct": -11.276429130775256,
+      "rr": 1.0138888888888888,
+      "breakeven_win_rate": 0.496551724137931,
+      "span": 41,
+      "l1_date": "2026-09-02",
+      "l1": 2440.0,
+      "l2_date": "2026-10-07",
+      "l2": 2266.0,
+      "l3_date": "2026-10-29",
+      "l3": 2388.0,
+      "h1_date": "2026-09-04",
+      "h1": 2498.0,
+      "h2_date": "2026-10-23",
+      "h2": 2556.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": null,
+      "lower_slope": null,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 257342315.0,
+      "earnings_days": 3.0,
+      "earnings_unknown": false,
+      "watch_streak": 2,
+      "to_neck_pct": 0.0783085356303781
+    },
+    {
+      "ticker": "4812.T",
+      "name": "電通総研",
+      "sector33": "情報・通信業",
+      "pattern": "ascending_triangle",
+      "neckline": 2875.9999999999995,
+      "close_t": 2872.0,
+      "atr_t": 7.4603210058720695,
+      "breakout_pct": -0.13908205841445254,
+      "pattern_low": 2859.0,
+      "height": 16.999999999999545,
+      "target": 2892.999999999999,
+      "breakout_h": -0.23529411764703836,
+      "up_pct": 0.7311977715877216,
+      "down_pct": -0.4526462395543218,
+      "rr": 1.6153846153845512,
+      "breakeven_win_rate": 0.38235294117648,
+      "span": 27,
+      "l1_date": "2026-09-25",
+      "l1": 2859.0,
+      "l2_date": "2026-10-21",
+      "l2": 2866.0,
+      "l3_date": "2026-10-29",
+      "l3": 2867.0,
+      "h1_date": "2026-10-13",
+      "h1": 2876.0,
+      "h2_date": "2026-10-22",
+      "h2": 2876.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": 4.689039916998821e-18,
+      "lower_slope": 0.00012633613753222433,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 3683545795.0,
+      "earnings_days": null,
+      "earnings_unknown": true,
+      "watch_streak": 9,
+      "to_neck_pct": 0.13927576601668878
+    },
+    {
+      "ticker": "4812.T",
+      "name": "電通総研",
+      "sector33": "情報・通信業",
+      "pattern": "ascending_box",
+      "neckline": 2876.0,
+      "close_t": 2872.0,
+      "atr_t": 7.4603210058720695,
+      "breakout_pct": -0.13908205841446364,
+      "pattern_low": 2859.0,
+      "height": 17.0,
+      "target": 2893.0,
+      "breakout_h": -0.23529411764705882,
+      "up_pct": 0.7311977715877438,
+      "down_pct": -0.4526462395543218,
+      "rr": 1.6153846153846003,
+      "breakeven_win_rate": 0.3823529411764728,
+      "span": 27,
+      "l1_date": "2026-09-25",
+      "l1": 2859.0,
+      "l2_date": "2026-10-21",
+      "l2": 2866.0,
+      "l3_date": "2026-10-29",
+      "l3": 2867.0,
+      "h1_date": "2026-10-13",
+      "h1": 2876.0,
+      "h2_date": "2026-10-22",
+      "h2": 2876.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": 4.689039916998821e-18,
+      "lower_slope": 0.00012633613753222433,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 3683545795.0,
+      "earnings_days": null,
+      "earnings_unknown": true,
+      "watch_streak": 9,
+      "to_neck_pct": 0.139275766016711
+    },
+    {
+      "ticker": "8130.T",
+      "name": "サンゲツ",
+      "sector33": "卸売業",
+      "pattern": "ascending_triangle",
+      "neckline": 3240.000000000001,
+      "close_t": 3230.0,
+      "atr_t": 46.85681778593864,
+      "breakout_pct": -0.30864197530866555,
+      "pattern_low": 3095.0,
+      "height": 145.0000000000009,
+      "target": 3385.000000000002,
+      "breakout_h": -0.06896551724138515,
+      "up_pct": 4.798761609907176,
+      "down_pct": -4.179566563467496,
+      "rr": 1.1481481481481604,
+      "breakeven_win_rate": 0.4655172413793077,
+      "span": 18,
+      "l1_date": "2026-10-08",
+      "l1": 3095.0,
+      "l2_date": "2026-10-21",
+      "l2": 3155.0,
+      "l3_date": "2026-10-29",
+      "l3": 3115.0,
+      "h1_date": "2026-10-19",
+      "h1": 3210.0,
+      "h2_date": "2026-10-27",
+      "h2": 3225.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": 0.0007770007770008463,
+      "lower_slope": 0.0005627624421004032,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 373982200.0,
+      "earnings_days": 6.0,
+      "earnings_unknown": false,
+      "watch_streak": 5,
+      "to_neck_pct": 0.30959752321984
+    },
+    {
+      "ticker": "7944.T",
+      "name": "ローランド",
+      "sector33": "その他製品",
+      "pattern": "ascending_triangle",
+      "neckline": 3816.977611940299,
+      "close_t": 3805.0,
+      "atr_t": 77.93060712249753,
+      "breakout_pct": -0.31379832836405663,
+      "pattern_low": 3600.0,
+      "height": 216.97761194029908,
+      "target": 4033.955223880598,
+      "breakout_h": -0.055202063628549375,
+      "up_pct": 6.017220075705598,
+      "down_pct": -5.387647831800257,
+      "rr": 1.1168547506370645,
+      "breakeven_win_rate": 0.47239896818572524,
+      "span": 38,
+      "l1_date": "2026-09-11",
+      "l1": 3600.0,
+      "l2_date": "2026-10-09",
+      "l2": 3625.0,
+      "l3_date": null,
+      "l3": null,
+      "h1_date": "2026-09-07",
+      "h1": 3875.0,
+      "h2_date": "2026-09-28",
+      "h2": 3820.0,
+      "h3_date": "2026-10-16",
+      "h3": 3845.0,
+      "upper_slope": -0.00030070617450010515,
+      "lower_slope": 0.00040708324852432924,
+      "pole_pct": null,
+      "upper_scatter": 0.7365684575389987,
+      "adv_jpy": 290846975.0,
+      "earnings_days": 4.0,
+      "earnings_unknown": false,
+      "watch_streak": 12,
+      "to_neck_pct": 0.3147861219526593
+    },
+    {
+      "ticker": "9743.T",
+      "name": "丹青社",
+      "sector33": "サービス業",
+      "pattern": "inverse_hs",
+      "neckline": 1508.0,
+      "close_t": 1503.0,
+      "atr_t": 29.678514659277948,
+      "breakout_pct": -0.3315649867373982,
+      "pattern_low": 1356.0,
+      "height": 152.0,
+      "target": 1660.0,
+      "breakout_h": -0.03289473684210526,
+      "up_pct": 10.445775116433808,
+      "down_pct": -9.78043912175649,
+      "rr": 1.0680272108843545,
+      "breakeven_win_rate": 0.48355263157894723,
+      "span": 33,
+      "l1_date": "2026-09-14",
+      "l1": 1420.0,
+      "l2_date": "2026-10-08",
+      "l2": 1356.0,
+      "l3_date": "2026-10-29",
+      "l3": 1451.0,
+      "h1_date": "2026-09-17",
+      "h1": 1491.0,
+      "h2_date": "2026-10-27",
+      "h2": 1508.0,
+      "h3_date": null,
+      "h3": null,
+      "upper_slope": null,
+      "lower_slope": null,
+      "pole_pct": null,
+      "upper_scatter": null,
+      "adv_jpy": 442127260.0,
+      "earnings_days": null,
+      "earnings_unknown": true,
+      "watch_streak": 2,
+      "to_neck_pct": 0.3326679973386648
+    }
+  ]
+}
