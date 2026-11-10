@@ -177,6 +177,52 @@ class NoFutureLeakTest(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class ScaleCheckTest(unittest.TestCase):
+    """再生結果と store の目盛りが合っているか（§16.6）。"""
+
+    def test_matching_scale_passes(self):
+        df = build({1: ENTRY_BAR})
+        r = early_mod.early_one(df, 0, base_row(close_t=float(df["Close"].iloc[0])))
+        self.assertTrue(r["scale_ok"])
+        self.assertEqual(r["scale_reason"], "")
+        self.assertAlmostEqual(r["store_close_t"], float(df["Close"].iloc[0]))
+
+    def test_close_t_revised_fails(self):
+        """分割で store 側だけ調整された行。**T の終値がずれる。**"""
+        df = build({1: ENTRY_BAR})
+        store_close = float(df["Close"].iloc[0])
+        r = early_mod.early_one(df, 0, base_row(close_t=store_close * 3.0))
+        self.assertFalse(r["scale_ok"])
+        self.assertIn("T の終値", r["scale_reason"])
+
+    def test_tolerance_is_the_store_revision_tolerance(self):
+        df = build({1: ENTRY_BAR})
+        c = float(df["Close"].iloc[0])
+        inside = early_mod.early_one(
+            df, 0, base_row(close_t=c * (1 + early_mod.SCALE_TOL * 0.9)))
+        outside = early_mod.early_one(
+            df, 0, base_row(close_t=c * (1 + early_mod.SCALE_TOL * 1.1)))
+        self.assertTrue(inside["scale_ok"])
+        self.assertFalse(outside["scale_ok"])
+
+    def test_split_inside_the_window_fails(self):
+        """**T ではずれず、評価窓の途中で目盛りが変わる行**も落とす。"""
+        bars = {1: ENTRY_BAR}
+        for i in range(5, 25):          # T+5 以降を 1/3 にする（分割）
+            bars[i] = (33.7, 35.0, 33.5, 33.7)
+        df = build(bars)
+        r = early_mod.early_one(df, 0, base_row(close_t=float(df["Close"].iloc[0])))
+        self.assertFalse(r["scale_ok"])
+        self.assertIn("評価窓の中", r["scale_reason"])
+
+    def test_row_is_kept_not_dropped(self):
+        """**落とすのは集計から。行は残す**（証拠を残す）。"""
+        df = build({1: ENTRY_BAR})
+        r = early_mod.early_one(df, 0, base_row(close_t=float(df["Close"].iloc[0]) * 3))
+        self.assertFalse(r["scale_ok"])
+        self.assertNotEqual(r["early_outcome"], "")
+
+
 class QuantileTest(unittest.TestCase):
     def setUp(self):
         self.edges = np.asarray([-np.inf, 0.1, 0.25, 0.5, 0.95, np.inf])
@@ -196,6 +242,7 @@ class QuantileTest(unittest.TestCase):
 
 
 def summary_frame():
+    """最後の 1 行は目盛りが合っていない行（集計から外れる）。"""
     return pd.DataFrame([
         # 両方に出口がある 3 行
         {"q": "Q1", "cur_outcome": OUTCOME_TIMEOUT, "early_outcome": OUTCOME_TIMEOUT,
@@ -211,13 +258,19 @@ def summary_frame():
         {"q": "Q1", "cur_outcome": OUTCOME_TIMEOUT, "early_outcome": "",
          "cur_pnl_pct": 99.0, "early_pnl_pct": np.nan, "cur_exit_day": 20,
          "early_exit_day": pd.NA, "t1_below_entry": True},
-    ])
+        # 目盛りが合っていない行（**両方に出口はあるが母数から外す**）
+        {"q": "Q1", "cur_outcome": OUTCOME_TIMEOUT, "early_outcome": OUTCOME_TIMEOUT,
+         "cur_pnl_pct": 250.0, "early_pnl_pct": 250.0, "cur_exit_day": 20,
+         "early_exit_day": 20, "t1_below_entry": False, "scale_ok": False,
+         "scale_reason": "T の終値が再生結果とずれている"},
+    ]).fillna({"scale_ok": True, "scale_reason": ""})
 
 
 class SummarizeTest(unittest.TestCase):
     def test_uses_rows_with_both_outcomes(self):
         r = early_mod.summarize("探索窓", "Q1", summary_frame()[lambda d: d["q"] == "Q1"])
         self.assertEqual(r["n"], 2)
+        self.assertEqual(r["n_scale_bad"], 1)
         self.assertEqual(r["n_cur_only"], 1)
         self.assertEqual(r["n_early_only"], 0)
         self.assertAlmostEqual(r["cur_mean_pnl"], -4.0)
@@ -262,6 +315,8 @@ class ByQuantileTest(unittest.TestCase):
         got = early_mod.excluded_count(summary_frame())
         self.assertEqual(got["n_excluded"], 1)
         self.assertEqual(got["n_no_quantile"], 0)
+        self.assertEqual(got["n_scale_bad"], 1)
+        self.assertEqual(sum(got["scale_reasons"].values()), 1)
 
 
 class PathTest(unittest.TestCase):
