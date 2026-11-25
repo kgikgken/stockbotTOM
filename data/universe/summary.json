@@ -1,15 +1,15 @@
 {
  "equities": 3781,
  "with_data": 3652,
- "passes": 1354,
- "fail_adv": 2256,
- "fail_price": 241,
+ "passes": 1352,
+ "fail_adv": 2263,
+ "fail_price": 238,
  "fail_history": 0,
  "fail_split": 10,
  "fail_fresh": 29,
  "by_market": {
-  "Prime": 1169,
-  "Standard": 104,
-  "Growth": 81
+  "Prime": 1167,
+  "Standard": 102,
+  "Growth": 83
  }
 }
